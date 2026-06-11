@@ -1,0 +1,42 @@
+## Interface: 120005
+## Title: FactionRP
+## Notes: Cross-faction RP profile sharing - a continuation of CrossRP.
+## Author: FactionRP
+## Version: 0.1.0
+## SavedVariables: FactionRPDB
+## OptionalDeps: totalRP3
+## IconTexture: Interface\ICONS\INV_Misc_GroupLooking
+
+# --- Embedded libraries ---
+Libs\LibStub\LibStub.lua
+Libs\LibDeflate\LibDeflate.lua
+Libs\LibSerialize\LibSerialize.lua
+
+# --- Foundation (Phase 1) ---
+src\Class.lua
+src\Constants.lua
+src\Util.lua
+src\Core.lua
+
+# --- Data (Phase 2) ---
+src\Cache.lua
+
+# --- Profile adapters (Phase 3) ---
+src\ProfileAdapter.lua
+src\TRP3Adapter.lua
+
+# --- Wire format (Phase 4) ---
+src\Serializer.lua
+
+# --- Transport (Phase 5) ---
+src\Comms.lua
+
+# --- Gossip engine (Phase 6) ---
+src\Broadcast.lua
+
+# --- Selection & display (Phase 7) ---
+src\Scanner.lua
+src\Tooltip.lua
+
+# --- Debug (Phase 8) ---
+src\Debug.lua
