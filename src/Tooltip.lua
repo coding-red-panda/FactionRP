@@ -31,24 +31,29 @@ function Tooltip:tryInject(unit)
 	-- Passing it to UnitIsPlayer and friends during our (tainted) execution
 	-- errors, so bail out immediately. The detection global is `issecretvalue`
 	-- (guarded for clients predating the secret-values system).
-	if issecretvalue and issecretvalue(unit) then
+	if issecretvalue(unit) then
 		return
 	end
+
 	if not unit or not UnitIsPlayer(unit) or not ns.Util.isOppositeFaction(unit) then
 		return
 	end
+
 	local guid = UnitGUID(unit)
 	if not guid then
 		return
 	end
+
 	local entry = ns.cache:get(guid)
 	if not entry then
 		return
 	end
+
 	local adapter = ns.getAdapter(entry.addon)
 	if not adapter or not adapter:isAvailable() then
 		return
 	end
+
 	-- The unit is present, so pass its class id for correct name colouring.
 	local classID = select(3, UnitClass(unit))
 	adapter:inject(entry.unitID, entry.data, classID)
