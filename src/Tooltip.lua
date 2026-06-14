@@ -27,6 +27,11 @@ end
 
 --- If `unit` is an opposite-faction player we have cached, inject the profile.
 function Tooltip:tryInject(unit)
+	-- During combat (e.g. in dungeons) the unit token can be a "secret" value.
+	-- Passing it to UnitIsPlayer and friends errors, so bail out immediately.
+	if issecret and issecret(unit) then
+		return
+	end
 	if not unit or not UnitIsPlayer(unit) or not ns.Util.isOppositeFaction(unit) then
 		return
 	end
