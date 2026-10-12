@@ -63,7 +63,7 @@ local function pickText(t)
 end
 
 local function logFanout(community, guild, pinned)
-	ns.Print(("|cffffd200[broadcast]|r whispers — community: %s | guild: %s | pinned: %s"):format(
+	ns.Print(("|cffffd200[fanout]|r whispers — community: %s | guild: %s | pinned: %s"):format(
 		pickText(community), pickText(guild), pickText(pinned)
 	))
 end

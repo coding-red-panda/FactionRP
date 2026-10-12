@@ -18,7 +18,6 @@
 --
 --   local rex = Dog:new("Rex")                 -- builds the object, runs :init
 --   rex:speak()            --> "Woof"
---   rex:isInstanceOf(Animal) --> true
 
 local _, ns = ...
 
@@ -34,8 +33,6 @@ function ns.Class(name, base)
 	--     instance -> class -> base -> base.base -> ...
 	local class = setmetatable({}, base and { __index = base } or nil)
 	class.__index = class
-	class.__name = name
-	class.__super = base
 
 	--- Construct an instance of this class.
 	-- `self` is the class the method was invoked on, so subclasses that inherit
@@ -47,21 +44,6 @@ function ns.Class(name, base)
 			instance:init(...)
 		end
 		return instance
-	end
-
-	--- Test whether this instance descends from `klass`.
-	-- Walks the inheritance chain so subclasses report true for their ancestors.
-	-- @param klass table A class returned by ns.Class.
-	-- @return boolean
-	function class.isInstanceOf(self, klass)
-		local current = getmetatable(self)
-		while current do
-			if current == klass then
-				return true
-			end
-			current = current.__super
-		end
-		return false
 	end
 
 	return class

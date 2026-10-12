@@ -345,10 +345,11 @@ function Broadcast:ctlHi()
 	return self._hi
 end
 
---- Send a control chunk-list to one peer, addressing by medium: BNet goes to
--- the gameAccountID; WHISPER and CHANNEL replies both ride a whisper to the
--- named sender.
-function Broadcast:sendCtlToPeer(chunks, medium, target)
+--- Send a chunk-list to one peer, addressing by medium: BNet goes to the
+-- gameAccountID; WHISPER and CHANNEL replies both ride a whisper to the
+-- named sender. Used for control replies (ACK/OK/NOK/HI) and the granted
+-- serve's data leg.
+function Broadcast:sendToPeer(chunks, medium, target)
 	if medium == "BNET" then
 		return ns.comms:sendChunksBNet(chunks, target)
 	end
@@ -462,7 +463,7 @@ function Broadcast:serveData(serve)
 		data = encoded,
 	})
 	local chunks = Serializer.chunk(message)
-	self:sendCtlToPeer(chunks, serve.medium, serve.target)
+	self:sendToPeer(chunks, serve.medium, serve.target)
 	if ns.statsOutMessage then
 		ns.statsOutMessage(#message, #chunks, serve.subject, "serve")
 	end
@@ -540,7 +541,7 @@ function Broadcast:onControl(msg, context)
 			if pending >= C.SERVE_PENDING_CAP then
 				return
 			end
-			if self:sendCtlToPeer(self:buildCtl("ACK", arg), context.medium, target) then
+			if self:sendToPeer(self:buildCtl("ACK", arg), context.medium, target) then
 				local key = serveKey(context, arg)
 				self.pendingServes[key] = {
 					subject = arg, unitID = unitID,
@@ -561,7 +562,7 @@ function Broadcast:onControl(msg, context)
 		local won = req
 			and req.state == "open"
 			and target
-			and self:sendCtlToPeer(self:buildCtl("OK", arg), context.medium, target)
+			and self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
 		if won then
 			req.winner = { medium = context.medium, target = target }
 			req.state = "awaiting-data"
@@ -574,7 +575,7 @@ function Broadcast:onControl(msg, context)
 			end
 		else
 			-- No pending request (or already granted): stand the server down.
-			self:sendCtlToPeer(self:buildCtl("NOK", arg), context.medium, target)
+			self:sendToPeer(self:buildCtl("NOK", arg), context.medium, target)
 			if leg then
 				leg("nok", 1)
 			end
@@ -696,7 +697,7 @@ function Broadcast:onMessage(raw, context)
 		if req.winner
 			and (req.winner.medium ~= context.medium or req.winner.target ~= src)
 		then
-			self:sendCtlToPeer(
+			self:sendToPeer(
 				self:buildCtl("NOK", msg.subject),
 				req.winner.medium, req.winner.target
 			)

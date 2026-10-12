@@ -1,6 +1,7 @@
 -- Tooltip.lua
 --
--- Enriches tooltips for opposite-faction players using cached gossip. We do not
+-- Enriches tooltips for opposite-faction players using cached profile data.
+-- We do not
 -- render anything ourselves: we inject the cached profile into the source RP
 -- AddOn's register, which then refreshes and draws its own tooltip (TRP3, for
 -- example, re-renders the shown tooltip on REGISTER_DATA_UPDATED). This reuses

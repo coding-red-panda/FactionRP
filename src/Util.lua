@@ -34,35 +34,6 @@ function Util.newPool(cap)
 	end
 end
 
---- Split a string on a literal (non-pattern) separator.
--- The optional `maxFields` caps the number of returned fields: once that many
--- have been produced, the entire remaining string (including any further
--- separators) becomes the final field. This is important for our wire format,
--- where the trailing PROFILE-DATA field may itself legitimately contain "||".
--- @param input     string  The string to split.
--- @param sep       string  Literal separator (treated verbatim, not as a pattern).
--- @param maxFields number?  Optional maximum number of fields to produce.
--- @return table A list of string fields.
-function Util.split(input, sep, maxFields)
-	local fields = {}
-	local start = 1
-	while true do
-		-- If we are one field short of the cap, the rest is the last field.
-		if maxFields and #fields == maxFields - 1 then
-			fields[#fields + 1] = input:sub(start)
-			break
-		end
-		local s, e = input:find(sep, start, true) -- plain = true: literal match
-		if not s then
-			fields[#fields + 1] = input:sub(start)
-			break
-		end
-		fields[#fields + 1] = input:sub(start, s - 1)
-		start = e + 1
-	end
-	return fields
-end
-
 --- Trim leading/trailing whitespace.
 -- @param s string
 -- @return string

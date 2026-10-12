@@ -8,18 +8,18 @@
 --
 -- Because the RP AddOn fetches a freshly-seen same-faction profile
 -- asynchronously, we also listen for the adapter's "profile updated" signal and
--- originate when the data actually lands.
+-- re-publish when the data actually lands.
 --
 -- GUARD: every profile we *inject* (Tooltip module) also lands in the adapter's
--- register and therefore fires the same "profile updated" signal. Without a
--- break in that loop, one gossip message becomes: relay -> inject ->
--- REGISTER_DATA_UPDATED -> re-extract -> re-originate -> re-broadcast, and each
--- peer repeats it — churning the cache, flooding the comm channel, and forcing
+-- register and therefore fires the same "profile updated" signal. Under the
+-- pull model a re-publish only reaches the cache — but without a break in the
+-- loop, one served profile becomes: inject -> REGISTER_DATA_UPDATED ->
+-- re-extract -> re-publish, burning extraction work per injection and forcing
 -- TRP3 to rebuild scan pins/tooltip groups from data whose profile bindings
 -- change underneath it (observed as duplicated map-scan results, issue #1).
--- We therefore only re-originate for units the user actually selected
+-- We therefore only re-publish for units the user actually selected
 -- (mouseover/target), and only when the profile's content version differs from
--- what we last originated (self-triggered writes are identical, so they
+-- what we last published (self-triggered writes are identical, so they
 -- collapse to a no-op instead of cycling).
 
 local _, ns = ...
@@ -29,20 +29,20 @@ local Scanner = ns.Class("Scanner")
 ns.Scanner = Scanner
 
 function Scanner:init()
-	-- Units the user has selected this session that we may originate for.
+	-- Units the user has selected this session that we may publish for.
 	-- [unitID] = guid. Only ever holds same-faction units; self is handled
 	-- explicitly via the adapter's player unit id.
 	self.selected = {}
 
 	-- Profiles reported as received over the RP AddOn's own comm channels,
-	-- queued for re-broadcast. receivedPending maps unitID -> pooled
+	-- queued for re-publication. receivedPending maps unitID -> pooled
 	-- { adapter, readyAt } record; receivedQueue is the FIFO order, capped so
-	-- sustained receipt bursts cannot flood the send queue.
+	-- a sustained receipt burst cannot queue unboundedly.
 	self.receivedPending = {}
 	self.receivedQueue = {}
 	self.pendingAcquire, self.pendingRelease = ns.Util.newPool(C.RECEIVED_ORIGIN_QUEUE)
 
-	-- Last content version we originated per unit ID. Used to collapse
+	-- Last content version we published per unit ID. Used to collapse
 	-- update-event feedback (see header comment) to a no-op.
 	-- [unitID] = contentVersion.
 	self.lastSharedVersion = {}
@@ -71,14 +71,14 @@ function Scanner:start()
 	-- via onAdapterUpdate's self handling).
 	self:shareSelf()
 
-	-- Drain received-profile re-broadcasts at a bounded rate so this trigger
-	-- cannot, on its own, overwhelm the paced send queue.
+	-- Drain received-profile publishes at a bounded rate so a receipt burst
+	-- cannot, on its own, produce an extraction storm.
 	C_Timer.NewTicker(C.RECEIVED_ORIGIN_INTERVAL, function()
 		self:drainReceived()
 	end)
 end
 
---- Attempt to broadcast the local player's own profile.
+--- Publish the local player's own profile to the cache.
 function Scanner:shareSelf()
 	local adapter = ns.getAvailableAdapter()
 	if not adapter then
@@ -96,10 +96,8 @@ function Scanner:onSelect(unit)
 	if not UnitIsPlayer(unit) or UnitIsUnit(unit, "player") then
 		return -- non-players and ourselves are handled elsewhere
 	end
-	-- Opposite-faction players have no authoritative local data to originate;
-	-- they are enriched for display only (Tooltip module).
 	-- Opposite-faction players have no authoritative local data: this is the
-	-- pull-exchange trigger — ask the mesh for their profile (deduped and
+	-- pull-exchange trigger: ask the mesh for their profile (deduped and
 	-- rate-limited inside requestProfile).
 	if ns.Util.isOppositeFaction(unit) then
 		local adapter = ns.getAvailableAdapter()
@@ -125,9 +123,9 @@ end
 
 --- Handle an asynchronous profile update from an adapter.
 -- NOTE: this fires for ALL register writes, including our own injections (see
--- header). Only re-share for units the user actually selected this session,
--- and skip when the content version is unchanged since our last originate —
--- otherwise our own injection writes would loop back around as new gossip.
+-- header). Only re-publish for units the user actually selected this session,
+-- and skip when the content version is unchanged since our last publish,
+-- otherwise our own injection writes would churn the cache for nothing.
 function Scanner:onAdapterUpdate(adapter, unitID)
 	local guid
 	if unitID == adapter:getPlayerUnitID() then
@@ -142,12 +140,12 @@ end
 
 --- Handle an adapter's "profile data received over the network" signal.
 -- Receipts fire per section while data is still landing, so rather than
--- sharing immediately we queue the unit with a jittered ready time: this
--- collapses the burst into one broadcast AND staggers simultaneous
--- originators, letting the first peer copy to reach us suppress ours.
+-- extracting immediately we queue the unit with a jittered ready time: this
+-- collapses the burst into a single extraction+publish, and the jitter keeps
+-- several simultaneous receipts from all landing on the same tick.
 function Scanner:onAdapterReceived(adapter, unitID)
 	if not unitID or unitID == adapter:getPlayerUnitID() then
-		return -- never re-broadcast ourselves
+		return -- never re-publish our own profile
 	end
 
 	local readyAt = GetTime() + C.RECEIVED_DEBOUNCE + math.random() * C.RECEIVED_JITTER
@@ -193,7 +191,7 @@ function Scanner:onAdapterReceived(adapter, unitID)
 	end
 end
 
---- Fire at most one ready received-profile broadcast per tick.
+--- Fire at most one ready received-profile publish per tick.
 function Scanner:drainReceived()
 	local now = GetTime()
 	local i = 1
@@ -227,19 +225,19 @@ function Scanner:drainReceived()
 	end
 end
 
---- Extract the profile and hand it to the broadcaster (which de-dups).
--- The broadcaster's cache is content-version-aware, so unchanged content
--- collapses to REFRESHED (no re-broadcast); that alone does not fully close
--- the loop, though: repeated REFRESHED results keep the cache entry alive
--- forever (TTL extension) and cost an extraction+encode each tick, so we also
--- stop sharing early when the version matches what we last originated.
+--- Extract the profile and hand it to Broadcast:publish (which de-dups).
+-- The cache is content-version-aware, so unchanged content collapses to
+-- REFRESHED; that alone does not fully close the loop, though: repeated
+-- REFRESHED results keep the cache entry alive forever (TTL extension) and
+-- cost an extraction each tick, so we also stop publishing early when the
+-- version matches what we last published.
 function Scanner:share(adapter, unitID, guid)
 	local profile = adapter:extract(unitID)
 	if not profile then
 		return
 	end
 	if self.lastSharedVersion[unitID] == profile.contentVersion then
-		return -- nothing new since our last originate (e.g. our own injection)
+		return -- nothing new since our last publish (e.g. our own injection)
 	end
 	self.lastSharedVersion[unitID] = profile.contentVersion
 	ns.broadcast:publish(guid, unitID, profile)

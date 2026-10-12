@@ -207,7 +207,7 @@ function Comms:sendDescriptor(desc)
 		return
 	end
 	-- Routing through Chomp (shipped by TRP3, and hence by every client
-	-- running any major RP AddOn) means our bulk gossip traffic is coalesced
+	-- running any major RP AddOn) means our bulk addon traffic is coalesced
 	-- into the same global ChatThrottleLib queues as everyone else's addon
 	-- traffic. Raw C_ChatInfo.SendAddonMessage bursts from the queue can
 	-- stall other add-ons' queued CHANNEL messages (notably TRP3's C_SCAN

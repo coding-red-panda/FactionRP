@@ -81,8 +81,8 @@ C.REASSEMBLY_TIMEOUT = 60
 
 -- How long (seconds) the online Battle.net game-account list is memoized.
 -- Enumerating WoW BNet friends allocates client tables per account, so the
--- fanout reuses a cached list; gossip tolerates a few seconds of presence
--- staleness.
+-- REQ fanout reuses a cached list; a few seconds of presence staleness is
+-- tolerable.
 C.BNET_MEMO = 15
 
 -- BNet peer confirmation (FRP1 HELLO/HI handshake). Data legs go only to
@@ -123,23 +123,25 @@ C.CACHE_TTL = 300
 -- How often (seconds) the cache sweeps and removes expired entries.
 C.CACHE_SWEEP_INTERVAL = 60
 
--- Received-profile re-broadcast ---------------------------------------------
+-- Received-profile re-publish ------------------------------------------------
 --
 -- When the RP AddOn reports profile data arriving over its own comm channels
--- (see ProfileAdapter:registerReceivedListener), the Scanner re-broadcasts it
--- through the normal originate pipeline. These values bound how much extra
--- traffic that trigger can produce:
+-- (see ProfileAdapter:registerReceivedListener), the Scanner re-extracts it
+-- and publishes it to the local cache so peers can request it. Under the pull
+-- model this produces no wire traffic; these values bound the extraction
+-- work that trigger can produce:
 --
 -- Receipts arrive as several per-section messages; we coalesce them by waiting
--- RECEIVED_DEBOUNCE seconds after the last one. A further random delay of up to
--- RECEIVED_JITTER seconds staggers simultaneous originators so the first peer
--- copy to reach us suppresses ours via the cache's REFRESHED path.
+-- RECEIVED_DEBOUNCE seconds after the last one. A further random delay of up
+-- to RECEIVED_JITTER seconds staggers simultaneous updates so they do not all
+-- land on the same drain tick.
 C.RECEIVED_DEBOUNCE = 1.5
 C.RECEIVED_JITTER = 4
 
--- Received-trigger broadcasts drain through a bounded pending queue: at most
--- one is fired per RECEIVED_ORIGIN_INTERVAL seconds, and the queue holds at
--- most RECEIVED_ORIGIN_QUEUE entries (the oldest are dropped on overflow).
+-- Received-trigger publishes drain through a bounded pending queue: at most
+-- one extraction runs per RECEIVED_ORIGIN_INTERVAL seconds, and the queue
+-- holds at most RECEIVED_ORIGIN_QUEUE entries (the oldest are dropped on
+-- overflow).
 C.RECEIVED_ORIGIN_INTERVAL = 5
 C.RECEIVED_ORIGIN_QUEUE = 20
 
@@ -179,8 +181,8 @@ C.ROSTER_SLICE = 40
 -- out instead of waiting a full memo window.
 C.ROSTER_RETRY = 5
 
--- Injection into the RP AddOn's register (populating its directory as gossip
--- arrives) is queued: register writes fire the AddOn's own update/UI events,
+-- Injection into the RP AddOn's register (populating its directory as
+-- profiles arrive) is queued: register writes fire the AddOn's own update/UI events,
 -- so bursts are amortized at INJECT_BURST entries per INJECT_INTERVAL.
 C.INJECT_INTERVAL = 0.5
 C.INJECT_BURST = 2
@@ -212,15 +214,6 @@ C.STATS_RATE_WINDOW = 60 -- seconds covered by the rolling rate window
 C.STATS_RATE_BUCKETS = 12 -- buckets the window is divided into
 
 -- Profiles ------------------------------------------------------------------
-
--- The profile sections we replicate in v1. These mirror the section keys used
--- by TRP3's register so the TRP3 adapter can map directly onto them.
--- (ABOUT is intentionally excluded from v1 per the README.)
-C.INFO_TYPE = {
-	CHARACTERISTICS = "characteristics",
-	CHARACTER = "character",
-	MISC = "misc",
-}
 
 -- Identifiers for the AddOn a profile originated from. Stored on every cache
 -- entry and sent on the wire so the receiver knows which adapter to use.

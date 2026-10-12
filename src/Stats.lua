@@ -122,21 +122,6 @@ local function median(t)
 	return (copy[mid] + copy[mid + 1]) / 2
 end
 
---- Smallest live entry of a reservoir.
-local function reservoirMin(t)
-	local n = t.n
-	if n == 0 then
-		return 0
-	end
-	local m = t[1]
-	for i = 2, n do
-		if t[i] < m then
-			m = t[i]
-		end
-	end
-	return m
-end
-
 --- Largest live entry of a reservoir.
 local function reservoirMax(t)
 	local n = t.n

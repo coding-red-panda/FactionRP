@@ -74,9 +74,10 @@ function ProfileAdapter:registerUpdateListener(callback) -- luacheck: ignore
 end
 
 --- Subscribe to "profile data for this unit arrived over the RP AddOn's own
--- network channels" notifications, so the Scanner can re-broadcast it through
--- the FactionRP gossip network. The callback MUST NOT fire for data injected
--- by FactionRP itself (that would loop), only for genuine network receipts.
+-- network channels" notifications, so the Scanner can re-extract and publish
+-- it into the local cache (servable to peers under the pull model). The
+-- callback MUST NOT fire for data injected by FactionRP itself (that would
+-- loop), only for genuine network receipts.
 -- Optional; the default is a no-op for AddOns without such a signal.
 -- @param callback function Invoked as callback(unitID).
 function ProfileAdapter:registerReceivedListener(callback) -- luacheck: ignore

@@ -233,7 +233,7 @@ function TRP3Adapter:registerUpdateListener(callback)
 	end)
 end
 
---- Hook TRP3's profile-receipt signals so the Scanner can re-broadcast data
+--- Hook TRP3's profile-receipt signals so the Scanner can re-publish data
 --- that arrived over TRP3's own comm channels. Two sources:
 ---   * REGISTER_DATA_RECEIVED: TRP3 exchange protocol section receipts.
 ---   * msp.callback.received: MSP profiles merged from non-TRP3 RP AddOns.

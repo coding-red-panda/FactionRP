@@ -1,7 +1,7 @@
 -- Cache.lua
 --
 -- The profile cache: a GUID-keyed store of profiles we have observed or
--- received, with a time-to-live and the version logic that drives gossip
+-- received, with a time-to-live and the version logic that drives
 -- de-duplication.
 --
 -- Each entry is a plain table:
@@ -27,7 +27,7 @@ local Cache = ns.Class("Cache")
 ns.Cache = Cache
 
 -- Result codes returned by :tryStore, describing what happened. Only NEW and
--- UPDATED represent a meaningful change that should be re-broadcast.
+-- UPDATED represent a meaningful change worth injecting into the register.
 Cache.RESULT = {
 	NEW = "new", -- first time we have seen this subject
 	UPDATED = "updated", -- content changed and the copy is not stale
@@ -50,11 +50,11 @@ local function isExpired(entry, now)
 	return (now - entry.added) > C.CACHE_TTL
 end
 
---- Attempt to store a candidate profile, applying the gossip de-dup rules.
+--- Attempt to store a candidate profile, applying the de-dup rules.
 --
--- Rules (see README "Broadcast Flow"):
+-- Rules (see doc/protocol.md):
 --   * No existing entry            -> store (NEW).
---   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED), do not re-broadcast.
+--   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED), not new content.
 --   * Incoming ORIGIN-TIME older   -> ignore (REJECTED).
 --   * Otherwise (changed & newer)  -> store (UPDATED).
 --
