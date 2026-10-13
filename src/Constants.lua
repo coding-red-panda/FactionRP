@@ -67,7 +67,10 @@ C.SEND_QUEUE_CAP = 384
 -- control-protocol revision for forward compatibility. Verbs:
 --   HELLO <version>  BNet peer probe ("I run FactionRP")
 --   HI <version>     handshake reply
---   REQ <subjectGuid>   pull-exchange request: "who has this profile?"
+--   REQ <subjectGuid> [unitID]   pull-exchange request: "who has this
+--      profile?" The optional unitID (subject's "Name-Realm") lets any
+--      server answer straight from the RP AddOn's register; the guid
+--      remains the wire identity carried back by ACK/OK/NOK.
 --   ACK <subjectGuid>   "I can serve it"
 --   OK  <subjectGuid>   grant: "you may send it"
 --   NOK <subjectGuid>   deny: "stand down" (late ACKs)
