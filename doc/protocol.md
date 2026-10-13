@@ -17,9 +17,29 @@ bytes) and travels over these mediums:
 | `WHISPER`  | `SendAddonMessage` to a player                   | cross-faction club members   |
 | `BNET`     | `BNSendGameData` to a `gameAccountID`            | BNet friends, any faction    |
 
-Cross-faction addon whispers are only possible between members of the same
-community/guild club — that is what makes club rosters the whisper relay
-pool. BNet works between any friends.
+`frp<N>comms` is an ordinary custom chat channel (like `/1`), joined via
+`JoinTemporaryChannel`. Custom channels are faction-scoped — an
+opposite-faction player can never be on it — so its job in the exchange is
+the **same-faction holder pool**: every faction-mate who previously pulled
+a subject is a candidate server, and one channel chunk reaches all of them.
+Channel sends echo back to the sender; those self-echoes are dropped on
+receipt (`sender == our GUID`).
+
+There is no "COMMUNITY" medium — a club cannot carry addon messages at
+all. Cross-faction addon whispers are only possible between members of the
+same community/guild club, so club membership is what makes `WHISPER`
+deliveries *legal* across factions; the roster exists purely to enumerate
+those whisper-reachable targets. BNet works between any friends and ignores
+faction entirely.
+
+**Every leg is a single hop.** The requester sends `REQ` on each medium
+itself; a recipient that can serve replies `ACK` and, if granted, sends the
+profile *directly* to the requester. "Relay" in this document means a
+reachable cross-faction *endpoint* — never a forwarder: no client relays or
+re-sends anything on behalf of another. A requester with no cross-faction
+clubs or friends therefore still gets full use of the channel and group
+legs — answering peers are faction-mates, so their reply whisper needs no
+shared club.
 
 Sends are routed through AddOn_Chomp's `SendAddonMessage`/`BNSendGameData`
 when available (raw ChatThrottleLib passthrough — the prefix and text reach
@@ -181,12 +201,14 @@ targets an opposite-faction player whose profile we do not hold fresh.
 
 ```
 requester                                candidate servers
-    │  REQ <guid> [unitID] ──────────────────► (channel + group +
-    │                                          confirmed BNet +
-    │                                          xfac whisper relays)
+    │  REQ <guid> [unitID] ──────────────────► (1 chunk on frp<N>comms —
+    │                                          all same-faction listeners
+    │                                          + group + confirmed BNet
+    │                                          + one whisper per proven
+    │                                          xfac relay)
     │                                          └ can extract? → ACK
     │                                            cannot?  → silent
-    │  ◄── ACK <guid> ── (first wins)
+    │  ◄── ACK <guid> ── (first wins, direct to requester)
     │  ── OK <guid> ──► winner only
     │  ── NOK <guid> ─► every later ACKer
     │  ◄── data envelope ── winner serves direct

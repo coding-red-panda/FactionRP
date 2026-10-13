@@ -74,9 +74,10 @@ after a granted request, using single-chunk FRP1 control messages
 
 1. **REQ \<guid\> [unitID]** — fanned out to: the same-faction channel, the
    group, *confirmed* Battle.net peers, and a capped rotating set of
-   opposite-faction club members by addon whisper (see "Community relays").
-   The unitID is the subject's register key ("Name-Realm"), so any holder
-   can answer straight from its RP AddOn's register.
+   opposite-faction club members by addon whisper (see "Request fanout" and
+   "Community relays"). The unitID is the subject's register key
+   ("Name-Realm"), so any holder can answer straight from its RP AddOn's
+   register.
 2. **ACK \<guid\>** — each recipient whose RP AddOn's register holds the
    profile replies. The subject's identity is consensus-checked first: every
    claim held for the guid (local cache, client player-info, club roster,
@@ -147,13 +148,30 @@ cross-faction club members double as discovery — a reply proves the AddOn.
 
 ### Request fanout
 There is no data broadcast: only single-chunk control messages fan out, and
-profile data moves once per exchange. A `REQ` goes to:
+profile data moves once per exchange. A pull's *subject* is always
+opposite-faction, but its *servers* need not be — every faction-mate who
+previously pulled the same subject is a holder. A `REQ` therefore goes to:
 
-* The hidden same-faction comm channel (joined via `JoinTemporaryChannel`)
-* Party/raid/instance addon messaging, when grouped
-* *Confirmed* Battle.net friends (see "Battle.net peer confirmation")
-* A capped set of opposite-faction community/guild members by whisper
-  (see "Community relays")
+* **The hidden same-faction comm channel** — `frp3comms`, an ordinary custom
+  chat channel (like `/1`) joined via `JoinTemporaryChannel`. Custom
+  channels are faction-scoped, so one chunk reaches *every* same-faction
+  FactionRP listener — the biggest pool of candidate servers. Channel sends
+  echo back to the sender and are dropped on receipt.
+* **Party/raid/instance addon messaging**, when grouped
+* ***Confirmed* Battle.net friends** (see "Battle.net peer confirmation") —
+  account-to-account, ignores faction entirely
+* **A capped set of opposite-faction community/guild members by whisper**
+  (see "Community relays"). There is no "community" medium — clubs can't
+  carry addon messages; shared membership is what makes a `WHISPER` send
+  *deliverable* cross-faction, and the roster only enumerates those targets.
+
+Every leg is a single hop: the requester sends each `REQ` itself, and a
+server's `ACK` and profile reply travel directly back to the requester.
+"Relay" means a reachable cross-faction *endpoint* — no client forwards
+messages for anyone else. That also means a requester with **no**
+cross-faction clubs or friends still gets served: the channel and group
+legs always fire, and answering faction-mates whisper back, which needs no
+shared membership.
 
 All chunk sends go through a paced internal queue — `C.SEND_RATE` chunks per
 second is the single outbound rate dial, released via a token bucket on the
