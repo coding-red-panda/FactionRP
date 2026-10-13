@@ -118,13 +118,14 @@ C.REQ_MAX_PENDING = 32   -- bound on outstanding requests
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
 
--- Outbound ACK breaker: once SERVE_ACK_LIMIT ACKs leave within
--- SERVE_ACK_WINDOW seconds we stop responding for SERVE_ACK_MUTE
--- seconds. REQs for our own GUID bypass the breaker: we are the
--- authoritative server for ourselves.
-C.SERVE_ACK_WINDOW = 30
-C.SERVE_ACK_LIMIT = 10
-C.SERVE_ACK_MUTE = 60
+-- Outbound serve breaker: once SERVE_RATE_LIMIT granted serves (ACKs we
+-- were OK'd on) land within SERVE_RATE_WINDOW seconds we stop answering
+-- REQs for SERVE_RATE_MUTE seconds. Only winning the ACK race counts,
+-- volunteering and losing is free. REQs for our own GUID bypass the
+-- breaker: we are the authoritative server for ourselves.
+C.SERVE_RATE_WINDOW = 30
+C.SERVE_RATE_LIMIT = 10
+C.SERVE_RATE_MUTE = 60
 
 -- Caching -------------------------------------------------------------------
 

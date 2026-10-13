@@ -77,11 +77,12 @@ function Broadcast:init()
 	self.pendingServes = {}
 	self.relayProbeAt = 0 -- last whisper probe burst
 
-	-- Outbound ACK breaker (fixed window): once SERVE_ACK_LIMIT ACKs leave
-	-- inside SERVE_ACK_WINDOW we stop answering REQs until ackMuteUntil.
-	self.ackWindowAt = 0
-	self.ackCount = 0
-	self.ackMuteUntil = 0
+	-- Outbound serve breaker (fixed window): once SERVE_RATE_LIMIT granted
+	-- serves land inside SERVE_RATE_WINDOW we stop answering REQs until
+	-- serveMuteUntil.
+	self.serveWindowAt = 0
+	self.serveCount = 0
+	self.serveMuteUntil = 0
 end
 
 function Broadcast:start()
@@ -641,31 +642,37 @@ function Broadcast:resolveSubject(guid, wireUnitID)
 	return unitID
 end
 
---- True while the ACK breaker is engaged. Resets the fixed window on expiry
--- (a fresh window also starts when the mute ends, since the mute outlasts
--- the window), so post-mute counting restarts clean.
-function Broadcast:ackThrottled(now)
-	if now < self.ackMuteUntil then
+--- True while the serve breaker is engaged. Resets the fixed window on
+-- expiry (a fresh window also starts when the mute ends, since the mute
+-- outlasts the window), so post-mute counting restarts clean.
+function Broadcast:serveThrottled(now)
+	if now < self.serveMuteUntil then
 		return true
 	end
-	if (now - self.ackWindowAt) >= C.SERVE_ACK_WINDOW then
-		self.ackWindowAt = now
-		self.ackCount = 0
+	if (now - self.serveWindowAt) >= C.SERVE_RATE_WINDOW then
+		self.serveWindowAt = now
+		self.serveCount = 0
 	end
 	return false
 end
 
---- Count a sent non-self ACK; on hitting the window limit, mute for
--- SERVE_ACK_MUTE and realign the window so counting restarts after unmute.
-function Broadcast:bumpAck(now)
-	self.ackCount = self.ackCount + 1
-	if self.ackCount >= C.SERVE_ACK_LIMIT then
-		self.ackMuteUntil = now + C.SERVE_ACK_MUTE
-		self.ackWindowAt = now
+--- Count a granted serve (our ACK was OK'd and real work committed). On
+-- hitting the window limit, mute for SERVE_RATE_MUTE and realign the
+-- window so counting restarts after unmute. Grants arriving while already
+-- muted were committed before the breaker engaged: their serve completes,
+-- but they neither count nor extend the mute.
+function Broadcast:bumpServe(now)
+	if now < self.serveMuteUntil then
+		return
+	end
+	self.serveCount = self.serveCount + 1
+	if self.serveCount >= C.SERVE_RATE_LIMIT then
+		self.serveMuteUntil = now + C.SERVE_RATE_MUTE
+		self.serveWindowAt = now
 		if ns.statsError then
 			ns.statsError("serve_throttled")
 		end
-		ns.debugPeer("serve throttled — " .. C.SERVE_ACK_LIMIT .. " acks/" .. C.SERVE_ACK_WINDOW .. "s reached")
+		ns.debugPeer("serve throttled — " .. C.SERVE_RATE_LIMIT .. " serves/" .. C.SERVE_RATE_WINDOW .. "s reached")
 	end
 end
 
@@ -755,9 +762,9 @@ function Broadcast:onControl(msg, context)
 			unitID = self:resolveSubject(arg, arg2)
 		end
 		local adapter = ns.getAvailableAdapter()
-		-- The ACK breaker never applies to requests for our own profile —
+		-- The serve breaker never applies to requests for our own profile —
 		-- we are the authoritative server for ourselves.
-		if not selfReq and self:ackThrottled(now) then
+		if not selfReq and self:serveThrottled(now) then
 			return
 		end
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
@@ -776,9 +783,6 @@ function Broadcast:onControl(msg, context)
 					subject = arg, unitID = unitID,
 					medium = context.medium, target = target, at = now,
 				}
-				if not selfReq then
-					self:bumpAck(now)
-				end
 				if leg then
 					leg("ack", 1)
 				end
@@ -821,6 +825,11 @@ function Broadcast:onControl(msg, context)
 		local serve = self.pendingServes[key]
 		if serve then
 			self.pendingServes[key] = nil
+			-- Granted serves are what the breaker meters — a NOK'd ACK
+			-- never cost real work. Self-serves don't count (breaker-bypassed).
+			if serve.subject ~= self.playerGUID then
+				self:bumpServe(now)
+			end
 			self:serveData(serve)
 		end
 	elseif verb == "NOK" then
