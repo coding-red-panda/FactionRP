@@ -91,7 +91,12 @@ after a granted request, using single-chunk FRP1 control messages
 
 Requests deduplicate per subject (pending + a 60s cooldown), expire at 15s
 without ACK / 30s without data, and are bounded (`REQ_MAX_PENDING`). Granted
-serves expire after 30s without an `OK`.
+serves expire after 30s without an `OK`, and our own ACK rate is
+breaker-limited (`SERVE_ACK_LIMIT` per `SERVE_ACK_WINDOW`, then a
+`SERVE_ACK_MUTE` bow-out): a saturated server simply stops volunteering —
+requesters' timeouts pace their retries, no "busy" wire traffic is spent —
+so other holders win the ACK race. Requests for our *own* profile bypass
+the breaker.
 
 ### Message Structure
 

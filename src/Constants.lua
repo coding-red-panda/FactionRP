@@ -118,6 +118,14 @@ C.REQ_MAX_PENDING = 32   -- bound on outstanding requests
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
 
+-- Outbound ACK breaker: once SERVE_ACK_LIMIT ACKs leave within
+-- SERVE_ACK_WINDOW seconds we stop responding for SERVE_ACK_MUTE
+-- seconds. REQs for our own GUID bypass the breaker: we are the
+-- authoritative server for ourselves.
+C.SERVE_ACK_WINDOW = 30
+C.SERVE_ACK_LIMIT = 10
+C.SERVE_ACK_MUTE = 60
+
 -- Caching -------------------------------------------------------------------
 
 -- Time-to-live for a cached profile, in seconds (5 minutes per the design).

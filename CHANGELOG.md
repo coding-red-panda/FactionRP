@@ -1,9 +1,13 @@
 ﻿# FactionRP Changelog
 
-## UNRELEASED
+## 0.3.1
 
 ### Changed
-
+- Messages have been slowed way the hell down.
+- FRP now handshakes passively with potential relays, rather than fanning out on demand.
+  This does have the effect of slowing down the rate of profiles when the mesh is thin.
+- If too many ACKs are delivered in within 30 seconds, stop responding to ACK
+  until cooldown expires. `/frp relays` will show the mute countdown.
 - `REQ` now includes subject unitID alongside GUID for validation.
   This helps serve profiles you haven't seen this session if they're already
   in the register.
@@ -27,6 +31,7 @@
   (was front-of-roster-first, which starved deeper candidates until the
   front ones were ignored); guild members probe before community.
 - Realm normalisation now strips spaces, hyphens and priods.
+
 
 ## 0.3.0
 

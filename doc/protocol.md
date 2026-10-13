@@ -244,6 +244,13 @@ requester                                candidate servers
 - An ACK records a *pending serve* (`SERVE_PENDING_CAP`=16, expires at
   `SERVE_TIMEOUT`=30s). `OK` triggers extraction and a direct send;
   `NOK` discards it.
+- Our outbound ACK rate is breaker-limited: once `SERVE_ACK_LIMIT` (10)
+  ACKs leave inside `SERVE_ACK_WINDOW` (30s) we stop answering REQs for
+  `SERVE_ACK_MUTE` (60s). This is a silent bow-out, not a message — the
+  requester's own timeout and subject-cooldown *are* the backpressure
+  signal, so no wire traffic is spent reporting saturation. REQs for our
+  own GUID bypass the breaker (we are the authoritative server for
+  ourselves).
 - Served data uses a normal data envelope stamped with the server's
   `originTime` (the original authoring time is unknowable server-side).
 

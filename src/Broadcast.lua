@@ -76,6 +76,12 @@ function Broadcast:init()
 	self.recentReqs = {}
 	self.pendingServes = {}
 	self.relayProbeAt = 0 -- last whisper probe burst
+
+	-- Outbound ACK breaker (fixed window): once SERVE_ACK_LIMIT ACKs leave
+	-- inside SERVE_ACK_WINDOW we stop answering REQs until ackMuteUntil.
+	self.ackWindowAt = 0
+	self.ackCount = 0
+	self.ackMuteUntil = 0
 end
 
 function Broadcast:start()
@@ -635,6 +641,34 @@ function Broadcast:resolveSubject(guid, wireUnitID)
 	return unitID
 end
 
+--- True while the ACK breaker is engaged. Resets the fixed window on expiry
+-- (a fresh window also starts when the mute ends, since the mute outlasts
+-- the window), so post-mute counting restarts clean.
+function Broadcast:ackThrottled(now)
+	if now < self.ackMuteUntil then
+		return true
+	end
+	if (now - self.ackWindowAt) >= C.SERVE_ACK_WINDOW then
+		self.ackWindowAt = now
+		self.ackCount = 0
+	end
+	return false
+end
+
+--- Count a sent non-self ACK; on hitting the window limit, mute for
+-- SERVE_ACK_MUTE and realign the window so counting restarts after unmute.
+function Broadcast:bumpAck(now)
+	self.ackCount = self.ackCount + 1
+	if self.ackCount >= C.SERVE_ACK_LIMIT then
+		self.ackMuteUntil = now + C.SERVE_ACK_MUTE
+		self.ackWindowAt = now
+		if ns.statsError then
+			ns.statsError("serve_throttled")
+		end
+		ns.debugPeer("serve throttled — " .. C.SERVE_ACK_LIMIT .. " acks/" .. C.SERVE_ACK_WINDOW .. "s reached")
+	end
+end
+
 --- Address key shared by pendingServes entries and OK/NOK lookups. Peers are
 -- identified by account/name only — NOT medium: a REQ may arrive over the
 -- channel while its OK arrives by whisper, and both must resolve the same key.
@@ -713,13 +747,19 @@ function Broadcast:onControl(msg, context)
 		-- servability check below reads the RP AddOn's register live, so a
 		-- subject absent from our cache is still servable whenever the
 		-- register holds their profile.
+		local selfReq = (arg == self.playerGUID)
 		local unitID
-		if arg == self.playerGUID then
+		if selfReq then
 			unitID = ownUnitID(self)
 		else
 			unitID = self:resolveSubject(arg, arg2)
 		end
 		local adapter = ns.getAvailableAdapter()
+		-- The ACK breaker never applies to requests for our own profile —
+		-- we are the authoritative server for ourselves.
+		if not selfReq and self:ackThrottled(now) then
+			return
+		end
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
 			-- Bound granted-or-awaiting serves: over the cap we simply do not
 			-- ACK (same as a miss — the requester still times out cleanly).
@@ -736,6 +776,9 @@ function Broadcast:onControl(msg, context)
 					subject = arg, unitID = unitID,
 					medium = context.medium, target = target, at = now,
 				}
+				if not selfReq then
+					self:bumpAck(now)
+				end
 				if leg then
 					leg("ack", 1)
 				end

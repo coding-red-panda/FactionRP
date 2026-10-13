@@ -272,8 +272,12 @@ ns.RegisterCommand("relays", function()
 	end
 	ns.Print(("bnet peers — confirmed: %s | probing: %s | ignored: %d"):format(
 		joined(bnetConf), joined(lists.probing), #lists.ignored))
-	ns.Print(("exchange — pending requests: %d | pending serves: %d"):format(
-		mapSize(b.requests or {}), mapSize(b.pendingServes or {})))
+	local mute = ""
+	if b.ackMuteUntil and GetTime() < b.ackMuteUntil then
+		mute = (" | ack muted %ds"):format(math.ceil(b.ackMuteUntil - GetTime()))
+	end
+	ns.Print(("exchange — pending requests: %d | pending serves: %d%s"):format(
+		mapSize(b.requests or {}), mapSize(b.pendingServes or {}), mute))
 	local p = b.lastLegPicks
 	ns.Print(("last fanout — community: %s | guild: %s | bnet: %s | pinned: %s"):format(
 		joined(p.community), joined(p.guild), joined(p.bnet), joined(p.pinned)))
