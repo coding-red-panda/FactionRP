@@ -1,5 +1,14 @@
 ﻿# FactionRP Changelog
 
+## UNRELEASED
+
+### Changed
+
+- `REQ` now includes subject unitID alongside GUID for validation.
+  This helps serve profiles you haven't seen this session if they're already
+  in the register.
+- Realm normalisation now strips spaces, hyphens and priods.
+
 ## 0.3.0
 
 ### Changed — pull model (breaking protocol change)
