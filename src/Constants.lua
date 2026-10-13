@@ -74,8 +74,6 @@ C.SEND_QUEUE_CAP = 384
 --   ACK <subjectGuid>   "I can serve it"
 --   OK  <subjectGuid>   grant: "you may send it"
 --   NOK <subjectGuid>   deny: "stand down" (late ACKs)
---   MISS <subjectGuid>  miss reply to a whispered REQ: "got it, can't serve"
---      — bounded relay-proof for direct peers; never sent to channel/group.
 -- Control messages are never cached, injected, or relayed.
 C.CTL_SUBJECT = "_frp"
 C.CTL_PROTO = "FRP1"
@@ -119,7 +117,6 @@ C.REQ_COOLDOWN = 60      -- min gap between requests for the same subject
 C.REQ_MAX_PENDING = 32   -- bound on outstanding requests
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
-C.MISS_REPLY_COOLDOWN = 30 -- min gap between MISS replies to the same peer+subject
 
 -- Caching -------------------------------------------------------------------
 
@@ -159,13 +156,14 @@ C.GUID_RESOLVE_MEMO = 60
 --
 -- Opposite-faction members of our own WoW communities are reachable by addon
 -- whisper, so profile REQUESTs fan out to a capped rotating set of them.
--- Under the pull model these legs carry single-chunk control messages, not
--- full profile data, so the cap can be generous.
-C.COMM_RELAY_LIMIT = 10
+-- These legs carry single-chunk control messages, and every FRP client
+-- maintains its own relay lists — coverage is distributed across requesters,
+-- so a modest per-request cap suffices.
+C.COMM_RELAY_LIMIT = 5
 
 -- The guild is a second, independent whisper leg (cross-faction guilds exist):
 -- its own capped target list on top of the community one.
-C.GUILD_RELAY_LIMIT = 10
+C.GUILD_RELAY_LIMIT = 5
 
 -- No single member should act as a relay server: each contact may be used at
 -- most COMM_USAGE_LIMIT times per COMM_USAGE_WINDOW seconds. Exhausted
@@ -173,6 +171,19 @@ C.GUILD_RELAY_LIMIT = 10
 -- is never dropped for lack of fresh targets.
 C.COMM_USAGE_LIMIT = 2
 C.COMM_USAGE_WINDOW = 60
+
+-- Whisper relay confirmation (HELLO/HI over addon whispers — same lifecycle
+-- shape as the BNet handshake). Club-roster candidates are probed once per
+-- tick on a rotating per-target cooldown; any parseable inbound whisper
+-- confirms the sender for RELAY_CONFIRM_TTL, and stale confirmed relays are
+-- re-probed so quiet-but-alive peers stay confirmed. RELAY_PROBE_MAX
+-- unanswered probes ignore the target for RELAY_IGNORE_TTL (expired ignores
+-- re-enter rotation with a fresh slate).
+C.RELAY_CONFIRM_TTL = 600   -- relay confirmation expires without fresh proof
+C.RELAY_PROBE_COOLDOWN = 45 -- min gap between probes to the same target
+C.RELAY_PROBE_MAX = 3       -- unanswered probes before ignoring
+C.RELAY_IGNORE_TTL = 1800   -- ignore-list decay
+C.RELAY_HI_COOLDOWN = 30    -- min gap between HI replies to the same target
 
 -- How long (seconds) the scanned club roster (factions, GUIDs and opposite-
 -- faction online members) is memoized. A stale roster is rebuilt

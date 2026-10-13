@@ -115,7 +115,6 @@ decode `data` as a profile, and drop it harmlessly.
 | `ACK`   | subjectGuid         | "I can serve it"                            |
 | `OK`    | subjectGuid         | grant — "you may send it"                   |
 | `NOK`   | subjectGuid         | deny — "stand down"                         |
-| `MISS`  | subjectGuid         | miss reply — "got your REQ, can't serve"    |
 
 `REQ` is the only two-argument verb: `unitID` is the subject's
 `"Name-Realm"` as computed by the requester's RP AddOn — the exact key its
@@ -152,10 +151,25 @@ any parseable inbound message → confirmed (10 min TTL)
   `BN_DISCONNECTED` wipes the map.
 - **Data and REQ legs on BNet go to confirmed accounts only.**
 
-Whisper peers need no handshake: sending `REQ` to unconfirmed cross-faction
-club members doubles as discovery — any parseable inbound whisper from a club
-member confirms them (`knownRelays`), and non-FRP recipients simply cannot
-answer.
+Whisper peers (cross-faction club members) use the same probe/confirm/ignore
+lifecycle as BNet accounts:
+
+- **Probing**: each tick sends `HELLO <ver>` to the next unconfirmed,
+  non-ignored roster candidate (rotating per-target cooldown
+  `RELAY_PROBE_COOLDOWN`=45s). A whispered `HELLO` is answered `HI`
+  (rate-limited per sender by `RELAY_HI_COOLDOWN`=30s).
+- **Confirming**: any parseable inbound whisper from an opposite-faction
+  club member — `HI`, `ACK`, `REQ`, or data — confirms them for
+  `RELAY_CONFIRM_TTL` (10min). Confirmed relays get fanout priority.
+- **Refreshing**: when no unconfirmed candidates remain, the stalest
+  confirmed relay past half its TTL is re-probed, so quiet-but-alive peers
+  stay confirmed and dead ones decay out of the list.
+- **Ignoring**: `RELAY_PROBE_MAX` (3) unanswered probes ignore a target for
+  `RELAY_IGNORE_TTL` (30min); expired ignores re-enter rotation with a
+  fresh slate. Ignored targets are skipped by `REQ` fanouts too.
+
+`REQ` fanouts still reach unconfirmed candidates — request whispers double
+as discovery on top of the probe rotation.
 
 ## The pull exchange
 
@@ -168,8 +182,7 @@ requester                                candidate servers
     │                                          confirmed BNet +
     │                                          xfac whisper relays)
     │                                          └ can extract? → ACK
-    │                                            cannot?  → MISS on whispers,
-    │                                            silent on channel/group
+    │                                            cannot?  → silent
     │  ◄── ACK <guid> ── (first wins)
     │  ── OK <guid> ──► winner only
     │  ── NOK <guid> ─► every later ACKer
@@ -184,9 +197,8 @@ requester                                candidate servers
   `awaiting-data` expires after `REQ_DATA_TIMEOUT` (30s) without data.
 - Data received for a pending subject completes the request from any source;
   if it arrived from a non-winner, the winner is NOK'd best-effort.
-- A `MISS` is informational: the request stays open for other candidates.
-  It confirms the sender as a relay and distinguishes "can't serve" from
-  "never delivered".
+- Misses get no reply — relay confirmation rides the `HELLO`/`HI` probes
+  instead of paying a reply per non-holder.
 
 **Server rules**
 - A `REQ` is ACKed only when we can actually extract the profile: the
@@ -202,12 +214,8 @@ requester                                candidate servers
   (older peer, or a requester that could not compute the unitID) resolves
   from local claims alone. `REQ` for our own guid answers directly —
   we are the authority on ourselves.
-- Misses answer `MISS <guid>` **only to a direct-whisper `REQ`** — those
-  recipients are bounded by the requester's own relay caps, so a reply per
-  non-holder stays cheap and doubles as relay confirmation. Channel/group
-  recipients stay silent: a reply per listener there would cost more than
-  the requester's timeout. Replies are throttled to one per requester+subject
-  per `MISS_REPLY_COOLDOWN` (30s).
+- Misses stay silent — a reply per non-holder costs more than the
+  requester's timeout.
 - An ACK records a *pending serve* (`SERVE_PENDING_CAP`=16, expires at
   `SERVE_TIMEOUT`=30s). `OK` triggers extraction and a direct send;
   `NOK` discards it.

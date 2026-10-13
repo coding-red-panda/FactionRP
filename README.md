@@ -81,10 +81,7 @@ after a granted request, using single-chunk FRP1 control messages
    profile replies. The subject's identity is consensus-checked first: every
    claim held for the guid (local cache, client player-info, club roster,
    and the wire-asserted unitID) must agree — conflicting or absent claims
-   can't serve. `REQ` for our own GUID answers directly. A recipient that
-   can't serve replies **MISS \<guid\>** to *direct whispers only* (bounded
-   by the requester's relay caps, so it doubles as relay confirmation) and
-   stays silent on channel/group.
+   stay silent. `REQ` for our own GUID answers directly.
 3. **OK \<guid\>** — the requester grants the *first* ACK; every later ACK
    gets **NOK \<guid\>** and stands down.
 4. The winner extracts and sends the normal data envelope directly to the
@@ -179,17 +176,24 @@ subscribed clubs — run as **two independent legs**: communities (`COMM_RELAY_L
 and our own guild (`GUILD_RELAY_LIMIT`; cross-faction guilds make those members
 whisper-reachable too, and the leg is skipped entirely when guildless). Both legs
 select online members only, deduplicated by GUID across clubs. These legs carry
-single-chunk control messages, so the caps can be generous; members without
-FactionRP simply cannot parse or answer the request.
+single-chunk control messages, and every client maintains its own relay lists —
+coverage is distributed across requesters.
+
+Rather than waiting for requests, we **actively probe** the roster: each tick
+sends `HELLO` to the next unconfirmed candidate (rotating per-target cooldown),
+a whispered `HELLO` earns a `HI` reply, and any parseable inbound whisper
+confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min). Stale confirmed
+relays are re-probed to keep the list warm, and targets that ignore
+`RELAY_PROBE_MAX` (3) probes are skipped for `RELAY_IGNORE_TTL` (30min).
+Members without FactionRP simply cannot parse or answer.
 
 Candidate order, so the limited slots go to the most promising relays first:
 
-1. **Confirmed FRP peers** — an opposite-faction club member we have already received
-   an FactionRP whisper from this session provably runs the AddOn.
+1. **Confirmed FRP peers** — a relay whose confirmation is still fresh.
 2. **Known cross-faction contacts** — opposite-faction club members whose profiles
    reached us via the RP AddOn's own comms (e.g. a TRP3 profile arriving cross-faction
    through the community): proven reachable, almost certainly RP-AddOn users.
-3. **The remaining opposite-faction roster.**
+3. **The remaining opposite-faction roster** (ignored targets are skipped).
 
 No single member should act as a relay server, so fairness is enforced two ways:
 a **round-robin cursor** spreads picks across the candidate list rather than always
@@ -291,7 +295,7 @@ The categories:
 * `chunks` — every wire chunk sent or received (very noisy)
 * `targets` — allows pinned whisper targets (`/frp debug target`) to send
 * `peers` — Battle.net handshake and pull-exchange events (probes,
-  confirmations, ignores, REQ/ACK/OK/NOK/MISS traffic, serves)
+  confirmations, ignores, REQ/ACK/OK/NOK traffic, serves)
 * `stats` — collects traffic statistics (see below)
 
 ### Traffic statistics

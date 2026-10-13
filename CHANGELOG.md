@@ -7,11 +7,14 @@
 - `REQ` now includes subject unitID alongside GUID for validation.
   This helps serve profiles you haven't seen this session if they're already
   in the register.
-- Servers that can't serve reply `MISS <guid>` to directly-whispered `REQ`s —
-  confirms them as relays and distinguishes "can't serve" from "never
-  delivered". Channel/group recipients stay silent; replies are throttled
-  per requester+subject (`MISS_REPLY_COOLDOWN`, 30s).
 - Outbound send rate halved to `SEND_RATE` = 3.75 chunks/sec.
+- Whisper relays are now actively probed (`HELLO`/`HI` over addon whispers,
+  same lifecycle as BNet): roster candidates are probed on a rotating
+  cooldown, confirmed relays are re-probed to stay fresh, and targets that
+  ignore 3 probes are skipped for 30 min. `/frp relays` shows
+  probing/ignored buckets.
+- `COMM_RELAY_LIMIT`/`GUILD_RELAY_LIMIT` halved to 5 each — relay lists are
+  maintained per client, so request coverage is distributed across the mesh.
 - Realm normalisation now strips spaces, hyphens and priods.
 
 ## 0.3.0

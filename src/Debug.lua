@@ -222,7 +222,19 @@ ns.RegisterCommand("relays", function()
 	if not b then
 		return
 	end
-	ns.Print("known relays (confirmed FRP): " .. joined(mapNames(b.knownRelays)))
+	local now = GetTime()
+	local conf, probing, ignored = {}, {}, 0
+	for _, p in pairs(b.relays or {}) do
+		if p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL then
+			ignored = ignored + 1
+		elseif p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL then
+			conf[#conf + 1] = p.name
+		elseif p.pr > 0 then
+			probing[#probing + 1] = p.name
+		end
+	end
+	ns.Print("known relays (confirmed FRP): " .. joined(conf))
+	ns.Print(("relay probes — probing: %s | ignored: %d"):format(joined(probing), ignored))
 	ns.Print("xfac contacts (reachable, unconfirmed): " .. joined(mapNames(b.xfacContacts)))
 	ns.Print(("roster candidates: %d community / %d guild"):format(
 		#ns.Util.xfacClubMembers(), #ns.Util.xfacGuildMembers()))
@@ -248,7 +260,7 @@ end, "Show learned relays/contacts and the last fanout's chosen targets")
 -- Richer status command (overrides the placeholder registered in Core).
 ns.RegisterCommand("status", function()
 	local adapter = ns.getAvailableAdapter()
-	local relays = ns.broadcast and mapSize(ns.broadcast.knownRelays) or 0
+	local relays = ns.broadcast and mapSize(ns.broadcast.relays) or 0
 	local contacts = ns.broadcast and mapSize(ns.broadcast.xfacContacts) or 0
 	local enabledCats = {}
 	local d = ns.db and ns.db.debug

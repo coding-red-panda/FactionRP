@@ -25,14 +25,19 @@ ns.Broadcast = Broadcast
 
 function Broadcast:init()
 	self.playerGUID = nil -- resolved at login
-	-- Cross-faction relay knowledge learned from traffic (session-only),
-	-- keyed by normalized "name-realm":
-	--   knownRelays:  opposite-faction club members confirmed to run FactionRP
-	--                 (we received an FRP whisper from them).
+	-- Cross-faction relay lifecycle (session-only), keyed by normalized
+	-- "name-realm" — same probe/confirm/ignore shape as BNet peers:
+	--   relays[key] = {
+	--     name    display "Name-Realm" for sending/debugging,
+	--     conf    last inbound-proof time (confirmed relay while fresh),
+	--     lp      last probe sent        pr   consecutive unanswered probes,
+	--     ign     ignored-since time     lastHi last HI we sent them,
+	--     version peer's addon version (when seen)
+	--   }
 	--   xfacContacts: opposite-faction club members whose profiles reached us
 	--                 via the RP AddOn's own comms — proven cross-faction
 	--                 reachable RP-AddOn users, though maybe not FRP users.
-	self.knownRelays = {}
+	self.relays = {}
 	self.xfacContacts = {}
 
 	-- Community-relay fairness state: per-contact usage counts (so no single
@@ -67,12 +72,9 @@ function Broadcast:init()
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   pendingServes[key] = { subject, unitID, medium, target, at }
 	--     where key = "<peer>:<guid>" — grants we may serve.
-	--   missReplies[key] = last MISS reply time ("<peer>:<guid>") — bounds
-	--     miss replies to one per requester+subject per MISS_REPLY_COOLDOWN.
 	self.requests = {}
 	self.recentReqs = {}
 	self.pendingServes = {}
-	self.missReplies = {}
 end
 
 function Broadcast:start()
@@ -83,7 +85,7 @@ function Broadcast:start()
 	C_Timer.NewTicker(C.INJECT_INTERVAL, function()
 		self:drainInject()
 	end)
-	-- One ticker drives the BNet probe rotation and both exchange sweeps.
+	-- One ticker drives the BNet + whisper probe rotations and the sweeps.
 	C_Timer.NewTicker(C.BNET_PROBE_INTERVAL, function()
 		self:tick()
 	end)
@@ -137,6 +139,60 @@ function Broadcast:bumpUsage(key, now)
 	u.at = now
 end
 
+--- Fetch-or-create the relay lifecycle record for `key` (normalized
+-- "name-realm"). `name` refreshes the display name when given.
+function Broadcast:relay(key, name)
+	local p = self.relays[key]
+	if not p then
+		p = { name = name, conf = 0, lp = 0, pr = 0, ign = 0, lastHi = 0 }
+		self.relays[key] = p
+	elseif name then
+		p.name = name
+	end
+	return p
+end
+
+--- Is `key` currently on the whisper ignore list?
+function Broadcast:relayIgnored(key, now)
+	local p = self.relays[key]
+	return p ~= nil and p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL
+end
+
+--- Next whisper-probe target: the first unconfirmed, non-ignored roster
+-- candidate whose probe cooldown has lapsed (roster order + cooldowns give a
+-- natural rotation). Failing that, the stalest confirmed relay past half its
+-- TTL — keepalive probing so quiet-but-alive peers stay confirmed.
+function Broadcast:whisperProbeTarget(now)
+	local staleKey, staleName, staleAt
+	for _, roster in ipairs({ Util.xfacClubMembers(), Util.xfacGuildMembers() }) do
+		for _, name in ipairs(roster) do
+			local key = Util.normalizeUnitName(name)
+			if key then
+				local p = self.relays[key]
+				if p and p.ign ~= 0 and (now - p.ign) >= C.RELAY_IGNORE_TTL then
+					p.ign, p.pr = 0, 0 -- served their time: fresh slate
+				end
+				local ignored = p and p.ign ~= 0
+				if not ignored then
+					local fresh = p and p.conf ~= 0
+						and (now - p.conf) < C.RELAY_CONFIRM_TTL
+					if not fresh then
+						if not p or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
+							return key, name
+						end
+					elseif (now - p.conf) >= C.RELAY_CONFIRM_TTL * 0.5
+						and (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
+						and (not staleAt or p.conf < staleAt)
+					then
+						staleKey, staleName, staleAt = key, name, p.conf
+					end
+				end
+			end
+		end
+	end
+	return staleKey, staleName
+end
+
 --- One leg's selection: confirmed FRP relays and known xfac contacts first
 -- (filtered to that leg's membership), then the leg's opposite-faction
 -- roster. A rotating cursor spreads picks across candidates; pass 1 skips
@@ -164,9 +220,9 @@ function Broadcast:_sendLeg(chunks, roster, inLeg, limit, skipName, now, picks)
 	if skipName then
 		seen[skipName] = skipName
 	end
-	for _, unitID in pairs(self.knownRelays) do
-		if inLeg(unitID) then
-			addCandidate(candidates, seen, unitID)
+	for _, p in pairs(self.relays) do
+		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL and inLeg(p.name) then
+			addCandidate(candidates, seen, p.name)
 		end
 	end
 	for _, unitID in pairs(self.xfacContacts) do
@@ -192,6 +248,7 @@ function Broadcast:_sendLeg(chunks, roster, inLeg, limit, skipName, now, picks)
 			end
 			local key = candidates[((offset + i - 1) % n) + 1]
 			if not sentKeys[key]
+				and not self:relayIgnored(key, now)
 				and not (pass == 1 and self:usageAt(key, now) >= C.COMM_USAGE_LIMIT)
 			then
 				sentKeys[key] = true
@@ -378,6 +435,29 @@ function Broadcast:tick()
 		end
 	end
 
+	-- Probe the next unconfirmed club-roster candidate (or refresh a stale
+	-- confirmed relay) with a whispered HELLO — same lifecycle as BNet.
+	local wkey, wname = self:whisperProbeTarget(now)
+	if wkey then
+		local p = self:relay(wkey, wname)
+		if comms:sendChunksAddon(self:ctlHello(), "WHISPER", wname) then
+			p.lp = now
+			p.pr = p.pr + 1
+			if ns.statsLeg then
+				ns.statsLeg("wprobe", 1)
+			end
+			if ns.debugPeer then
+				ns.debugPeer("probe -> whisper " .. wname)
+			end
+			if p.pr >= C.RELAY_PROBE_MAX and p.ign == 0 then
+				p.ign = now
+				if ns.debugPeer then
+					ns.debugPeer("whisper " .. wname .. " ignored (" .. p.pr .. " unanswered probes)")
+				end
+			end
+		end
+	end
+
 	-- Expire requests: open requests need an ACK inside REQ_ACK_TIMEOUT,
 	-- granted ones need data inside REQ_DATA_TIMEOUT. Either way the subject
 	-- goes on cooldown so repeated sightings cannot re-request constantly.
@@ -400,12 +480,6 @@ function Broadcast:tick()
 		end
 	end
 
-	-- Miss-reply throttle entries die with their cooldown.
-	for key, at in pairs(self.missReplies) do
-		if (now - at) > C.MISS_REPLY_COOLDOWN then
-			self.missReplies[key] = nil
-		end
-	end
 end
 
 --- Request `guid`'s profile from the mesh (we just saw an opposite-faction
@@ -563,21 +637,47 @@ function Broadcast:onControl(msg, context)
 	local peer = ns.debugPeer
 
 	if verb == "HELLO" then
-		if context.medium ~= "BNET" or not context.gameAccountID then
-			return
-		end
-		comms:bnetPeerSeen(context.gameAccountID, arg)
-		if comms:canHi(context.gameAccountID, now)
-			and comms:sendChunksBNet(self:ctlHi(), context.gameAccountID)
+		if context.medium == "BNET" and context.gameAccountID then
+			comms:bnetPeerSeen(context.gameAccountID, arg)
+			if comms:canHi(context.gameAccountID, now)
+				and comms:sendChunksBNet(self:ctlHi(), context.gameAccountID)
+			then
+				comms:markHi(context.gameAccountID, now)
+				if leg then
+					leg("hi", 1)
+				end
+			end
+		elseif context.medium == "WHISPER" and context.senderName
+			and Util.isXfacClubMember(context.senderName)
 		then
-			comms:markHi(context.gameAccountID, now)
-			if leg then
-				leg("hi", 1)
+			-- Club-relay handshake: a whispered HELLO gets a HI, rate-limited
+			-- per sender so probe storms cannot turn into HI spam. The
+			-- inbound stamp already confirmed them as a relay.
+			local key = Util.normalizeUnitName(context.senderName)
+			local p = key and self:relay(key, context.senderName)
+			if p then
+				p.version = arg
+				if (now - p.lastHi) >= C.RELAY_HI_COOLDOWN
+					and self:sendToPeer(self:ctlHi(), "WHISPER", target)
+				then
+					p.lastHi = now
+					if leg then
+						leg("hi", 1)
+					end
+				end
 			end
 		end
 	elseif verb == "HI" then
 		if context.medium == "BNET" and context.gameAccountID then
 			comms:bnetPeerSeen(context.gameAccountID, arg)
+		elseif context.medium == "WHISPER" and context.senderName then
+			-- The inbound stamp already confirmed them; just record the
+			-- advertised version.
+			local key = Util.normalizeUnitName(context.senderName)
+			local p = key and self.relays[key]
+			if p then
+				p.version = arg
+			end
 		end
 	elseif verb == "REQ" then
 		-- "Who can serve subject `arg`?" Ourselves answer directly; anyone
@@ -593,23 +693,22 @@ function Broadcast:onControl(msg, context)
 			unitID = self:resolveSubject(arg, arg2)
 		end
 		local adapter = ns.getAvailableAdapter()
-		local acked = false
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
-			-- Bound granted-or-awaiting serves: over the cap we do not ACK —
-			-- reported as an ordinary miss below.
+			-- Bound granted-or-awaiting serves: over the cap we simply do not
+			-- ACK (same as a miss — the requester still times out cleanly).
 			local pending = 0
 			for _ in pairs(self.pendingServes) do
 				pending = pending + 1
 			end
-			if pending < C.SERVE_PENDING_CAP
-				and self:sendToPeer(self:buildCtl("ACK", arg), context.medium, target)
-			then
+			if pending >= C.SERVE_PENDING_CAP then
+				return
+			end
+			if self:sendToPeer(self:buildCtl("ACK", arg), context.medium, target) then
 				local key = serveKey(context, arg)
 				self.pendingServes[key] = {
 					subject = arg, unitID = unitID,
 					medium = context.medium, target = target, at = now,
 				}
-				acked = true
 				if leg then
 					leg("ack", 1)
 				end
@@ -618,27 +717,9 @@ function Broadcast:onControl(msg, context)
 				end
 			end
 		end
-		if not acked and context.medium == "WHISPER" then
-			-- Miss reply: "got your REQ, can't serve". Direct whispers only —
-			-- they are bounded by the requester's own relay caps, so a reply
-			-- per non-holder stays cheap; channel/group recipients stay silent
-			-- (a reply per listener there is the flood the silent-miss rule
-			-- exists to avoid). The reply doubles as relay confirmation for
-			-- the requester. Throttled per requester+subject so REQ spam
-			-- cannot turn into MISS spam.
-			local missKey = target .. ":" .. arg
-			if now - (self.missReplies[missKey] or 0) >= C.MISS_REPLY_COOLDOWN then
-				self.missReplies[missKey] = now
-				if self:sendToPeer(self:buildCtl("MISS", arg), context.medium, target) then
-					if leg then
-						leg("miss", 1)
-					end
-					if peer then
-						peer("miss " .. arg .. " -> " .. tostring(target))
-					end
-				end
-			end
-		end
+		-- Misses stay silent: a reply per non-holder costs more than the
+		-- requester's timeout. Discovery/confirmation rides the whisper
+		-- HELLO/HI probes instead.
 	elseif verb == "ACK" then
 		local req = self.requests[arg]
 		local won = req
@@ -674,13 +755,6 @@ function Broadcast:onControl(msg, context)
 		end
 	elseif verb == "NOK" then
 		self.pendingServes[serveKey(context, arg)] = nil
-	elseif verb == "MISS" then
-		-- "Received your REQ but can't serve." The inbound whisper stamp
-		-- already confirmed the relay; the request stays open — other
-		-- candidates may still ACK. Informational only.
-		if peer then
-			peer("miss " .. arg .. " <- " .. tostring(target) .. " (can't serve)")
-		end
 	end
 end
 
@@ -745,12 +819,18 @@ function Broadcast:onMessage(raw, context)
 		return
 	end
 	-- A parseable inbound whisper from an opposite-faction club member proves
-	-- they run the AddOn: a known relay. Runs before the control dispatch so
-	-- ctl traffic (ACK/OK/NOK) confirms senders too.
+	-- they run the AddOn: a confirmed relay. Runs before the control dispatch
+	-- so ctl traffic (ACK/OK/NOK/HELLO/HI) confirms senders too.
 	if context.medium == "WHISPER" and context.senderName then
 		local key = Util.normalizeUnitName(context.senderName)
 		if key and Util.isXfacClubMember(context.senderName) then
-			self.knownRelays[key] = context.senderName
+			local p = self:relay(key, context.senderName)
+			if p.conf == 0 and ns.debugPeer then
+				ns.debugPeer("whisper " .. context.senderName .. " confirmed")
+			end
+			p.conf = GetTime()
+			p.pr = 0
+			p.ign = 0
 		end
 	end
 	-- Any parseable message over BNet proves the account runs the AddOn.

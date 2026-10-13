@@ -590,7 +590,7 @@ local function printCensus()
 	local b = ns.broadcast
 	if b then
 		ns.Print(("  inject %d | relays %d | contacts %d | commUsage %d | pinned %d | reqs %d | serves %d"):format(
-			b:injectDepth(), mapSize(b.knownRelays), mapSize(b.xfacContacts),
+			b:injectDepth(), mapSize(b.relays), mapSize(b.xfacContacts),
 			mapSize(b.commUsage), mapSize(b.forcedTargets),
 			mapSize(b.requests), mapSize(b.pendingServes)))
 	end
