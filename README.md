@@ -6,6 +6,10 @@ It attempts to pull data across faction boundaries by leveraging people's Battle
 connections and cross-faction community/guild whispers.
 The more people are connected and using this AddOn, the more data can be shared.
 
+Data is exchanged on demand — a `REQ`/`ACK`/`OK` handshake pulls a profile once,
+server to requester — rather than broadcast. When nothing is being requested the
+AddOn is silent: no profile data ever floods the wire.
+
 Unlike CrossRP, the AddOn does not designate people as "servers", but tries to utilize the ingame
 communication possibilities to spread information.
 
@@ -17,14 +21,18 @@ title: FactionRP Message Flow
 ---
 
 flowchart LR
-    start[Select Player]
-    extract[Extract Profile]
-    broadcast[Broadcast Data]
-    process[Process Message]
-    
-    start --> extract
-    extract --> broadcast
-    broadcast --> process
+    start[Select opposite-faction player]
+    request[REQ to the mesh]
+    ack[Peer ACKs]
+    ok[OK the first ACKer]
+    serve[Profile served direct]
+    process[Cache + inject]
+
+    start --> request
+    request --> ack
+    ack --> ok
+    ok --> serve
+    serve --> process
 ```
 
 ### Select Player
@@ -94,19 +102,21 @@ SENDER-PLAYER-GUID||SUBJECT-PLAYER-GUID||SUBJECT-NAME-REALM||SOURCE-ADDON||ORIGI
   data store by `Name-Realm`, so we must carry it to be able to display the profile later.
 * `SOURCE-ADDON` is the AddOn the profile originated from (e.g. `TRP3`), so the receiver knows
   which adapter to use.
-* `ORIGIN-TIME` is the server `time()` captured by the client that originally extracted the
-  profile from its real (local) RP AddOn data. It is the ordering key: a copy with a newer
-  origin-time always supersedes an older one. Relayers never modify it — they propagate the
-  origin's value unchanged.
+* `ORIGIN-TIME` is the server `time()` stamped by the serving client when it sends the
+  profile (a server cannot know the original authoring time). It is the ordering key:
+  a copy with a newer origin-time always supersedes an older one.
 * `CONTENT-VERSION` identifies the profile content. For TRP3 it is the combination of its
   per-section version counters (`.v`). Because those counters wrap (1..99) and are not globally
   ordered, content-version is only ever compared for *equality* (to detect "same vs changed");
-  `ORIGIN-TIME` provides the actual ordering. Together they de-duplicate gossip (see Broadcast
-  Flow) and prevent stale and fresh copies from flapping between mutual peers.
+  `ORIGIN-TIME` provides the actual ordering. Together they de-duplicate received copies
+  and prevent stale and fresh copies from flapping between peers.
 * `PROTO-VERSION` is the wire-protocol generation (`C.PROTO_MAJOR`). Receivers reject
   any envelope advertising a lower generation *before* touching peer state, and the
   comm channel carries the generation in its name (`frp3comms`) — older-protocol
   clients, including modified ones, can neither interop nor confirm themselves.
+  A sender whose completed message fails this gate (or fails to parse at all) is
+  additionally placed on a short blocklist (`REJECTED_SENDER_TTL`), so a hostile or
+  legacy peer's chunks stop reaching the reassembler entirely.
 
 Because a single in-game AddOn message is capped at 255 bytes, larger profiles are split into
 numbered chunks and re-assembled by the receiver before processing.
@@ -121,13 +131,15 @@ handshake confirms peers session-locally:
 * Any complete, parseable FactionRP message from an account — handshake or
   otherwise — confirms it for `BNET_CONFIRM_TTL` (10 min).
 * `BNET_PROBE_MAX` (3) unanswered probes ignore the account for
-  `BNET_IGNORE_TTL` (30 min); friend-presence events re-open probing early.
+  `BNET_IGNORE_TTL` (30 min); only a friend *coming online*
+  (`BN_FRIEND_ACCOUNT_ONLINE`) re-opens probing early — mere presence churn
+  (zone changes, status updates) does not.
 * Data and `REQ` legs on Battle.net go to confirmed accounts only.
 
 Whisper relays need no handshake: `REQ` messages to unconfirmed
 cross-faction club members double as discovery — a reply proves the AddOn.
 
-### Broadcast Flow
+### Request fanout
 There is no data broadcast: only single-chunk control messages fan out, and
 profile data moves once per exchange. A `REQ` goes to:
 
@@ -142,7 +154,7 @@ second is the single outbound rate dial, released via a token bucket on the
 `SEND_INTERVAL` tick — and each primitive is additionally routed through **Chomp** —
 the ChatThrottleLib wrapper TRP3 already ships — on the `LOW` priority queue,
 falling back to the raw `C_ChatInfo.SendAddonMessage` / `BNSendGameData` calls
-when Chomp is unavailable. This coalesces our bulk gossip traffic into the same
+when Chomp is unavailable. This coalesces our outbound traffic into the same
 global throttle queues every addon shares, so FactionRP cannot starve another
 addon's sends (notably TRP3's unthrottled map-scan `C_SCAN` requests, which are
 sensitive to chat-frame send backoff — see issue #1). The comm channel join is
@@ -197,7 +209,7 @@ and never cached, injected, or relayed.
 
 ### Directory injection
 
-Profiles stored from gossip are also injected into the source RP AddOn's register,
+Profiles stored from exchanges are also injected into the source RP AddOn's register,
 so its directory/character list populates as data arrives — not only on tooltip.
 Injections drain through a small bounded queue (`INJECT_BURST` per `INJECT_INTERVAL`)
 because register writes fire the AddOn's own update and UI-refresh events.
@@ -232,8 +244,8 @@ All commands are available under `/factionrp` or the shorter alias `/frp`.
 Running the base command with no (or an unrecognised) sub-command prints the usage list.
 
 * `/factionrp status` — Show the version, number of cached profiles, pending
-  re-broadcasts, send-queue depth, known relay/contact counts, the active RP
-  adapter (e.g. TRP3) and which debug categories are on.
+  received-profile publishes, send-queue depth, known relay/contact counts, the
+  active RP adapter (e.g. TRP3) and which debug categories are on.
 * `/factionrp purge` — Empty the profile cache (testing).
 * `/factionrp debug` — List the debug categories and their on/off state.
 * `/factionrp debug <category>` — Toggle one debug category (see below).
@@ -264,7 +276,7 @@ The categories:
 
 * `receive` — a message is received, including sender GUID
 * `cache` — a profile is stored or refreshed in the cache
-* `queue` — a received RP-AddOn profile is queued for re-broadcast, or skipped
+* `queue` — a received RP-AddOn profile is queued for re-publication, or skipped
 * `fanout` — a fanout sends community/guild/pinned whispers (per-leg target
   names; see also `/frp relays`)
 * `chunks` — every wire chunk sent or received (very noisy)
@@ -286,7 +298,8 @@ cannot grow memory):
 * Per-medium breakdowns (channel, group, Battle.net, whisper) and per-leg
   fanout totals
 * Cache outcomes (new/updated/refreshed/rejected), error tallies (malformed,
-  undecodable, self-echo, reassembly timeouts, duplicate chunks, queue drops)
+  old-protocol, undecodable, self-echo, reassembly timeouts, duplicate chunks,
+  queue drops)
 * Queue health: send-queue high-water mark, per-chunk dwell, inject/received
   queue depths
 * Origin age on receipt (approximate — depends on the sender's clock)
@@ -313,11 +326,13 @@ internal table that could plausibly grow.
 
 ### Additional Plans
 
-These points are to be kept in consideration, but will not be part of the current v1 release:
+These points are to be kept in consideration, but will not be part of the current release:
 
 * Ability to load/store additional data such as TRP3 about pages
-* Ability to track which battle.net/friend connection sent us the data
-* Use the previous point to fetch profiles on demand when they are online.
+
+Already done since this list was written: per-message sender tracking (the
+`stats last` ring records medium + peer) and on-demand profile fetching (the
+pull exchange does exactly this).
 
 ### AddOn documentation
 
