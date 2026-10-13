@@ -40,10 +40,12 @@ flowchart LR
 When a player is "selected" (mouseover or target), two things can happen:
 
 * **Same-faction / ourselves**: the profile is extracted and *published to the
-  local cache* — no wire traffic — so that we can serve it when a peer asks.
+  local cache* — no wire traffic. Serving reads the RP AddOn's register live
+  (TRP3 owns same-faction freshness itself), so the publish mostly keeps our
+  GUID→unitID map warm for requests that arrive without a unitID.
 * **Opposite-faction**: this is the pull trigger. If the subject's profile is
-  not fresh in our cache, we send a `REQ` for their GUID to the mesh (see
-  "The pull exchange").
+  not fresh in our cache, we send a `REQ` for their GUID — carrying their
+  unitID when we know it — to the mesh (see "The pull exchange").
 
 A player is also "selected" indirectly: whenever the RP AddOn itself receives
 profile data over its own comm channels — like TRP3's exchange protocol, or MSP
@@ -70,12 +72,16 @@ Profile data never floods. It travels exactly once — server to requester —
 after a granted request, using single-chunk FRP1 control messages
 (`subject = "_frp"`, `data = "FRP1 <verb> <arg>"`; see `doc/protocol.md`):
 
-1. **REQ \<guid\>** — fanned out to: the same-faction channel, the group,
-   *confirmed* Battle.net peers, and a capped rotating set of opposite-faction
-   club members by addon whisper (see "Community relays").
-2. **ACK \<guid\>** — each recipient that can actually extract the profile
-   (it is themselves, resolvable via cache/club roster, and present in their
-   RP AddOn's register) replies to the requester. Misses stay silent.
+1. **REQ \<guid\> [unitID]** — fanned out to: the same-faction channel, the
+   group, *confirmed* Battle.net peers, and a capped rotating set of
+   opposite-faction club members by addon whisper (see "Community relays").
+   The unitID is the subject's register key ("Name-Realm"), so any holder
+   can answer straight from its RP AddOn's register.
+2. **ACK \<guid\>** — each recipient whose RP AddOn's register holds the
+   profile replies. The subject's identity is consensus-checked first: every
+   claim held for the guid (local cache, client player-info, club roster,
+   and the wire-asserted unitID) must agree — conflicting or absent claims
+   stay silent. `REQ` for our own GUID answers directly.
 3. **OK \<guid\>** — the requester grants the *first* ACK; every later ACK
    gets **NOK \<guid\>** and stands down.
 4. The winner extracts and sends the normal data envelope directly to the
