@@ -154,9 +154,10 @@ any parseable inbound message → confirmed (10 min TTL)
 Whisper peers (cross-faction club members) use the same probe/confirm/ignore
 lifecycle as BNet accounts:
 
-- **Probing**: each tick sends `HELLO <ver>` to the next unconfirmed,
-  non-ignored roster candidate (rotating per-target cooldown
-  `RELAY_PROBE_COOLDOWN`=45s). A whispered `HELLO` is answered `HI`
+- **Probing**: bursts of up to `RELAY_PROBE_BURST` (3) whispered
+  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (120s), targeting unconfirmed,
+  non-ignored roster candidates on a rotating per-target cooldown
+  (`RELAY_PROBE_COOLDOWN`=45s). A whispered `HELLO` is answered `HI`
   (rate-limited per sender by `RELAY_HI_COOLDOWN`=30s).
 - **Confirming**: any parseable inbound whisper from an opposite-faction
   club member — `HI`, `ACK`, `REQ`, or data — confirms them for
@@ -168,8 +169,9 @@ lifecycle as BNet accounts:
   `RELAY_IGNORE_TTL` (30min); expired ignores re-enter rotation with a
   fresh slate. Ignored targets are skipped by `REQ` fanouts too.
 
-`REQ` fanouts still reach unconfirmed candidates — request whispers double
-as discovery on top of the probe rotation.
+`REQ` whisper legs reach only proven targets — confirmed relays and known
+xfac contacts; the unconfirmed roster is the probe rotation's job, so a
+request never whispers strangers.
 
 ## The pull exchange
 

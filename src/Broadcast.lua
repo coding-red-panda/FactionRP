@@ -75,6 +75,7 @@ function Broadcast:init()
 	self.requests = {}
 	self.recentReqs = {}
 	self.pendingServes = {}
+	self.relayProbeAt = 0 -- last whisper probe burst
 end
 
 function Broadcast:start()
@@ -267,9 +268,15 @@ function Broadcast:_sendLeg(chunks, roster, inLeg, limit, skipName, now, picks)
 	return sent
 end
 
+-- Reused empty candidate list: REQ whisper legs now reach proven targets
+-- only (confirmed relays + xfac contacts). The unconfirmed roster is
+-- covered by the probe rotation, so a fresh subject's fanout never
+-- whispers strangers.
+local EMPTY_ROSTER = {}
+
 -- Fan a control chunk-list out across every request medium: the same-faction
 -- channel, the group, every *confirmed* BNet peer, and the cross-faction
--- whisper relays (proven contacts first, then rotating roster candidates).
+-- whisper relays (confirmed relays and proven contacts only).
 -- Only ever called with single-chunk control messages — data never floods.
 -- @return number Total legs sent.
 function Broadcast:sendCtlFanout(chunks)
@@ -335,13 +342,13 @@ function Broadcast:sendCtlFanout(chunks)
 	end
 
 	local sentComm = self:_sendLeg(
-		chunks, Util.xfacClubMembers(), inCommunity, C.COMM_RELAY_LIMIT,
+		chunks, EMPTY_ROSTER, inCommunity, C.COMM_RELAY_LIMIT,
 		nil, now, self.lastLegPicks.community
 	)
 	local sentGuild = 0
 	if IsInGuild() then
 		sentGuild = self:_sendLeg(
-			chunks, Util.xfacGuildMembers(), inGuild, C.GUILD_RELAY_LIMIT,
+			chunks, EMPTY_ROSTER, inGuild, C.GUILD_RELAY_LIMIT,
 			nil, now, self.lastLegPicks.guild
 		)
 	end
@@ -435,24 +442,31 @@ function Broadcast:tick()
 		end
 	end
 
-	-- Probe the next unconfirmed club-roster candidate (or refresh a stale
-	-- confirmed relay) with a whispered HELLO — same lifecycle as BNet.
-	local wkey, wname = self:whisperProbeTarget(now)
-	if wkey then
-		local p = self:relay(wkey, wname)
-		if comms:sendChunksAddon(self:ctlHello(), "WHISPER", wname) then
-			p.lp = now
-			p.pr = p.pr + 1
-			if ns.statsLeg then
-				ns.statsLeg("wprobe", 1)
+	-- Whisper relay probing in bursts: up to RELAY_PROBE_BURST candidates per
+	-- RELAY_PROBE_INTERVAL — unconfirmed roster members first (or refresh a
+	-- stale confirmed relay). Same lifecycle as BNet.
+	if (now - self.relayProbeAt) >= C.RELAY_PROBE_INTERVAL then
+		self.relayProbeAt = now
+		for _ = 1, C.RELAY_PROBE_BURST do
+			local wkey, wname = self:whisperProbeTarget(now)
+			if not wkey then
+				break
 			end
-			if ns.debugPeer then
-				ns.debugPeer("probe -> whisper " .. wname)
-			end
-			if p.pr >= C.RELAY_PROBE_MAX and p.ign == 0 then
-				p.ign = now
+			local p = self:relay(wkey, wname)
+			if comms:sendChunksAddon(self:ctlHello(), "WHISPER", wname) then
+				p.lp = now
+				p.pr = p.pr + 1
+				if ns.statsLeg then
+					ns.statsLeg("wprobe", 1)
+				end
 				if ns.debugPeer then
-					ns.debugPeer("whisper " .. wname .. " ignored (" .. p.pr .. " unanswered probes)")
+					ns.debugPeer("probe -> whisper " .. wname)
+				end
+				if p.pr >= C.RELAY_PROBE_MAX and p.ign == 0 then
+					p.ign = now
+					if ns.debugPeer then
+						ns.debugPeer("whisper " .. wname .. " ignored (" .. p.pr .. " unanswered probes)")
+					end
 				end
 			end
 		end

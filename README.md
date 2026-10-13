@@ -179,21 +179,23 @@ select online members only, deduplicated by GUID across clubs. These legs carry
 single-chunk control messages, and every client maintains its own relay lists —
 coverage is distributed across requesters.
 
-Rather than waiting for requests, we **actively probe** the roster: each tick
-sends `HELLO` to the next unconfirmed candidate (rotating per-target cooldown),
+Rather than waiting for requests, we **actively probe** the roster: every
+`RELAY_PROBE_INTERVAL` (2min) a burst of up to `RELAY_PROBE_BURST` (3)
+candidates gets a whispered `HELLO` (rotating per-target cooldown),
 a whispered `HELLO` earns a `HI` reply, and any parseable inbound whisper
 confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min). Stale confirmed
 relays are re-probed to keep the list warm, and targets that ignore
 `RELAY_PROBE_MAX` (3) probes are skipped for `RELAY_IGNORE_TTL` (30min).
 Members without FactionRP simply cannot parse or answer.
 
-Candidate order, so the limited slots go to the most promising relays first:
+Whisper legs now reach only proven targets — the unconfirmed roster is the
+probe rotation's job, so a `REQ` never whispers strangers:
 
 1. **Confirmed FRP peers** — a relay whose confirmation is still fresh.
 2. **Known cross-faction contacts** — opposite-faction club members whose profiles
    reached us via the RP AddOn's own comms (e.g. a TRP3 profile arriving cross-faction
    through the community): proven reachable, almost certainly RP-AddOn users.
-3. **The remaining opposite-faction roster** (ignored targets are skipped).
+   (Ignored targets are skipped either way.)
 
 No single member should act as a relay server, so fairness is enforced two ways:
 a **round-robin cursor** spreads picks across the candidate list rather than always

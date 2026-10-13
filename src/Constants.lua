@@ -45,7 +45,7 @@ C.CHUNK_SIZE = 220
 -- idle queue cannot bank an unbounded burst). Dial the whole send rate by
 -- editing this one number.
 C.SEND_INTERVAL = 0.2
-C.SEND_RATE = 3.75
+C.SEND_RATE = 1
 
 -- Cap on the reusable send-descriptor pool (the outbound queue stores pooled
 -- record tables instead of closures). Beyond this depth sends simply allocate
@@ -173,17 +173,20 @@ C.COMM_USAGE_LIMIT = 2
 C.COMM_USAGE_WINDOW = 60
 
 -- Whisper relay confirmation (HELLO/HI over addon whispers — same lifecycle
--- shape as the BNet handshake). Club-roster candidates are probed once per
--- tick on a rotating per-target cooldown; any parseable inbound whisper
--- confirms the sender for RELAY_CONFIRM_TTL, and stale confirmed relays are
--- re-probed so quiet-but-alive peers stay confirmed. RELAY_PROBE_MAX
--- unanswered probes ignore the target for RELAY_IGNORE_TTL (expired ignores
--- re-enter rotation with a fresh slate).
-C.RELAY_CONFIRM_TTL = 600   -- relay confirmation expires without fresh proof
-C.RELAY_PROBE_COOLDOWN = 45 -- min gap between probes to the same target
-C.RELAY_PROBE_MAX = 3       -- unanswered probes before ignoring
-C.RELAY_IGNORE_TTL = 1800   -- ignore-list decay
-C.RELAY_HI_COOLDOWN = 30    -- min gap between HI replies to the same target
+-- shape as the BNet handshake). Club-roster candidates are probed in bursts
+-- of RELAY_PROBE_BURST every RELAY_PROBE_INTERVAL seconds (a rotating
+-- per-target cooldown still applies); any parseable inbound whisper confirms
+-- the sender for RELAY_CONFIRM_TTL, and stale confirmed relays are re-probed
+-- so quiet-but-alive peers stay confirmed. RELAY_PROBE_MAX unanswered probes
+-- ignore the target for RELAY_IGNORE_TTL (expired ignores re-enter rotation
+-- with a fresh slate).
+C.RELAY_PROBE_INTERVAL = 120 -- gap between whisper probe bursts
+C.RELAY_PROBE_BURST = 3      -- probe targets per burst
+C.RELAY_CONFIRM_TTL = 600    -- relay confirmation expires without fresh proof
+C.RELAY_PROBE_COOLDOWN = 45  -- min gap between probes to the same target
+C.RELAY_PROBE_MAX = 3        -- unanswered probes before ignoring
+C.RELAY_IGNORE_TTL = 1800    -- ignore-list decay
+C.RELAY_HI_COOLDOWN = 30     -- min gap between HI replies to the same target
 
 -- How long (seconds) the scanned club roster (factions, GUIDs and opposite-
 -- faction online members) is memoized. A stale roster is rebuilt

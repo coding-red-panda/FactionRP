@@ -7,14 +7,16 @@
 - `REQ` now includes subject unitID alongside GUID for validation.
   This helps serve profiles you haven't seen this session if they're already
   in the register.
-- Outbound send rate halved to `SEND_RATE` = 3.75 chunks/sec.
+- Outbound send rate reduced to `SEND_RATE` = 1 chunk/sec.
 - Whisper relays are now actively probed (`HELLO`/`HI` over addon whispers,
-  same lifecycle as BNet): roster candidates are probed on a rotating
-  cooldown, confirmed relays are re-probed to stay fresh, and targets that
-  ignore 3 probes are skipped for 30 min. `/frp relays` shows
-  probing/ignored buckets.
+  same lifecycle as BNet): candidates are probed in bursts of 3 every 2 min,
+  confirmed relays are re-probed to stay fresh, and targets that ignore 3
+  probes are skipped for 30 min. `/frp relays` shows probing/ignored buckets.
 - `COMM_RELAY_LIMIT`/`GUILD_RELAY_LIMIT` halved to 5 each — relay lists are
   maintained per client, so request coverage is distributed across the mesh.
+- `REQ` whisper legs now reach only confirmed relays and known xfac
+  contacts — unproven roster candidates are left to the probe rotation, so
+  a request never whispers strangers.
 - Realm normalisation now strips spaces, hyphens and priods.
 
 ## 0.3.0
