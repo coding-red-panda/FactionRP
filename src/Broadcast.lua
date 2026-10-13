@@ -430,7 +430,16 @@ function Broadcast:requestProfile(guid, unitID)
 		self.requests[oldest] = nil
 	end
 
-	local sent = self:sendCtlFanout(self:buildCtl("REQ", guid))
+	-- Carry the subject's unitID on the wire when known.
+	local arg = guid
+	if unitID then
+		local wire = Util.fullUnitName(unitID)
+		if wire then
+			arg = guid .. " " .. wire
+		end
+	end
+
+	local sent = self:sendCtlFanout(self:buildCtl("REQ", arg))
 	self.requests[guid] = { state = "open", at = now, unitID = unitID }
 	self.recentReqs[guid] = now
 	if ns.statsLeg then
@@ -475,6 +484,46 @@ function Broadcast:serveData(serve)
 	end
 end
 
+--- Resolve a request subject's guid to a unitID by consensus: gather every
+-- identity claim we hold for the guid — the cache's guid->unitID map, the
+-- client's player-info cache, the club roster, and the requester-asserted
+-- wire unitID. All non-nil claims must agree; any disagreement is a silent
+-- miss, and an empty claim set misses the same way an unresolvable guid always has.
+-- @param guid       string The requested subject GUID.
+-- @param wireUnitID string The requester-asserted unitID ("" when absent).
+-- @return string|nil The consensus unitID, or nil on conflict/no claims.
+function Broadcast:resolveSubject(guid, wireUnitID)
+	local unitID, conflict = nil, false
+	local function claim(id)
+		id = id and Util.fullUnitName(id)
+		if not id then
+			return
+		end
+		if unitID and unitID ~= id then
+			conflict = true
+		end
+		unitID = id
+	end
+	local entry = ns.cache:get(guid)
+	claim(entry and entry.unitID)
+	claim(Util.unitForGuidFromClient(guid))
+	claim(Util.unitForGuid(guid))
+	local hadLocal = unitID ~= nil
+	claim(wireUnitID ~= "" and wireUnitID or nil)
+	if conflict then
+		if ns.debugPeer then
+			ns.debugPeer("req " .. guid .. " dropped (identity conflict)")
+		end
+		return nil
+	end
+	if unitID and not hadLocal then
+		if ns.debugPeer then
+			ns.debugPeer("req " .. guid .. " resolved via wire unitID " .. unitID)
+		end
+	end
+	return unitID
+end
+
 --- Address key shared by pendingServes entries and OK/NOK lookups. Peers are
 -- identified by account/name only — NOT medium: a REQ may arrive over the
 -- channel while its OK arrives by whisper, and both must resolve the same key.
@@ -488,7 +537,7 @@ end
 function Broadcast:onControl(msg, context)
 	local comms = ns.comms
 	local now = GetTime()
-	local verb, arg = msg.data:match("^FRP1 (%S+)%s*(%S*)")
+	local verb, arg, arg2 = msg.data:match("^FRP1 (%S+)%s*(%S*)%s*(%S*)")
 	if not verb then
 		return
 	end
@@ -521,14 +570,17 @@ function Broadcast:onControl(msg, context)
 			comms:bnetPeerSeen(context.gameAccountID, arg)
 		end
 	elseif verb == "REQ" then
-		-- "Who can serve subject `arg`?" Resolve the subject's unitID: our own
-		-- profile, the gossip cache's guid->unitID map, or the club roster's.
+		-- "Who can serve subject `arg`?" Ourselves answer directly; anyone
+		-- else needs identity consensus across every claim we hold for the
+		-- guid — including the requester-asserted unitID (`arg2`). The
+		-- servability check below reads the RP AddOn's register live, so a
+		-- subject absent from our cache is still servable whenever the
+		-- register holds their profile.
 		local unitID
 		if arg == self.playerGUID then
 			unitID = ownUnitID(self)
 		else
-			local entry = ns.cache:get(arg)
-			unitID = (entry and entry.unitID) or Util.unitForGuid(arg)
+			unitID = self:resolveSubject(arg, arg2)
 		end
 		local adapter = ns.getAvailableAdapter()
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
