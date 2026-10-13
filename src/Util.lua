@@ -43,13 +43,9 @@ end
 
 --- Build the "Name-Realm" identifier for a unit, matching the convention used
 -- by RP AddOns for keying their character store.
---
--- NOTE: realm names are normalized by stripping spaces (e.g. "Argent Dawn" ->
--- "ArgentDawn"). The TRP3 adapter prefers TRP3's own unit-id helper when
--- available (see TRP3Adapter) so register keys match exactly; this generic
--- version is the fallback used for our own bookkeeping.
--- @param unit string A unit token (e.g. "mouseover", "target", "player").
--- @return string|nil "Name-Realm", or nil if the unit is not a player.
+
+local REALM_STRIP = "[%s%-%.]+"
+
 function Util.getUnitID(unit)
 	if not UnitIsPlayer(unit) then
 		return nil
@@ -61,7 +57,7 @@ function Util.getUnitID(unit)
 	if not realm or realm == "" then
 		realm = GetNormalizedRealmName()
 	else
-		realm = realm:gsub("%s+", "")
+		realm = realm:gsub(REALM_STRIP, "")
 	end
 	return name .. "-" .. realm
 end
@@ -119,7 +115,7 @@ local function normalizeUnitName(name)
 	if not realm or realm == "" then
 		realm = GetNormalizedRealmName() or ""
 	else
-		realm = realm:gsub("%s+", "")
+		realm = realm:gsub(REALM_STRIP, "")
 	end
 	return (char .. "-" .. realm):lower()
 end
@@ -138,7 +134,7 @@ local function fullUnitName(name)
 	if not realm or realm == "" then
 		realm = GetNormalizedRealmName() or ""
 	else
-		realm = realm:gsub("%s+", "")
+		realm = realm:gsub(REALM_STRIP, "")
 	end
 	return char .. "-" .. realm
 end
@@ -386,6 +382,25 @@ end
 -- Used to resolve request subjects to extractable unit IDs.
 function Util.unitForGuid(guid)
 	return guid and clubRoster().nameByGuid[guid] or nil
+end
+
+--- Reverse lookup via the client's own player-info cache
+-- (GetPlayerInfoByGUID -> name + normalizedRealmName).
+-- @param guid string
+-- @return string|nil "Name-Realm", or nil if the GUID is unknown to the client.
+function Util.unitForGuidFromClient(guid)
+	if not guid or not GetPlayerInfoByGUID then
+		return nil
+	end
+	-- May fail outright or yield secret values during lockdown.
+	local ok, _, _, _, _, _, name, realm = pcall(GetPlayerInfoByGUID, guid)
+	if not ok
+		or not name or name == "" or not canaccessvalue(name)
+		or (realm ~= nil and not canaccessvalue(realm))
+	then
+		return nil
+	end
+	return fullUnitName((realm and realm ~= "") and (name .. "-" .. realm) or name)
 end
 
 local function guidFromUnits(unitID)
