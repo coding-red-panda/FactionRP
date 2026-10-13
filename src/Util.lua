@@ -168,7 +168,8 @@ local function rosterTables()
 		guidByName = {},    -- normalized name -> GUID
 		nameByGuid = {},    -- GUID -> display "Name-Realm" (request serving)
 		guildByName = {},   -- normalized name -> true (guild members)
-		communityByName = {} -- normalized name -> true (community members)
+		communityByName = {}, -- normalized name -> true (community members)
+		onlineByName = {},  -- normalized name -> true (logged-in members)
 	}
 end
 
@@ -267,6 +268,7 @@ local function stepRosterBuild(build)
 						t.nameByGuid[info.guid] = fullUnitName(info.name)
 					end
 					if PRESENCE_ONLINE[info.presence] then
+						t.onlineByName[key] = true
 						-- A member's faction can be absent on *this* club's
 						-- record (guild rosters don't always populate it): any
 						-- club's claim counts. Still-unknown members defer to
@@ -351,6 +353,7 @@ local function startRosterBuild()
 	wipe(back.nameByGuid)
 	wipe(back.guildByName)
 	wipe(back.communityByName)
+	wipe(back.onlineByName)
 	wipe(buildSeenXfac)
 	wipe(buildSeenGuild)
 	rosterBuild = {
@@ -396,6 +399,13 @@ end
 function Util.isGuildClubMember(unitID)
 	local key = normalizeUnitName(unitID)
 	return key ~= nil and clubRoster().guildByName[key] == true
+end
+
+--- Whether a "Name-Realm" is a club member currently logged in (per the
+-- roster memo's presence field — mobile-app presences count as offline).
+function Util.isClubMemberOnline(unitID)
+	local key = normalizeUnitName(unitID)
+	return key ~= nil and clubRoster().onlineByName[key] == true
 end
 
 --- Whether a "Name-Realm" is a member of one of our (non-guild) communities.

@@ -181,7 +181,7 @@ C.COMM_USAGE_WINDOW = 60
 -- ignore the target for RELAY_IGNORE_TTL (expired ignores re-enter rotation
 -- with a fresh slate).
 C.RELAY_PROBE_INTERVAL = 120 -- gap between whisper probe bursts
-C.RELAY_PROBE_BURST = 3      -- probe targets per burst
+C.RELAY_PROBE_BURST = 5      -- probe targets per burst
 C.RELAY_CONFIRM_TTL = 600    -- relay confirmation expires without fresh proof
 C.RELAY_PROBE_COOLDOWN = 45  -- min gap between probes to the same target
 C.RELAY_PROBE_MAX = 3        -- unanswered probes before ignoring

@@ -17,6 +17,15 @@
 - `REQ` whisper legs now reach only confirmed relays and known xfac
   contacts — unproven roster candidates are left to the probe rotation, so
   a request never whispers strangers.
+- Relays/contacts are skipped while the roster marks them offline, and
+  `/frp relays` badges each whisper relay with its leg membership
+  (`[C]`/`[G]`/`[C+G]`) and resolves BNet accounts to character names.
+- Roster fix: a factionless guild record no longer hides cross-faction
+  guild members — faction claims accumulate across clubs, unknown members
+  defer to end-of-build.
+- Probe fairness: never-probed candidates are targeted before re-probes
+  (was front-of-roster-first, which starved deeper candidates until the
+  front ones were ignored); guild members probe before community.
 - Realm normalisation now strips spaces, hyphens and priods.
 
 ## 0.3.0

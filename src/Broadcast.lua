@@ -159,13 +159,16 @@ function Broadcast:relayIgnored(key, now)
 	return p ~= nil and p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL
 end
 
---- Next whisper-probe target: the first unconfirmed, non-ignored roster
--- candidate whose probe cooldown has lapsed (roster order + cooldowns give a
--- natural rotation). Failing that, the stalest confirmed relay past half its
--- TTL — keepalive probing so quiet-but-alive peers stay confirmed.
+--- Next whisper-probe target, in priority order: never-probed candidates
+-- first (everyone gets a turn before anyone is re-probed), then the
+-- longest-since-probed unconfirmed candidate, then the stalest confirmed
+-- relay past half its TTL (keepalive so quiet-but-alive peers stay
+-- confirmed). Guild members are scanned before community members — they
+-- are the closer tie and the smaller list.
 function Broadcast:whisperProbeTarget(now)
+	local oldKey, oldName, oldLp
 	local staleKey, staleName, staleAt
-	for _, roster in ipairs({ Util.xfacClubMembers(), Util.xfacGuildMembers() }) do
+	for _, roster in ipairs({ Util.xfacGuildMembers(), Util.xfacClubMembers() }) do
 		for _, name in ipairs(roster) do
 			local key = Util.normalizeUnitName(name)
 			if key then
@@ -178,8 +181,13 @@ function Broadcast:whisperProbeTarget(now)
 					local fresh = p and p.conf ~= 0
 						and (now - p.conf) < C.RELAY_CONFIRM_TTL
 					if not fresh then
-						if not p or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
-							return key, name
+						if not p or p.lp == 0 then
+							return key, name -- never probed
+						end
+						if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
+							and (not oldLp or p.lp < oldLp)
+						then
+							oldKey, oldName, oldLp = key, name, p.lp
 						end
 					elseif (now - p.conf) >= C.RELAY_CONFIRM_TTL * 0.5
 						and (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
@@ -190,6 +198,9 @@ function Broadcast:whisperProbeTarget(now)
 				end
 			end
 		end
+	end
+	if oldKey then
+		return oldKey, oldName
 	end
 	return staleKey, staleName
 end
@@ -222,12 +233,14 @@ function Broadcast:_sendLeg(chunks, roster, inLeg, limit, skipName, now, picks)
 		seen[skipName] = skipName
 	end
 	for _, p in pairs(self.relays) do
-		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL and inLeg(p.name) then
+		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
+			and Util.isClubMemberOnline(p.name) and inLeg(p.name)
+		then
 			addCandidate(candidates, seen, p.name)
 		end
 	end
 	for _, unitID in pairs(self.xfacContacts) do
-		if inLeg(unitID) then
+		if Util.isClubMemberOnline(unitID) and inLeg(unitID) then
 			addCandidate(candidates, seen, unitID)
 		end
 	end

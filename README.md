@@ -180,8 +180,9 @@ single-chunk control messages, and every client maintains its own relay lists â€
 coverage is distributed across requesters.
 
 Rather than waiting for requests, we **actively probe** the roster: every
-`RELAY_PROBE_INTERVAL` (2min) a burst of up to `RELAY_PROBE_BURST` (3)
-candidates gets a whispered `HELLO` (rotating per-target cooldown),
+`RELAY_PROBE_INTERVAL` (2min) a burst of up to `RELAY_PROBE_BURST` (5)
+candidates gets a whispered `HELLO` (never-probed targets first, so everyone
+gets a turn; guild members before community members),
 a whispered `HELLO` earns a `HI` reply, and any parseable inbound whisper
 confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min). Stale confirmed
 relays are re-probed to keep the list warm, and targets that ignore

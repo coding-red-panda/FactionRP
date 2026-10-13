@@ -154,11 +154,12 @@ any parseable inbound message → confirmed (10 min TTL)
 Whisper peers (cross-faction club members) use the same probe/confirm/ignore
 lifecycle as BNet accounts:
 
-- **Probing**: bursts of up to `RELAY_PROBE_BURST` (3) whispered
-  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (120s), targeting unconfirmed,
-  non-ignored roster candidates on a rotating per-target cooldown
-  (`RELAY_PROBE_COOLDOWN`=45s). A whispered `HELLO` is answered `HI`
-  (rate-limited per sender by `RELAY_HI_COOLDOWN`=30s).
+- **Probing**: bursts of up to `RELAY_PROBE_BURST` (5) whispered
+  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (120s). Target priority is
+  never-probed candidates first, then the longest-since-probed
+  (`RELAY_PROBE_COOLDOWN`=45s floor), so every candidate gets a turn —
+  guild members are scanned before community members. A whispered `HELLO`
+  is answered `HI` (rate-limited per sender by `RELAY_HI_COOLDOWN`=30s).
 - **Confirming**: any parseable inbound whisper from an opposite-faction
   club member — `HI`, `ACK`, `REQ`, or data — confirms them for
   `RELAY_CONFIRM_TTL` (10min). Confirmed relays get fanout priority.

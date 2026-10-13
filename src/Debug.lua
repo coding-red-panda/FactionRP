@@ -225,12 +225,20 @@ ns.RegisterCommand("relays", function()
 	local now = GetTime()
 	local conf, probing, ignored = {}, {}, 0
 	for _, p in pairs(b.relays or {}) do
+		local tag
+		if ns.Util.isCommunityClubMember(p.name) then
+			tag = ns.Util.isGuildClubMember(p.name) and " [C+G]" or " [C]"
+		elseif ns.Util.isGuildClubMember(p.name) then
+			tag = " [G]"
+		else
+			tag = " [?]" -- in neither club's current roster (left / stale)
+		end
 		if p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL then
 			ignored = ignored + 1
 		elseif p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL then
-			conf[#conf + 1] = p.name
+			conf[#conf + 1] = p.name .. tag
 		elseif p.pr > 0 then
-			probing[#probing + 1] = p.name
+			probing[#probing + 1] = p.name .. tag
 		end
 	end
 	ns.Print("known relays (confirmed FRP): " .. joined(conf))
@@ -248,8 +256,22 @@ ns.RegisterCommand("relays", function()
 			math.floor(GetTime() - (r.at or 0))))
 	end
 	local lists = ns.comms and ns.comms:bnetPeerLists() or { confirmed = {}, probing = {}, ignored = {} }
+	-- Resolve confirmed BNet accounts to character names where the API allows.
+	local bnetConf = {}
+	for _, id in ipairs(lists.confirmed) do
+		local name
+		if type(BNGetGameAccountInfo) == "function" then
+			local ok, info = pcall(BNGetGameAccountInfo, id)
+			local char = ok and info and info.characterName
+			if char and char ~= "" and canaccessvalue(char) then
+				local realm = info.realmName
+				name = (realm and realm ~= "") and (char .. "-" .. realm) or char
+			end
+		end
+		bnetConf[#bnetConf + 1] = name or tostring(id)
+	end
 	ns.Print(("bnet peers — confirmed: %s | probing: %s | ignored: %d"):format(
-		joined(lists.confirmed), joined(lists.probing), #lists.ignored))
+		joined(bnetConf), joined(lists.probing), #lists.ignored))
 	ns.Print(("exchange — pending requests: %d | pending serves: %d"):format(
 		mapSize(b.requests or {}), mapSize(b.pendingServes or {})))
 	local p = b.lastLegPicks
