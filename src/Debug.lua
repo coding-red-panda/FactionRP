@@ -226,6 +226,15 @@ ns.RegisterCommand("relays", function()
 	ns.Print("xfac contacts (reachable, unconfirmed): " .. joined(mapNames(b.xfacContacts)))
 	ns.Print(("roster candidates: %d community / %d guild"):format(
 		#ns.Util.xfacClubMembers(), #ns.Util.xfacGuildMembers()))
+	-- Raw club-membership counts (all factions, not just xfac candidates):
+	-- distinguishes "guild club never scanned" (0) from "members scanned but
+	-- none opposite-faction" (>0 while candidates stay 0).
+	local r = ns.Util._roster and ns.Util._roster()
+	if r then
+		ns.Print(("roster membership — community: %d | guild: %d | built %ds ago"):format(
+			mapSize(r.communityByName), mapSize(r.guildByName),
+			math.floor(GetTime() - (r.at or 0))))
+	end
 	local lists = ns.comms and ns.comms:bnetPeerLists() or { confirmed = {}, probing = {}, ignored = {} }
 	ns.Print(("bnet peers — confirmed: %s | probing: %s | ignored: %d"):format(
 		joined(lists.confirmed), joined(lists.probing), #lists.ignored))

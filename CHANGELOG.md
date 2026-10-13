@@ -7,6 +7,11 @@
 - `REQ` now includes subject unitID alongside GUID for validation.
   This helps serve profiles you haven't seen this session if they're already
   in the register.
+- Servers that can't serve reply `MISS <guid>` to directly-whispered `REQ`s —
+  confirms them as relays and distinguishes "can't serve" from "never
+  delivered". Channel/group recipients stay silent; replies are throttled
+  per requester+subject (`MISS_REPLY_COOLDOWN`, 30s).
+- Outbound send rate halved to `SEND_RATE` = 3.75 chunks/sec.
 - Realm normalisation now strips spaces, hyphens and priods.
 
 ## 0.3.0

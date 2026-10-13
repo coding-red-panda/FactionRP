@@ -115,6 +115,7 @@ decode `data` as a profile, and drop it harmlessly.
 | `ACK`   | subjectGuid         | "I can serve it"                            |
 | `OK`    | subjectGuid         | grant — "you may send it"                   |
 | `NOK`   | subjectGuid         | deny — "stand down"                         |
+| `MISS`  | subjectGuid         | miss reply — "got your REQ, can't serve"    |
 
 `REQ` is the only two-argument verb: `unitID` is the subject's
 `"Name-Realm"` as computed by the requester's RP AddOn — the exact key its
@@ -167,7 +168,8 @@ requester                                candidate servers
     │                                          confirmed BNet +
     │                                          xfac whisper relays)
     │                                          └ can extract? → ACK
-    │                                            cannot?  → silent
+    │                                            cannot?  → MISS on whispers,
+    │                                            silent on channel/group
     │  ◄── ACK <guid> ── (first wins)
     │  ── OK <guid> ──► winner only
     │  ── NOK <guid> ─► every later ACKer
@@ -182,6 +184,9 @@ requester                                candidate servers
   `awaiting-data` expires after `REQ_DATA_TIMEOUT` (30s) without data.
 - Data received for a pending subject completes the request from any source;
   if it arrived from a non-winner, the winner is NOK'd best-effort.
+- A `MISS` is informational: the request stays open for other candidates.
+  It confirms the sender as a relay and distinguishes "can't serve" from
+  "never delivered".
 
 **Server rules**
 - A `REQ` is ACKed only when we can actually extract the profile: the
@@ -197,8 +202,12 @@ requester                                candidate servers
   (older peer, or a requester that could not compute the unitID) resolves
   from local claims alone. `REQ` for our own guid answers directly —
   we are the authority on ourselves.
-- Misses stay silent — a NOK per non-holder costs more than the requester's
-  timeout.
+- Misses answer `MISS <guid>` **only to a direct-whisper `REQ`** — those
+  recipients are bounded by the requester's own relay caps, so a reply per
+  non-holder stays cheap and doubles as relay confirmation. Channel/group
+  recipients stay silent: a reply per listener there would cost more than
+  the requester's timeout. Replies are throttled to one per requester+subject
+  per `MISS_REPLY_COOLDOWN` (30s).
 - An ACK records a *pending serve* (`SERVE_PENDING_CAP`=16, expires at
   `SERVE_TIMEOUT`=30s). `OK` triggers extraction and a direct send;
   `NOK` discards it.

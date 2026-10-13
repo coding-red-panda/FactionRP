@@ -45,7 +45,7 @@ C.CHUNK_SIZE = 220
 -- idle queue cannot bank an unbounded burst). Dial the whole send rate by
 -- editing this one number.
 C.SEND_INTERVAL = 0.2
-C.SEND_RATE = 7.5
+C.SEND_RATE = 3.75
 
 -- Cap on the reusable send-descriptor pool (the outbound queue stores pooled
 -- record tables instead of closures). Beyond this depth sends simply allocate
@@ -53,11 +53,11 @@ C.SEND_RATE = 7.5
 C.POOL_SEND_DESC = 256
 
 -- Hard bound on queued send chunks. Outbound demand (inbound rate x chunks
--- x legs) can exceed the 15/s drain capacity during bursts, and an unbounded
--- queue then grows monotonically with every chunk leaving stale. A leg that
+-- x legs) can exceed the drain rate during bursts, and an unbounded queue
+-- then grows monotonically with every chunk leaving stale. A leg that
 -- cannot fit entirely is dropped whole — dropping individual chunks just
 -- produces an incomplete message at the far end while still wasting the
--- siblings' sends. ~384 chunks is ~25s of worst-case dwell at the drain rate.
+-- siblings' sends.
 C.SEND_QUEUE_CAP = 384
 
 -- FRP1 control channel -----------------------------------------------------
@@ -74,6 +74,8 @@ C.SEND_QUEUE_CAP = 384
 --   ACK <subjectGuid>   "I can serve it"
 --   OK  <subjectGuid>   grant: "you may send it"
 --   NOK <subjectGuid>   deny: "stand down" (late ACKs)
+--   MISS <subjectGuid>  miss reply to a whispered REQ: "got it, can't serve"
+--      — bounded relay-proof for direct peers; never sent to channel/group.
 -- Control messages are never cached, injected, or relayed.
 C.CTL_SUBJECT = "_frp"
 C.CTL_PROTO = "FRP1"
@@ -117,6 +119,7 @@ C.REQ_COOLDOWN = 60      -- min gap between requests for the same subject
 C.REQ_MAX_PENDING = 32   -- bound on outstanding requests
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
+C.MISS_REPLY_COOLDOWN = 30 -- min gap between MISS replies to the same peer+subject
 
 -- Caching -------------------------------------------------------------------
 

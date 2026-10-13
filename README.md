@@ -81,7 +81,10 @@ after a granted request, using single-chunk FRP1 control messages
    profile replies. The subject's identity is consensus-checked first: every
    claim held for the guid (local cache, client player-info, club roster,
    and the wire-asserted unitID) must agree — conflicting or absent claims
-   stay silent. `REQ` for our own GUID answers directly.
+   can't serve. `REQ` for our own GUID answers directly. A recipient that
+   can't serve replies **MISS \<guid\>** to *direct whispers only* (bounded
+   by the requester's relay caps, so it doubles as relay confirmation) and
+   stays silent on channel/group.
 3. **OK \<guid\>** — the requester grants the *first* ACK; every later ACK
    gets **NOK \<guid\>** and stands down.
 4. The winner extracts and sends the normal data envelope directly to the
@@ -288,7 +291,7 @@ The categories:
 * `chunks` — every wire chunk sent or received (very noisy)
 * `targets` — allows pinned whisper targets (`/frp debug target`) to send
 * `peers` — Battle.net handshake and pull-exchange events (probes,
-  confirmations, ignores, REQ/ACK/OK/NOK traffic, serves)
+  confirmations, ignores, REQ/ACK/OK/NOK/MISS traffic, serves)
 * `stats` — collects traffic statistics (see below)
 
 ### Traffic statistics

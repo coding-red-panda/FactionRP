@@ -66,10 +66,13 @@ function Broadcast:init()
 	--                       winner = { medium, target }|nil }
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   pendingServes[key] = { subject, unitID, medium, target, at }
-	--     where key = "<medium>:<peer>:<guid>" — grants we may serve.
+	--     where key = "<peer>:<guid>" — grants we may serve.
+	--   missReplies[key] = last MISS reply time ("<peer>:<guid>") — bounds
+	--     miss replies to one per requester+subject per MISS_REPLY_COOLDOWN.
 	self.requests = {}
 	self.recentReqs = {}
 	self.pendingServes = {}
+	self.missReplies = {}
 end
 
 function Broadcast:start()
@@ -396,6 +399,13 @@ function Broadcast:tick()
 			self.pendingServes[key] = nil
 		end
 	end
+
+	-- Miss-reply throttle entries die with their cooldown.
+	for key, at in pairs(self.missReplies) do
+		if (now - at) > C.MISS_REPLY_COOLDOWN then
+			self.missReplies[key] = nil
+		end
+	end
 end
 
 --- Request `guid`'s profile from the mesh (we just saw an opposite-faction
@@ -583,22 +593,23 @@ function Broadcast:onControl(msg, context)
 			unitID = self:resolveSubject(arg, arg2)
 		end
 		local adapter = ns.getAvailableAdapter()
+		local acked = false
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
-			-- Bound granted-or-awaiting serves: over the cap we simply do not
-			-- ACK (same as a miss — the requester still times out cleanly).
+			-- Bound granted-or-awaiting serves: over the cap we do not ACK —
+			-- reported as an ordinary miss below.
 			local pending = 0
 			for _ in pairs(self.pendingServes) do
 				pending = pending + 1
 			end
-			if pending >= C.SERVE_PENDING_CAP then
-				return
-			end
-			if self:sendToPeer(self:buildCtl("ACK", arg), context.medium, target) then
+			if pending < C.SERVE_PENDING_CAP
+				and self:sendToPeer(self:buildCtl("ACK", arg), context.medium, target)
+			then
 				local key = serveKey(context, arg)
 				self.pendingServes[key] = {
 					subject = arg, unitID = unitID,
 					medium = context.medium, target = target, at = now,
 				}
+				acked = true
 				if leg then
 					leg("ack", 1)
 				end
@@ -607,8 +618,27 @@ function Broadcast:onControl(msg, context)
 				end
 			end
 		end
-		-- Misses stay silent: a NOK per non-holder would cost more than the
-		-- requester's timeout.
+		if not acked and context.medium == "WHISPER" then
+			-- Miss reply: "got your REQ, can't serve". Direct whispers only —
+			-- they are bounded by the requester's own relay caps, so a reply
+			-- per non-holder stays cheap; channel/group recipients stay silent
+			-- (a reply per listener there is the flood the silent-miss rule
+			-- exists to avoid). The reply doubles as relay confirmation for
+			-- the requester. Throttled per requester+subject so REQ spam
+			-- cannot turn into MISS spam.
+			local missKey = target .. ":" .. arg
+			if now - (self.missReplies[missKey] or 0) >= C.MISS_REPLY_COOLDOWN then
+				self.missReplies[missKey] = now
+				if self:sendToPeer(self:buildCtl("MISS", arg), context.medium, target) then
+					if leg then
+						leg("miss", 1)
+					end
+					if peer then
+						peer("miss " .. arg .. " -> " .. tostring(target))
+					end
+				end
+			end
+		end
 	elseif verb == "ACK" then
 		local req = self.requests[arg]
 		local won = req
@@ -644,6 +674,13 @@ function Broadcast:onControl(msg, context)
 		end
 	elseif verb == "NOK" then
 		self.pendingServes[serveKey(context, arg)] = nil
+	elseif verb == "MISS" then
+		-- "Received your REQ but can't serve." The inbound whisper stamp
+		-- already confirmed the relay; the request stays open — other
+		-- candidates may still ACK. Informational only.
+		if peer then
+			peer("miss " .. arg .. " <- " .. tostring(target) .. " (can't serve)")
+		end
 	end
 end
 
