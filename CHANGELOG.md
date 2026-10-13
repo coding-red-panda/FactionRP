@@ -30,7 +30,7 @@
 - Probe fairness: never-probed candidates are targeted before re-probes
   (was front-of-roster-first, which starved deeper candidates until the
   front ones were ignored); guild members probe before community.
-- Realm normalisation now strips spaces, hyphens and priods.
+- Realm normalisation now strips spaces, hyphens and periods.
 
 
 ## 0.3.0
