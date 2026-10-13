@@ -107,14 +107,21 @@ Control messages are **never cached, never injected, never relayed** — they
 terminate at the recipient. Clients without FRP1 parse the envelope, fail to
 decode `data` as a profile, and drop it harmlessly.
 
-| Verb    | Arg          | Meaning                                        |
-|---------|--------------|------------------------------------------------|
-| `HELLO` | addonVer     | BNet probe — "I run FactionRP"                 |
-| `HI`    | addonVer     | handshake reply                                |
-| `REQ`   | subjectGuid  | pull request — "who can serve this profile?"   |
-| `ACK`   | subjectGuid  | "I can serve it"                               |
-| `OK`    | subjectGuid  | grant — "you may send it"                      |
-| `NOK`   | subjectGuid  | deny — "stand down"                            |
+| Verb    | Args                | Meaning                                     |
+|---------|---------------------|---------------------------------------------|
+| `HELLO` | addonVer            | BNet probe — "I run FactionRP"              |
+| `HI`    | addonVer            | handshake reply                             |
+| `REQ`   | subjectGuid [unitID]| pull request — "who can serve this profile?"|
+| `ACK`   | subjectGuid         | "I can serve it"                            |
+| `OK`    | subjectGuid         | grant — "you may send it"                   |
+| `NOK`   | subjectGuid         | deny — "stand down"                         |
+
+`REQ` is the only two-argument verb: `unitID` is the subject's
+`"Name-Realm"` as computed by the requester's RP AddOn — the exact key its
+register uses. It is optional (older/adapter-less clients send the guid
+alone) and lets any server answer straight from its register without local
+guid→unitID state. `ACK`/`OK`/`NOK` still carry the guid only — it is the
+wire identity.
 
 ### BNet peer confirmation
 
@@ -156,7 +163,7 @@ targets an opposite-faction player whose profile we do not hold fresh.
 
 ```
 requester                                candidate servers
-    │  REQ <guid> ───────────────────────────► (channel + group +
+    │  REQ <guid> [unitID] ──────────────────► (channel + group +
     │                                          confirmed BNet +
     │                                          xfac whisper relays)
     │                                          └ can extract? → ACK
@@ -177,9 +184,19 @@ requester                                candidate servers
   if it arrived from a non-winner, the winner is NOK'd best-effort.
 
 **Server rules**
-- A `REQ` is ACKed only when we can actually extract the profile: the subject
-  is us, resolvable guid→unitID via the gossip cache or club roster, and the
-  RP AddOn's register holds the profile (`adapter:canServe`).
+- A `REQ` is ACKed only when we can actually extract the profile: the
+  subject resolves to a unitID *and* the RP AddOn's register holds the
+  profile (`adapter:canServe` reads the register live — including profiles
+  received in earlier sessions; the register is persisted state, unlike
+  our cache).
+- Subject identity resolves by **consensus**: every claim we hold for the
+  guid — our cache's guid→unitID map, the client player-info cache
+  (`GetPlayerInfoByGUID`), the club roster, and the requester-asserted
+  wire unitID — must agree on one unitID. Any disagreement is a silent
+  miss: we never serve on conflicting identities. A guid-only `REQ`
+  (older peer, or a requester that could not compute the unitID) resolves
+  from local claims alone. `REQ` for our own guid answers directly —
+  we are the authority on ourselves.
 - Misses stay silent — a NOK per non-holder costs more than the requester's
   timeout.
 - An ACK records a *pending serve* (`SERVE_PENDING_CAP`=16, expires at
