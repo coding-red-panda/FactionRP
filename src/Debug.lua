@@ -262,8 +262,9 @@ ns.RegisterCommand("relays", function()
 		local name
 		if type(BNGetGameAccountInfo) == "function" then
 			local ok, info = pcall(BNGetGameAccountInfo, id)
-			local char = ok and info and info.characterName
-			if char and char ~= "" and canaccessvalue(char) then
+			local char = ok and ns.Util.canWeUse(info) and type(info) == "table"
+				and info.characterName
+			if char and char ~= "" then
 				local realm = info.realmName
 				name = (realm and realm ~= "") and (char .. "-" .. realm) or char
 			end
