@@ -2,7 +2,12 @@
 
 ## 0.3.1
 
+### Fixes
+- Channel reordering should no longer cause stale sends to pass on to the
+  old channel index.
+
 ### Changed
+- Added debug option to display reorder ops: `/frp debug reorders`
 - Messages have been slowed way the hell down.
 - FRP now handshakes passively with potential relays, rather than fanning out on demand.
   This does have the effect of slowing down the rate of profiles when the mesh is thin.
