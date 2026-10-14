@@ -546,13 +546,15 @@ function Util.fixChompChannelTargets(channelInx)
 	if type(channelInx) ~= "number" or channelInx == 0 then
 		return
 	end
+	if debug then
+		ns.Print("fixChompChannelTargets, index: " .. channelInx)
+	end
 	local ctl = ChatThrottleLib
 	if not ctl or type(ctl.Prio) ~= "table" then
 		-- if it doesn't exist or if something corrupted ctl.Prio into a non-table,
 		-- fuck off
 		return
 	end
-	local debug = ns.debugEnabled("reorders")
 	local rewritten = 0
 	local currentId = {}
 	local function findUniqueNums()
@@ -567,6 +569,9 @@ function Util.fixChompChannelTargets(channelInx)
 		return table.concat(out, ", ")
 	end
 	-- Find FRP's messages in the pipeline and edit targets in place
+	if debug then 
+		ns.Print("Looping ctl.Prio")
+	end
 	for _, prio in pairs(ctl.Prio) do
 		for _, pipe in pairs(prio.ByName or {}) do
 			for i = 1, #pipe do
