@@ -552,16 +552,41 @@ function Util.fixChompChannelTargets(channelInx)
 		-- fuck off
 		return
 	end
-
+	local debug = ns.debugEnabled("reorders")
+	local rewritten = 0
+	local currentId = {}
+	local function findUniqueNums()
+		local seen, out = {}, {}
+		for i = 1, #currentId do
+			local id = currentId[i]
+			if id and not seen[id] then
+				seen[id] = true
+				out[#out + 1] = tostring(id)
+			end
+		end
+		return table.concat(out, ", ")
+	end
 	-- Find FRP's messages in the pipeline and edit targets in place
 	for _, prio in pairs(ctl.Prio) do
 		for _, pipe in pairs(prio.ByName or {}) do
 			for i = 1, #pipe do
 				local msg = pipe[i]
 				if type(msg) == "table" and msg[1] == C.MSG_PREFIX and msg[3] == "CHANNEL" then
+					rewritten = rewritten + 1
+					if debug then
+						currentId[#currentId + 1] =  msg[4] or 0
+					end
+					-- we still want to fix and send nils
+					-- msg.n == 3 if channel was nil
+					if msg.n == 3 then
+						msg.n = 4
+					end
 					msg[4] = channelInx
 				end
 			end
 		end
+	end
+	if rewritten > 0 and debug then
+		ns.Print("Rewrote " .. rewritten .. " from channels " .. findUniqueNums() .. " to channel " .. channelInx)
 	end
 end
