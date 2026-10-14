@@ -161,6 +161,11 @@ function Comms:channelIndex()
 	return id
 end
 
+-- Register an event so we can update our channel on reorder over the pipe.
+ns.RegisterEvent("CHANNEL_UI_UPDATE", function()
+	ns.Util.fixChompChannelTargets(Comms:channelIndex())
+end)
+
 -- Outbound queue ------------------------------------------------------------
 
 --- Number of sends currently queued.
@@ -184,6 +189,12 @@ end
 -- descriptor is released back to the pool.
 function Comms:sendDescriptor(desc)
 	local text = desc.text
+	if desc.kind == "CHANNEL" then
+		desc.target = self:channelIndex() -- always refresh channelindex.
+		if not desc.target then
+			return
+		end
+	end
 	if ns.statsChunkOut then
 		ns.statsChunkOut(desc.kind, #text, GetTime() - desc.enqueuedAt)
 	end
