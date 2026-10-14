@@ -546,6 +546,7 @@ function Util.fixChompChannelTargets(channelInx)
 	if type(channelInx) ~= "number" or channelInx == 0 then
 		return
 	end
+	local debug = ns.debugEnabled("reorders")
 	if debug then
 		ns.Print("fixChompChannelTargets, index: " .. channelInx)
 	end
