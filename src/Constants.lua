@@ -232,6 +232,7 @@ C.DEBUG_CATEGORIES = {
 	{ key = "targets",   desc = "Allow pinned whisper targets to send" },
 	{ key = "peers",     desc = "Log BNet probe/confirm and REQ exchange events" },
 	{ key = "stats",     desc = "Collect traffic statistics (/frp stats)" },
+	{ key = "reorders",	 desc = "Print reorder ops in chat."}
 }
 
 -- Statistics collection is session-only and bounded: reservoirs cap how many
