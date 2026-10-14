@@ -238,6 +238,11 @@ local function stepRosterBuild(build)
 		end
 		if not build.members then
 			local ok, members = pcall(C_Club.GetClubMembers, club.id)
+			if ok and not Util.canWeUse(members) then
+				rebuildRetryAt = GetTime() + C.ROSTER_RETRY
+				rosterBuild = nil
+				return
+			end
 			build.members = (ok and type(members) == "table") and members or {}
 			build.m = 1
 		end
@@ -248,9 +253,9 @@ local function stepRosterBuild(build)
 		else
 			build.m = build.m + 1
 			budget = budget - 1
-			-- Club APIs can fail before init or yield secrets during lockdown.
 			local okInfo, info = pcall(C_Club.GetMemberInfo, club.id, memberId)
-			if okInfo and info and not info.isSelf and info.name and canaccessvalue(info.name) then
+			if okInfo and Util.canWeUse(info) and type(info) == "table"
+				and not info.isSelf and info.name then
 				local key = normalizeUnitName(info.name)
 				if key then
 					local t = build.target
@@ -263,7 +268,7 @@ local function stepRosterBuild(build)
 					else
 						t.communityByName[key] = true
 					end
-					if info.guid and canaccessvalue(info.guid) then
+					if info.guid then
 						t.guidByName[key] = info.guid
 						t.nameByGuid[info.guid] = fullUnitName(info.name)
 					end
@@ -319,7 +324,7 @@ local function startRosterBuild()
 		return
 	end
 	local ok, clubs = pcall(C_Club.GetSubscribedClubs)
-	if not ok or type(clubs) ~= "table" then
+	if not ok or type(clubs) ~= "table" or not Util.canWeUse(clubs) then
 		return
 	end
 	-- Our own guild is a club too (C_Club.GetGuildClubId) and gets the same
@@ -331,7 +336,7 @@ local function startRosterBuild()
 		list[#list + 1] = { id = club.clubId, guild = isGuild or nil }
 	end
 	local okGuild, guildClubId = pcall(C_Club.GetGuildClubId)
-	if okGuild and guildClubId then
+	if okGuild and Util.canWeUse(guildClubId) and guildClubId then
 		local found = false
 		for _, club in ipairs(list) do
 			if club.id == guildClubId then
@@ -430,9 +435,8 @@ function Util.unitForGuidFromClient(guid)
 	end
 	-- May fail outright or yield secret values during lockdown.
 	local ok, _, _, _, _, _, name, realm = pcall(GetPlayerInfoByGUID, guid)
-	if not ok
-		or not name or name == "" or not canaccessvalue(name)
-		or (realm ~= nil and not canaccessvalue(realm))
+	if not ok or not Util.canWeUse(name, realm)
+		or not name or name == ""
 	then
 		return nil
 	end
@@ -443,9 +447,9 @@ local function guidFromUnits(unitID)
 	for _, token in ipairs(GUID_UNIT_TOKENS) do
 		-- Unit APIs may yield secret values during lockdown; skip those.
 		local ok, guid = pcall(UnitGUID, token)
-		if ok and guid and not issecretvalue(guid) then
+		if ok and Util.canWeUse(guid) and guid then
 			local okID, id = pcall(Util.getUnitID, token)
-			if okID and id and id:lower() == unitID then
+			if okID and Util.canWeUse(id) and id and id:lower() == unitID then
 				return guid
 			end
 		end
@@ -464,7 +468,7 @@ local function guidFromBNetFriends(unitID)
 		local numAccounts = C_BattleNet.GetFriendNumGameAccounts(i) or 0
 		for j = 1, numAccounts do
 			local acct = C_BattleNet.GetFriendGameAccountInfo(i, j)
-			if acct
+			if type(acct) == "table" and Util.canWeUse(acct)
 				and acct.clientProgram == BNET_CLIENT_WOW
 				and acct.characterName
 				and acct.realmName
@@ -595,4 +599,40 @@ function Util.fixChompChannelTargets(channelInx)
 	if rewritten > 0 and debug then
 		ns.Print("Rewrote " .. rewritten .. " from channels " .. findUniqueNums() .. " to channel " .. channelInx)
 	end
+end
+
+-- Deal with every kind of secret. --------------
+
+-- Recursive worker; `seen` guards cyclic tables, pcall guards weird ones.
+local function deepUsable(val, seen)
+	if type(val) ~= "table" then
+		return canaccessvalue(val)
+	end
+	if not canaccesstable(val) then
+		return false
+	end
+	if seen[val] then
+		return true
+	end
+	seen[val] = true
+	for k, v in pairs(val) do
+		if not canaccessvalue(k) or not deepUsable(v, seen) then
+			return false
+		end
+	end
+	return true
+end
+
+--- Used to check if any supplied value, even within tables, is secret.
+-- @param ... any
+-- @return boolean
+function Util.canWeUse(...)
+	local seen = {}
+	for i = 1, select("#", ...) do
+		local ok, usable = pcall(deepUsable, (select(i, ...)), seen)
+		if not ok or not usable then
+			return false
+		end
+	end
+	return true
 end
