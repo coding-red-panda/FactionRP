@@ -162,9 +162,12 @@ function Comms:channelIndex()
 end
 
 -- Register an event so we can update our channel on reorder over the pipe.
-ns.RegisterEvent("CHANNEL_UI_UPDATE", function()
-	ns.Util.fixChompChannelTargets(Comms:channelIndex())
+hooksecurefunc(C_ChatInfo, "SwapChatChannelsByChannelIndex", function()
+	C_Timer.After(0, function() 
+		ns.Util.fixChompChannelTargets(Comms:channelIndex())
+	end)
 end)
+
 
 -- Outbound queue ------------------------------------------------------------
 
