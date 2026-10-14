@@ -539,3 +539,29 @@ end
 function Util._guidMemo()
 	return guidMemo
 end
+
+--- Retarget FRP messages still queued in CTL after channel reorder,
+--- so that the queue sends to the correct channel.
+function Util.fixChompChannelTargets(channelInx)
+	if type(channelInx) ~= "number" or channelInx == 0 then
+		return
+	end
+	local ctl = ChatThrottleLib
+	if not ctl or type(ctl.Prio) ~= "table" then
+		-- if it doesn't exist or if something corrupted ctl.Prio into a non-table,
+		-- fuck off
+		return
+	end
+
+	-- Find FRP's messages in the pipeline and edit targets in place
+	for _, prio in pairs(ctl.Prio) do
+		for _, pipe in pairs(prio.ByName or {}) do
+			for i = 1, #pipe do
+				local msg = pipe[i]
+				if type(msg) == "table" and msg[1] == C.MSG_PREFIX and msg[3] == "CHANNEL" then
+					msg[4] = channelInx
+				end
+			end
+		end
+	end
+end
