@@ -86,14 +86,20 @@ function Scanner:shareSelf()
 	end
 	local unitID = adapter:getPlayerUnitID()
 	local guid = UnitGUID("player")
-	if unitID and guid then
+	if ns.Util.canWeUse(unitID, guid) and unitID and guid then
 		self:share(adapter, unitID, guid)
 	end
 end
 
 --- Handle a mouseover/target change.
 function Scanner:onSelect(unit)
-	if not UnitIsPlayer(unit) or UnitIsUnit(unit, "player") then
+	if not ns.Util.canWeUse(unit) then
+		return
+	end
+	-- The token checks out, but the results themselves can still be secret.
+	local isPlayer = UnitIsPlayer(unit)
+	local isSelf = UnitIsUnit(unit, "player")
+	if not ns.Util.canWeUse(isPlayer, isSelf) or not isPlayer or isSelf then
 		return -- non-players and ourselves are handled elsewhere
 	end
 	-- Opposite-faction players have no authoritative local data: this is the
@@ -103,7 +109,7 @@ function Scanner:onSelect(unit)
 		local adapter = ns.getAvailableAdapter()
 		local unitID = adapter and adapter:getUnitID(unit)
 		local guid = UnitGUID(unit)
-		if guid then
+		if ns.Util.canWeUse(unitID, guid) and guid then
 			ns.broadcast:requestProfile(guid, unitID)
 		end
 		return
@@ -114,7 +120,7 @@ function Scanner:onSelect(unit)
 	end
 	local unitID = adapter:getUnitID(unit)
 	local guid = UnitGUID(unit)
-	if not unitID or not guid then
+	if not ns.Util.canWeUse(unitID, guid) or not unitID or not guid then
 		return
 	end
 	self.selected[unitID] = guid
@@ -128,12 +134,16 @@ end
 -- otherwise our own injection writes would churn the cache for nothing.
 function Scanner:onAdapterUpdate(adapter, unitID)
 	local guid
-	if unitID == adapter:getPlayerUnitID() then
+	local playerUnitID = adapter:getPlayerUnitID()
+	if not ns.Util.canWeUse(unitID, playerUnitID) then
+		return
+	end
+	if unitID == playerUnitID then
 		guid = UnitGUID("player") -- our own profile changed
 	else
 		guid = self.selected[unitID] -- only previously-selected units
 	end
-	if guid then
+	if ns.Util.canWeUse(guid) and guid then
 		self:share(adapter, unitID, guid)
 	end
 end
@@ -144,7 +154,9 @@ end
 -- collapses the burst into a single extraction+publish, and the jitter keeps
 -- several simultaneous receipts from all landing on the same tick.
 function Scanner:onAdapterReceived(adapter, unitID)
-	if not unitID or unitID == adapter:getPlayerUnitID() then
+	local playerUnitID = adapter:getPlayerUnitID()
+	if not ns.Util.canWeUse(unitID, playerUnitID)
+		or not unitID or unitID == playerUnitID then
 		return -- never re-publish our own profile
 	end
 

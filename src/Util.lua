@@ -47,15 +47,22 @@ end
 local REALM_STRIP = "[%s%-%.]+"
 
 function Util.getUnitID(unit)
-	if not UnitIsPlayer(unit) then
+	if not Util.canWeUse(unit) then
 		return nil
 	end
+	-- The token checks out, but the results themselves can still be secret.
+	local isPlayer = UnitIsPlayer(unit)
 	local name, realm = UnitName(unit)
-	if not name or name == "" then
+	if not Util.canWeUse(isPlayer, name, realm)
+		or not isPlayer or not name or name == ""
+	then
 		return nil
 	end
 	if not realm or realm == "" then
 		realm = GetNormalizedRealmName()
+		if not Util.canWeUse(realm) then
+			return nil
+		end
 	else
 		realm = realm:gsub(REALM_STRIP, "")
 	end
@@ -66,11 +73,15 @@ end
 -- @param unit string A unit token.
 -- @return boolean
 function Util.isOppositeFaction(unit)
-	if not UnitIsPlayer(unit) then
+	if not Util.canWeUse(unit) then
 		return false
 	end
+	local isPlayer = UnitIsPlayer(unit)
 	local theirs = UnitFactionGroup(unit)
 	local mine = UnitFactionGroup("player")
+	if not Util.canWeUse(isPlayer, theirs, mine) or not isPlayer then
+		return false
+	end
 	-- UnitFactionGroup returns "Alliance"/"Horde"/"Neutral"/nil. Treat any
 	-- mismatch between two known, differing groups as opposite faction.
 	return theirs ~= nil and mine ~= nil and theirs ~= mine
@@ -105,7 +116,7 @@ end
 -- @param name string "Name" or "Name-Realm".
 -- @return string|nil
 local function normalizeUnitName(name)
-	if not name or name == "" then
+	if not Util.canWeUse(name) or not name or name == "" then
 		return nil
 	end
 	local char, realm = name:match("^([^-]+)-?(.*)$")
@@ -124,7 +135,7 @@ Util.normalizeUnitName = normalizeUnitName
 --- Same normalization as normalizeUnitName but preserving case: produces the
 --- "Name-Realm" form suitable for a whisper target.
 local function fullUnitName(name)
-	if not name or name == "" then
+	if not Util.canWeUse(name) or not name or name == "" then
 		return nil
 	end
 	local char, realm = name:match("^([^-]+)-?(.*)$")
@@ -186,7 +197,8 @@ local buildSeenXfac, buildSeenGuild = {}, {}
 
 -- ClubMemberInfo.faction is a PvPFaction (0 = Horde, 1 = Alliance, NeverSecret).
 local function selfFaction()
-	return (UnitFactionGroup("player") == "Alliance") and 1 or 0
+	local f = UnitFactionGroup("player")
+	return Util.canWeUse(f) and f == "Alliance" and 1 or 0
 end
 
 local function finishRosterBuild(build)
@@ -247,14 +259,18 @@ local function stepRosterBuild(build)
 			build.m = 1
 		end
 		local memberId = build.members[build.m]
-		if not memberId then
+		if not Util.canWeUse(memberId) then
+			-- Sporadically secret element: skip the member, keep building.
+			build.m = build.m + 1
+			budget = budget - 1
+		elseif not memberId then
 			build.members = nil
 			build.c = build.c + 1
 		else
 			build.m = build.m + 1
 			budget = budget - 1
 			local okInfo, info = pcall(C_Club.GetMemberInfo, club.id, memberId)
-			if okInfo and Util.canWeUse(info) and type(info) == "table"
+			if okInfo and Util.fieldsUsable(info, "isSelf", "name", "guid", "faction", "presence")
 				and not info.isSelf and info.name then
 				local key = normalizeUnitName(info.name)
 				if key then
@@ -332,8 +348,10 @@ local function startRosterBuild()
 	-- whisper-reachable. It is kept as a separate target list.
 	local list = {}
 	for _, club in ipairs(clubs) do
-		local isGuild = Enum and Enum.ClubType and club.clubType == Enum.ClubType.Guild
-		list[#list + 1] = { id = club.clubId, guild = isGuild or nil }
+		if Util.fieldsUsable(club, "clubId", "clubType") then
+			local isGuild = Enum and Enum.ClubType and club.clubType == Enum.ClubType.Guild
+			list[#list + 1] = { id = club.clubId, guild = isGuild or nil }
+		end
 	end
 	local okGuild, guildClubId = pcall(C_Club.GetGuildClubId)
 	if okGuild and Util.canWeUse(guildClubId) and guildClubId then
@@ -463,19 +481,24 @@ local function guidFromBNetFriends(unitID)
 	if not C_BattleNet then
 		return
 	end
-	local numFriends = BNGetNumFriends() or 0
-	for i = 1, numFriends do
-		local numAccounts = C_BattleNet.GetFriendNumGameAccounts(i) or 0
-		for j = 1, numAccounts do
-			local acct = C_BattleNet.GetFriendGameAccountInfo(i, j)
-			if type(acct) == "table" and Util.canWeUse(acct)
-				and acct.clientProgram == BNET_CLIENT_WOW
-				and acct.characterName
-				and acct.realmName
-				and acct.playerGuid
-				and normalizeUnitName(acct.characterName .. "-" .. acct.realmName) == unitID
-			then
-				return acct.playerGuid
+	local numFriends = BNGetNumFriends()
+	if not Util.canWeUse(numFriends) then
+		return
+	end
+	for i = 1, numFriends or 0 do
+		local numAccounts = C_BattleNet.GetFriendNumGameAccounts(i)
+		if Util.canWeUse(numAccounts) then
+			for j = 1, numAccounts or 0 do
+				local acct = C_BattleNet.GetFriendGameAccountInfo(i, j)
+				if Util.fieldsUsable(acct, "clientProgram", "characterName", "realmName", "playerGuid")
+					and acct.clientProgram == BNET_CLIENT_WOW
+					and acct.characterName
+					and acct.realmName
+					and acct.playerGuid
+					and normalizeUnitName(acct.characterName .. "-" .. acct.realmName) == unitID
+				then
+					return acct.playerGuid
+				end
 			end
 		end
 	end
@@ -601,36 +624,31 @@ function Util.fixChompChannelTargets(channelInx)
 	end
 end
 
--- Deal with every kind of secret. --------------
-
--- Recursive worker; `seen` guards cyclic tables, pcall guards weird ones.
-local function deepUsable(val, seen)
-	if type(val) ~= "table" then
-		return canaccessvalue(val)
-	end
-	if not canaccesstable(val) then
-		return false
-	end
-	if seen[val] then
-		return true
-	end
-	seen[val] = true
-	for k, v in pairs(val) do
-		if not canaccessvalue(k) or not deepUsable(v, seen) then
-			return false
+--- False (+ index of the offender) if any supplied value is secret or
+--- inaccessible. A table result only certifies that it can be indexed.
+--- Fields could still be secret which is what we have Util.fieldsUsable() for.
+function Util.canWeUse(...)
+	for i = 1, select("#", ...) do
+		local v = select(i, ...)
+		if type(v) == "table" then
+			if not canaccesstable(v) then
+				return false, i
+			end
+		elseif not canaccessvalue(v) then
+			return false, i
 		end
 	end
 	return true
 end
 
---- Used to check if any supplied value, even within tables, is secret.
--- @param ... any
--- @return boolean
-function Util.canWeUse(...)
-	local seen = {}
+--- Check if supplied table is indexable and, if it is,
+--- discover whether the supplied fields contain secrets.
+function Util.fieldsUsable(t, ...)
+	if type(t) ~= "table" or not canaccesstable(t) then
+		return false
+	end
 	for i = 1, select("#", ...) do
-		local ok, usable = pcall(deepUsable, (select(i, ...)), seen)
-		if not ok or not usable then
+		if not canaccessvalue(t[select(i, ...)]) then
 			return false
 		end
 	end

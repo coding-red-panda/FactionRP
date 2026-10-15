@@ -370,18 +370,24 @@ function Comms:eachBNetGameAccount(callback)
 	if BNFeaturesEnabledAndConnected and not BNFeaturesEnabledAndConnected() then
 		return
 	end
-	local numFriends = BNGetNumFriends() or 0
-	for i = 1, numFriends do
-		local numAccounts = C_BattleNet.GetFriendNumGameAccounts(i) or 0
-		for j = 1, numAccounts do
-			local acct = C_BattleNet.GetFriendGameAccountInfo(i, j)
-			if acct
-				and acct.gameAccountID
-				and acct.isOnline
-				and acct.clientProgram == BNET_CLIENT_WOW
-				and acct.isInCurrentRegion
-			then
-				callback(acct.gameAccountID)
+	local numFriends = BNGetNumFriends()
+	if not ns.Util.canWeUse(numFriends) then
+		return
+	end
+	for i = 1, numFriends or 0 do
+		local numAccounts = C_BattleNet.GetFriendNumGameAccounts(i)
+		if ns.Util.canWeUse(numAccounts) then
+			for j = 1, numAccounts or 0 do
+				local acct = C_BattleNet.GetFriendGameAccountInfo(i, j)
+				if ns.Util.fieldsUsable(acct,
+						"gameAccountID", "isOnline", "clientProgram", "isInCurrentRegion")
+					and acct.gameAccountID
+					and acct.isOnline
+					and acct.clientProgram == BNET_CLIENT_WOW
+					and acct.isInCurrentRegion
+				then
+					callback(acct.gameAccountID)
+				end
 			end
 		end
 	end

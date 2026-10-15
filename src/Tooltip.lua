@@ -20,7 +20,8 @@ function Tooltip:start()
 		end)
 	end
 	ns.RegisterEvent("UPDATE_MOUSEOVER_UNIT", function()
-		if UnitExists("mouseover") then
+		local exists = UnitExists("mouseover")
+		if ns.Util.canWeUse(exists) and exists then
 			self:tryInject("mouseover")
 		end
 	end)
@@ -35,12 +36,15 @@ function Tooltip:tryInject(unit)
 		return
 	end
 
-	if not unit or not UnitIsPlayer(unit) or not ns.Util.isOppositeFaction(unit) then
+	-- The token checks out, but the results themselves can still be secret.
+	local isPlayer = UnitIsPlayer(unit)
+	if not ns.Util.canWeUse(isPlayer) or not unit or not isPlayer
+		or not ns.Util.isOppositeFaction(unit) then
 		return
 	end
 
 	local guid = UnitGUID(unit)
-	if not guid then
+	if not ns.Util.canWeUse(guid) or not guid then
 		return
 	end
 
@@ -56,7 +60,8 @@ function Tooltip:tryInject(unit)
 
 	-- The unit is present, so pass its class id for correct name colouring.
 	local classID = select(3, UnitClass(unit))
-	adapter:inject(entry.unitID, entry.data, classID)
+	adapter:inject(entry.unitID, entry.data,
+		ns.Util.canWeUse(classID) and classID or nil)
 	-- The source AddOn refreshes the shown tooltip on its own data-update event.
 end
 

@@ -86,7 +86,8 @@ function Broadcast:init()
 end
 
 function Broadcast:start()
-	self.playerGUID = UnitGUID("player")
+	local guid = UnitGUID("player")
+	self.playerGUID = Util.canWeUse(guid) and guid or nil
 	ns.comms:setMessageHandler(function(raw, context)
 		self:onMessage(raw, context)
 	end)
