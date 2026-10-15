@@ -238,14 +238,16 @@ end
 
 --- Release queued sends at C.SEND_RATE chunks/second. A fractional token
 --- bucket keeps fractional rates smooth (7.5/s releases 1,2,1,2,... per
---- 0.2s tick); credit is capped at SEND_RATE so an idle queue cannot bank
---- an unbounded burst. Invoked on a timer.
+--- 0.2s tick); credit is capped at max(SEND_RATE, 1) -- one send's worth --
+--- so an idle queue cannot bank an unbounded burst and sub-1/s rates can
+--- still accumulate a send. The 1e-6 tolerance absorbs float accrual
+--- (0.1*10 ~= 1.0 in binary). Invoked on a timer.
 function Comms:flushQueue()
 	local q = self.queue
 	local head = q.head
-	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, C.SEND_RATE)
+	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))
 	local sent = 0
-	while (self.sendCredit - sent) >= 1 and head <= q.tail do
+	while (self.sendCredit - sent) >= (1 - 1e-6) and head <= q.tail do
 		local desc = q[head]
 		q[head] = nil
 		head = head + 1
