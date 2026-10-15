@@ -1,4 +1,4 @@
-## Interface: 120100
+## Interface: 120105
 ## Title: FactionRP
 ## Notes: Cross-faction RP profile sharing - a continuation of CrossRP.
 ## Author: FactionRP
