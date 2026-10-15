@@ -205,8 +205,8 @@ local function selfFaction()
 end
 
 -- raceID -> PvPFaction, memoized: race determines faction unambiguously
--- (dual-faction races use distinct raceIDs). Fallback for member records
--- whose `faction` field arrives absent.
+-- (dual-faction races use distinct raceIDs). Sole faction source —
+-- ClubMemberInfo.faction arrives absent on the current client.
 local raceFaction = {}
 local function factionFromRace(race)
 	if type(race) ~= "number" or not Util.canWeUse(race) then
@@ -325,12 +325,12 @@ local function stepRosterBuild(build)
 			build.m = build.m + 1
 			budget = budget - 1
 			local okInfo, info = pcall(C_Club.GetMemberInfo, club.id, memberId)
-			if okInfo and Util.fieldsUsable(info, "isSelf", "name", "guid", "faction", "presence")
+			if okInfo and Util.fieldsUsable(info, "isSelf", "name", "guid", "presence")
 				and not info.isSelf and info.name then
 				local key = normalizeUnitName(info.name)
 				if key then
 					local t = build.target
-					local faction = info.faction or factionFromRace(info.race)
+					local faction = factionFromRace(info.race)
 					if faction ~= nil then
 						build.sawFaction = true
 						t.factionByName[key] = faction
@@ -347,10 +347,10 @@ local function stepRosterBuild(build)
 					if PRESENCE_ONLINE[info.presence] then
 						t.onlineByName[key] = true
 						-- A member's faction can be absent on *this* club's
-						-- record (guild rosters don't always populate it): any
-						-- club's claim counts. Still-unknown members defer to
+						-- record (race doesn't always populate): any club's
+						-- claim counts. Still-unknown members defer to
 						-- end-of-build so a later club's record can supply it.
-						local faction = info.faction or t.factionByName[key]
+						local faction = t.factionByName[key]
 						if faction ~= nil and faction ~= selfFaction() then
 							-- Dedup per leg: a member in the guild AND a
 							-- community is a candidate in both lists.
