@@ -243,6 +243,10 @@ end
 --- still accumulate a send. The 1e-6 tolerance absorbs float accrual
 --- (0.1*10 ~= 1.0 in binary). Invoked on a timer.
 function Comms:flushQueue()
+	-- Hold all sends while our own GUID is unreadable.
+	if not ns.Util.canWeUse(UnitGUID("player")) then
+		return
+	end
 	local q = self.queue
 	local head = q.head
 	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))

@@ -24,7 +24,7 @@ local Broadcast = ns.Class("Broadcast")
 ns.Broadcast = Broadcast
 
 function Broadcast:init()
-	self.playerGUID = nil -- resolved at login
+	self.playerGUID = nil -- refreshed per use by senderGUID()
 	-- Cross-faction relay lifecycle (session-only), keyed by normalized
 	-- "name-realm" — same probe/confirm/ignore shape as BNet peers:
 	--   relays[key] = {
@@ -86,9 +86,17 @@ function Broadcast:init()
 	self.serveMuteUntil = 0
 end
 
-function Broadcast:start()
+--- Own GUID, fetched fresh and validated on every use. A nil result
+-- degrades sends to encode_fail rather than stamping a bad sender.
+-- @return string|nil
+function Broadcast:senderGUID()
 	local guid = UnitGUID("player")
 	self.playerGUID = Util.canWeUse(guid) and guid or nil
+	return self.playerGUID
+end
+
+function Broadcast:start()
+	self:senderGUID()
 	ns.comms:setMessageHandler(function(raw, context)
 		self:onMessage(raw, context)
 	end)
@@ -384,12 +392,9 @@ end
 
 -- Control channel -----------------------------------------------------------
 
---- Own "Name-Realm", resolved lazily (UnitName may be secret at load).
-local function ownUnitID(broadcast)
-	if not broadcast.playerUnitID then
-		broadcast.playerUnitID = Util.getUnitID("player")
-	end
-	return broadcast.playerUnitID or ""
+--- Own "Name-Realm", validated inside getUnitID each call.
+local function ownUnitID()
+	return Util.getUnitID("player") or ""
 end
 
 --- Build (and chunk) a control envelope: subject "_frp", data "FRP1 <verb>
@@ -397,9 +402,9 @@ end
 -- @return table Chunk list.
 function Broadcast:buildCtl(verb, arg)
 	local message = Serializer.buildMessage({
-		sender = self.playerGUID,
+		sender = self:senderGUID(),
 		subject = C.CTL_SUBJECT,
-		unitID = ownUnitID(self),
+		unitID = ownUnitID(),
 		addon = "FRP",
 		originTime = time(),
 		contentVersion = "0",
@@ -572,7 +577,7 @@ function Broadcast:serveData(serve)
 		return
 	end
 	local message = Serializer.buildMessage({
-		sender = self.playerGUID,
+		sender = self:senderGUID(),
 		subject = serve.subject,
 		unitID = serve.unitID,
 		addon = profile.addon,
@@ -746,10 +751,10 @@ function Broadcast:onControl(msg, context)
 		-- servability check below reads the RP AddOn's register live, so a
 		-- subject absent from our cache is still servable whenever the
 		-- register holds their profile.
-		local selfReq = (arg == self.playerGUID)
+		local selfReq = (arg == self:senderGUID())
 		local unitID
 		if selfReq then
-			unitID = ownUnitID(self)
+			unitID = ownUnitID()
 		else
 			unitID = self:resolveSubject(arg, arg2)
 		end
@@ -819,7 +824,7 @@ function Broadcast:onControl(msg, context)
 			self.pendingServes[key] = nil
 			-- Granted serves are what the breaker meters — a NOK'd ACK
 			-- never cost real work. Self-serves don't count (breaker-bypassed).
-			if serve.subject ~= self.playerGUID then
+			if serve.subject ~= self:senderGUID() then
 				self:bumpServe(now)
 			end
 			self:serveData(serve)
@@ -883,7 +888,7 @@ function Broadcast:onMessage(raw, context)
 	end
 
 	-- Loop avoidance: ignore our own traffic echoed back to us.
-	if msg.sender == self.playerGUID then
+	if msg.sender == self:senderGUID() then
 		if ns.statsError then
 			ns.statsError("self_echo")
 		end
@@ -1001,7 +1006,7 @@ end
 -- Dedup'd by GUID: a newer copy replaces any older pending one.
 function Broadcast:queueInject(candidate)
 	-- Our own profile is already authoritative locally; never inject it back.
-	if candidate.guid == self.playerGUID then
+	if candidate.guid == self:senderGUID() then
 		return
 	end
 	if not self.injectQueue[candidate.guid] then
