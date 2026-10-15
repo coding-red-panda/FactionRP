@@ -194,11 +194,42 @@ local rosterBuild = nil -- incremental build state, or nil when idle
 local rebuildRetryAt = 0  -- no rebuild before this time (suspect-build retry)
 -- Per-build dedup scratch, persistent and wiped at each build start.
 local buildSeenXfac, buildSeenGuild = {}, {}
+-- Consecutive builds discarded by the suspect-faction guard; capped so a
+-- client that never populates `faction` does not retry the build forever.
+local suspectBuilds = 0
 
 -- ClubMemberInfo.faction is a PvPFaction (0 = Horde, 1 = Alliance, NeverSecret).
 local function selfFaction()
 	local f = UnitFactionGroup("player")
 	return Util.canWeUse(f) and f == "Alliance" and 1 or 0
+end
+
+-- raceID -> PvPFaction, memoized: race determines faction unambiguously
+-- (dual-faction races use distinct raceIDs). Fallback for member records
+-- whose `faction` field arrives absent.
+local raceFaction = {}
+local function factionFromRace(race)
+	if type(race) ~= "number" or not Util.canWeUse(race) then
+		return nil
+	end
+	local f = raceFaction[race]
+	if f == nil then
+		local info = C_CreatureInfo and C_CreatureInfo.GetFactionInfo
+			and C_CreatureInfo.GetFactionInfo(race)
+		local tag = type(info) == "table" and Util.canWeUse(info.groupTag)
+			and info.groupTag
+		f = (tag == "Alliance") and 1 or (tag == "Horde") and 0 or false
+		raceFaction[race] = f
+	end
+	return f ~= false and f or nil
+end
+
+local function mapCount(t)
+	local n = 0
+	for _ in pairs(t) do
+		n = n + 1
+	end
+	return n
 end
 
 local function finishRosterBuild(build)
@@ -207,9 +238,18 @@ local function finishRosterBuild(build)
 	-- the whisper legs an empty roster for a whole memo window, so keep the
 	-- old roster and retry shortly instead.
 	if not build.sawFaction and next(build.target.guidByName) then
-		rebuildRetryAt = GetTime() + C.ROSTER_RETRY
-		rosterBuild = nil
-		return
+		suspectBuilds = suspectBuilds + 1
+		if suspectBuilds < 3 then
+			rebuildRetryAt = GetTime() + C.ROSTER_RETRY
+			rosterBuild = nil
+			if ns.debugPeer then
+				ns.debugPeer("roster build suspect (guids but no factions) — retrying")
+			end
+			return
+		end
+		if ns.debugPeer then
+			ns.debugPeer("roster build suspect — publishing anyway (no faction data)")
+		end
 	end
 	-- Deferred members (online, faction unknown at their scan point): classify
 	-- now that every club's faction claims are accumulated.
@@ -229,6 +269,13 @@ local function finishRosterBuild(build)
 	rosterBack.at = GetTime()
 	rosterFront, rosterBack = rosterBack, rosterFront
 	rosterBuild = nil
+	suspectBuilds = 0
+	if ns.debugPeer then
+		ns.debugPeer(("roster published: %d guild / %d community / %d xfac"):format(
+			mapCount(rosterFront.guildByName),
+			mapCount(rosterFront.communityByName),
+			#rosterFront.xfac + #rosterFront.xfacGuild))
+	end
 end
 
 -- Forward declaration: stepRosterBuild reschedules via stepCurrentBuild,
@@ -253,10 +300,18 @@ local function stepRosterBuild(build)
 			if ok and not Util.canWeUse(members) then
 				rebuildRetryAt = GetTime() + C.ROSTER_RETRY
 				rosterBuild = nil
+				if ns.debugPeer then
+					ns.debugPeer("roster build aborted: secret members (club "
+						.. tostring(club.id) .. ")")
+				end
 				return
 			end
 			build.members = (ok and type(members) == "table") and members or {}
 			build.m = 1
+			if ns.debugPeer then
+				ns.debugPeer("roster club " .. tostring(club.id) .. " -> "
+					.. #build.members .. " members")
+			end
 		end
 		local memberId = build.members[build.m]
 		if not Util.canWeUse(memberId) then
@@ -275,9 +330,10 @@ local function stepRosterBuild(build)
 				local key = normalizeUnitName(info.name)
 				if key then
 					local t = build.target
-					if info.faction ~= nil then
+					local faction = info.faction or factionFromRace(info.race)
+					if faction ~= nil then
 						build.sawFaction = true
-						t.factionByName[key] = info.faction
+						t.factionByName[key] = faction
 					end
 					if club.guild then
 						t.guildByName[key] = true
@@ -341,6 +397,10 @@ local function startRosterBuild()
 	end
 	local ok, clubs = pcall(C_Club.GetSubscribedClubs)
 	if not ok or type(clubs) ~= "table" or not Util.canWeUse(clubs) then
+		if ns.debugPeer then
+			ns.debugPeer("roster build skipped: GetSubscribedClubs "
+				.. (not ok and "failed" or "unusable"))
+		end
 		return
 	end
 	-- Our own guild is a club too (C_Club.GetGuildClubId) and gets the same
@@ -354,6 +414,10 @@ local function startRosterBuild()
 		end
 	end
 	local okGuild, guildClubId = pcall(C_Club.GetGuildClubId)
+	if ns.debugPeer then
+		ns.debugPeer("roster clubs: " .. #list .. " subscribed, guild club "
+			.. tostring(okGuild and guildClubId or nil))
+	end
 	if okGuild and Util.canWeUse(guildClubId) and guildClubId then
 		local found = false
 		for _, club in ipairs(list) do

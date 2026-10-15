@@ -76,6 +76,7 @@ function Broadcast:init()
 	self.recentReqs = {}
 	self.pendingServes = {}
 	self.relayProbeAt = 0 -- last whisper probe burst
+	self.probeCursor = 0 -- rotating index into the flattened probe rosters
 
 	-- Outbound serve breaker (fixed window): once SERVE_RATE_LIMIT granted
 	-- serves land inside SERVE_RATE_WINDOW we stop answering REQs until
@@ -167,50 +168,40 @@ function Broadcast:relayIgnored(key, now)
 	return p ~= nil and p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL
 end
 
---- Next whisper-probe target, in priority order: never-probed candidates
--- first (everyone gets a turn before anyone is re-probed), then the
--- longest-since-probed unconfirmed candidate, then the stalest confirmed
--- relay past half its TTL (keepalive so quiet-but-alive peers stay
--- confirmed). Guild members are scanned before community members — they
--- are the closer tie and the smaller list.
+--- Next probe target via rotating cursor over both rosters, allowing
+--- new targets to be probed in sequence and not get stuck trying to probe
+--- the same people until ignored.
 function Broadcast:whisperProbeTarget(now)
-	local oldKey, oldName, oldLp
-	local staleKey, staleName, staleAt
-	for _, roster in ipairs({ Util.xfacGuildMembers(), Util.xfacClubMembers() }) do
-		for _, name in ipairs(roster) do
-			local key = Util.normalizeUnitName(name)
-			if key then
-				local p = self.relays[key]
-				if p and p.ign ~= 0 and (now - p.ign) >= C.RELAY_IGNORE_TTL then
-					p.ign, p.pr = 0, 0 -- served their time: fresh slate
-				end
-				local ignored = p and p.ign ~= 0
-				if not ignored then
-					local fresh = p and p.conf ~= 0
-						and (now - p.conf) < C.RELAY_CONFIRM_TTL
-					if not fresh then
-						if not p or p.lp == 0 then
-							return key, name -- never probed
-						end
-						if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
-							and (not oldLp or p.lp < oldLp)
-						then
-							oldKey, oldName, oldLp = key, name, p.lp
-						end
-					elseif (now - p.conf) >= C.RELAY_CONFIRM_TTL * 0.5
-						and (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
-						and (not staleAt or p.conf < staleAt)
-					then
-						staleKey, staleName, staleAt = key, name, p.conf
-					end
+	local guildRoster = Util.xfacGuildMembers()
+	local commRoster = Util.xfacClubMembers()
+	local gn = #guildRoster
+	local total = gn + #commRoster
+	if total == 0 then
+		return
+	end
+	for step = 1, total do
+		local idx = ((self.probeCursor + step - 1) % total) + 1
+		local name = idx <= gn and guildRoster[idx] or commRoster[idx - gn]
+		local key = Util.normalizeUnitName(name)
+		if key then
+			local p = self.relays[key]
+			if p and p.ign ~= 0 and (now - p.ign) >= C.RELAY_IGNORE_TTL then
+				p.ign, p.pr = 0, 0 -- served their time: fresh slate
+			end
+			if not (p and p.ign ~= 0) then
+				local fresh = p and p.conf ~= 0
+					and (now - p.conf) < C.RELAY_CONFIRM_TTL
+				local due = not p or p.lp == 0
+					or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
+				if due and (not fresh
+					or (now - p.conf) >= C.RELAY_CONFIRM_TTL * 0.5)
+				then
+					self.probeCursor = idx
+					return key, name
 				end
 			end
 		end
 	end
-	if oldKey then
-		return oldKey, oldName
-	end
-	return staleKey, staleName
 end
 
 --- One leg's selection: confirmed FRP relays and known xfac contacts first
