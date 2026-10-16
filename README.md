@@ -83,11 +83,19 @@ after a granted request, using single-chunk FRP1 control messages
    claim held for the guid (local cache, client player-info, club roster,
    and the wire-asserted unitID) must agree — conflicting or absent claims
    stay silent. `REQ` for our own GUID answers directly.
-3. **OK \<guid\>** — the requester grants the *first* ACK; every later ACK
-   gets **NOK \<guid\>** and stands down.
+3. **OK \<guid\>** — the requester grants the *first* ACK; later ACKs get
+   silence — the server's pending-serve expires via `SERVE_TIMEOUT` on its
+   own. (`NOK \<guid\>` is still sent to cancel a granted winner mid-send
+   when data lands from another source first.)
 4. The winner extracts and sends the normal data envelope directly to the
    requester (whisper or Battle.net). The requester caches and injects it —
    and never relays it further.
+
+A pull is also skipped entirely for subjects sharing one of our clubs
+(community or guild): TRP3 already sends its own vernum query on
+mouseover/target, and the shared membership is exactly what makes that
+cross-faction whisper deliverable — a `REQ` would just duplicate the native
+pull (which fills our cache anyway once it lands, via the received listener).
 
 Requests deduplicate per subject (pending + a 60s cooldown), expire at 15s
 without ACK / 30s without data, and are bounded (`REQ_MAX_PENDING`). Granted
