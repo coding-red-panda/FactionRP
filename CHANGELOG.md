@@ -1,5 +1,12 @@
 ﻿# FactionRP Changelog
 
+## 0.3.2
+
+### Fixes
+- No longer NOK on failed ack (was clogging our queue), just be quiet. Profiles REQs should transmit much quicker as a result.
+- No longer requests xfac profiles from players in the same guild or community; TRP3 does that already.
+- Message send rates now travel travel faster.
+
 ## 0.3.1
 
 ### Fixes
