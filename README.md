@@ -179,6 +179,12 @@ cross-faction clubs or friends still gets served: the channel and group
 legs always fire, and answering faction-mates whisper back, which needs no
 shared membership.
 
+Fanouts themselves are globally paced too: at most one new `REQ` fanout per
+`REQ_ISSUE_INTERVAL` seconds, so sweeping mouseover across a crowd cannot
+burst requests at the mesh. Further subjects wait in a small dedup'd FIFO
+(`REQ_BACKLOG_CAP`) and are re-validated when released — a subject whose
+profile arrived from another exchange while it waited never sends.
+
 All chunk sends go through a paced internal queue — `C.SEND_RATE` chunks per
 second is the single outbound rate dial, released via a token bucket on the
 `SEND_INTERVAL` tick — and each primitive is additionally routed through **Chomp** —
@@ -205,13 +211,15 @@ coverage is distributed across requesters.
 
 Rather than waiting for requests, we **actively probe** the roster: every
 `RELAY_PROBE_INTERVAL` (2min) a burst of up to `RELAY_PROBE_BURST` (5)
-candidates gets a whispered `HELLO` (never-probed targets first, so everyone
-gets a turn; guild members before community members),
-a whispered `HELLO` earns a `HI` reply, and any parseable inbound whisper
-confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min). Stale confirmed
-relays are re-probed to keep the list warm, and targets that ignore
-`RELAY_PROBE_MAX` (3) probes are skipped for `RELAY_IGNORE_TTL` (30min).
-Members without FactionRP simply cannot parse or answer.
+candidates gets a whispered `HELLO`, walked in order through the guild list
+then the community list so everyone gets a turn. Each candidate gets exactly
+one probe: a whispered `HELLO` earns a `HI` reply and any parseable inbound
+whisper confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min);
+a probe with no answer inside `RELAY_PROBE_COOLDOWN` (45s) kicks the target
+to the ignore list for `RELAY_IGNORE_TTL` (2h — expired ignores re-enter
+rotation for one more shot). Confirmed relays are never probed — real
+inbound traffic is the only thing keeping them warm. Members without
+FactionRP simply cannot parse or answer.
 
 Whisper legs now reach only proven targets — the unconfirmed roster is the
 probe rotation's job, so a `REQ` never whispers strangers:

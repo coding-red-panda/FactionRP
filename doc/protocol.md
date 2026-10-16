@@ -175,20 +175,23 @@ Whisper peers (cross-faction club members) use the same probe/confirm/ignore
 lifecycle as BNet accounts:
 
 - **Probing**: bursts of up to `RELAY_PROBE_BURST` (5) whispered
-  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (120s). Target priority is
-  never-probed candidates first, then the longest-since-probed
-  (`RELAY_PROBE_COOLDOWN`=45s floor), so every candidate gets a turn —
-  guild members are scanned before community members. A whispered `HELLO`
-  is answered `HI` (rate-limited per sender by `RELAY_HI_COOLDOWN`=30s).
+  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (120s), walked in order by a
+  rotating cursor — guild members before community members, so every
+  candidate gets a turn and unanswered probes never repeat on the same
+  people. Each candidate gets exactly `RELAY_PROBE_MAX` (1) probe; a
+  whispered `HELLO` is answered `HI` (rate-limited per sender by
+  `RELAY_HI_COOLDOWN`=30s).
 - **Confirming**: any parseable inbound whisper from an opposite-faction
   club member — `HI`, `ACK`, `REQ`, or data — confirms them for
-  `RELAY_CONFIRM_TTL` (10min). Confirmed relays get fanout priority.
-- **Refreshing**: when no unconfirmed candidates remain, the stalest
-  confirmed relay past half its TTL is re-probed, so quiet-but-alive peers
-  stay confirmed and dead ones decay out of the list.
-- **Ignoring**: `RELAY_PROBE_MAX` (3) unanswered probes ignore a target for
-  `RELAY_IGNORE_TTL` (30min); expired ignores re-enter rotation with a
-  fresh slate. Ignored targets are skipped by `REQ` fanouts too.
+  `RELAY_CONFIRM_TTL` (10min) and clears probe/ignore state. Confirmed
+  relays get fanout priority and are never probed — real inbound traffic
+  is the only thing keeping them warm, so a relay that goes silent decays
+  back to unconfirmed on its own.
+- **Ignoring**: an unanswered probe past its answer window
+  (`RELAY_PROBE_COOLDOWN`=45s) kicks the target to the ignore list for
+  `RELAY_IGNORE_TTL` (2h) at the next rotation pass; expired ignores
+  re-enter rotation with a fresh slate — the slow recovery path. Ignored
+  targets are skipped by `REQ` fanouts too.
 
 `REQ` whisper legs reach only proven targets — confirmed relays and known
 xfac contacts; the unconfirmed roster is the probe rotation's job, so a
@@ -217,6 +220,10 @@ requester                                candidate servers
 **Requester rules**
 - Skip if the subject is already cached-fresh, a request is pending, or the
   subject is on `REQ_COOLDOWN` (60s) after a prior attempt.
+- Fanouts are globally paced: at most one `REQ` fanout per
+  `REQ_ISSUE_INTERVAL` (4s). Sightings that arrive sooner wait in a dedup'd
+  FIFO (`REQ_BACKLOG_CAP`=8, oldest dropped on overflow) and are re-validated
+  on release — a subject cached or served while waiting never sends.
 - At most `REQ_MAX_PENDING` (32) outstanding requests.
 - `open` state expires after `REQ_ACK_TIMEOUT` (15s) without an ACK;
   `awaiting-data` expires after `REQ_DATA_TIMEOUT` (30s) without data.
