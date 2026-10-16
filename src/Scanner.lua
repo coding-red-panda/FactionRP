@@ -96,7 +96,8 @@ function Scanner:onSelect(unit)
 	if not ns.Util.canWeUse(unit) then
 		return
 	end
-	-- The token checks out, but the results themselves can still be secret.
+	-- The token checks out, but the results themselves could still be secret if
+	-- something happened just after we got the token.
 	local isPlayer = UnitIsPlayer(unit)
 	local isSelf = UnitIsUnit(unit, "player")
 	if not ns.Util.canWeUse(isPlayer, isSelf) or not isPlayer or isSelf then
@@ -110,7 +111,18 @@ function Scanner:onSelect(unit)
 		local unitID = adapter and adapter:getUnitID(unit)
 		local guid = UnitGUID(unit)
 		if ns.Util.canWeUse(unitID, guid) and guid then
-			ns.broadcast:requestProfile(guid, unitID)
+			-- Shared-club subjects are whisper-reachable, and TRP3 already
+			-- sends its own vernum query on mouseover/target.
+			if adapter and adapter.name == C.SOURCE.TRP3
+				and (ns.Util.isCommunityClubMember(unitID)
+					or ns.Util.isGuildClubMember(unitID))
+			then
+				if ns.debugPeer then
+					ns.debugPeer("req " .. tostring(guid) .. " skipped (shared club — native pull)")
+				end
+			else
+				ns.broadcast:requestProfile(guid, unitID)
+			end
 		end
 		return
 	end

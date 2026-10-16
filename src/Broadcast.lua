@@ -4,7 +4,7 @@
 -- once, server -> requester, after a granted request. The only multi-target
 -- traffic is single-chunk FRP1 control messages (subject "_frp"):
 --
---   requester: REQ <guid> -> first ACKer gets OK, late ACKers get NOK
+--   requester: REQ <guid> -> first ACKer gets OK, the rest time out
 --   server:    REQ -> ACK (if it can extract the profile) -> on OK, the
 --              data envelope goes direct to the requester
 --
@@ -208,8 +208,7 @@ function Broadcast:whisperProbeTarget(now)
 					and (now - p.conf) < C.RELAY_CONFIRM_TTL
 				if not fresh then
 					if p.pr >= C.RELAY_PROBE_MAX then
-						-- Already spent their probe: silence past the answer
-						-- window is a miss — ignore, never re-probe.
+						-- Was quiet too long; get ignored.
 						if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
 							p.ign = now
 							if ns.debugPeer then
@@ -481,7 +480,7 @@ function Broadcast:tick()
 
 	-- Whisper relay probing in bursts: up to RELAY_PROBE_BURST candidates per
 	-- RELAY_PROBE_INTERVAL. The rotation only returns unconfirmed candidates
-	-- with their one probe still unspent — spent-and-silent targets are
+	-- with their one probe still unspent and spent-and-silent targets are
 	-- kicked to the ignore list inside whisperProbeTarget itself.
 	if (now - self.relayProbeAt) >= C.RELAY_PROBE_INTERVAL then
 		self.relayProbeAt = now
@@ -876,15 +875,10 @@ function Broadcast:onControl(msg, context)
 			if peer then
 				peer("ack " .. arg .. " <- " .. tostring(target) .. " (granted)")
 			end
-		else
-			-- No pending request (or already granted): stand the server down.
-			self:sendToPeer(self:buildCtl("NOK", arg), context.medium, target)
-			if leg then
-				leg("nok", 1)
-			end
-			if peer and req then
-				peer("ack " .. arg .. " <- " .. tostring(target) .. " (denied)")
-			end
+		elseif peer and req then
+			-- Denied ACKs get no reply — the server's pendingServe expires via
+			-- SERVE_TIMEOUT on its own, so a NOK is pure cost per loser.
+			peer("ack " .. arg .. " <- " .. tostring(target) .. " (denied)")
 		end
 	elseif verb == "OK" then
 		local key = serveKey(context, arg)
