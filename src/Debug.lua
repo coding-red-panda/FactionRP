@@ -166,9 +166,7 @@ ns.RegisterCommand("debug", function(arg)
 	if not ns.db then
 		return
 	end
-	-- "/frp debug target ..." manages pinned whisper targets; bare "/frp debug"
-	-- lists flag states; "all"/<category> toggle individual flags.
-	local sub, rest = arg and arg:match("^(%S*)%s*(.-)$") or "", ""
+	local sub, rest = (arg or ""):match("^(%S*)%s*(.-)$")
 	sub = sub:lower()
 	if sub == "target" then
 		handleTarget(rest)
