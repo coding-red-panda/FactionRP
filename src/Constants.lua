@@ -116,6 +116,14 @@ C.REQ_ACK_TIMEOUT = 15   -- open request expires without an ACK
 C.REQ_DATA_TIMEOUT = 30  -- granted request expires without data
 C.REQ_COOLDOWN = 60      -- min gap between requests for the same subject
 C.REQ_MAX_PENDING = 32   -- bound on outstanding requests
+
+-- Request fanouts are also paced globally. Mouseover across a crowd of new
+-- faces produces sightings faster than the mesh should hear them, and every
+-- fanout wakes the whole channel plus its whisper legs. Fanout at most one time
+-- per REQ_ISSUE_INTERVAL seconds; further subjects wait in a small
+-- dedup'd FIFO.
+C.REQ_ISSUE_INTERVAL = 4 -- min seconds between request fanouts
+C.REQ_BACKLOG_CAP = 8    -- deferred subjects awaiting fanout
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
 
@@ -183,19 +191,15 @@ C.COMM_USAGE_LIMIT = 2
 C.COMM_USAGE_WINDOW = 60
 
 -- Whisper relay confirmation (HELLO/HI over addon whispers — same lifecycle
--- shape as the BNet handshake). Club-roster candidates are probed in bursts
--- of RELAY_PROBE_BURST every RELAY_PROBE_INTERVAL seconds (a rotating
--- per-target cooldown still applies); any parseable inbound whisper confirms
--- the sender for RELAY_CONFIRM_TTL, and stale confirmed relays are re-probed
--- so quiet-but-alive peers stay confirmed. RELAY_PROBE_MAX unanswered probes
--- ignore the target for RELAY_IGNORE_TTL (expired ignores re-enter rotation
--- with a fresh slate).
+-- shape as the BNet handshake). A candidate gets at most RELAY_PROBE_MAX
+-- probes before an unanswered one ignores it for RELAY_IGNORE_TTL; any
+-- parseable inbound whisper confirms the sender for RELAY_CONFIRM_TTL.
 C.RELAY_PROBE_INTERVAL = 120 -- gap between whisper probe bursts
 C.RELAY_PROBE_BURST = 5      -- probe targets per burst
 C.RELAY_CONFIRM_TTL = 600    -- relay confirmation expires without fresh proof
-C.RELAY_PROBE_COOLDOWN = 45  -- min gap between probes to the same target
-C.RELAY_PROBE_MAX = 3        -- unanswered probes before ignoring
-C.RELAY_IGNORE_TTL = 1800    -- ignore-list decay
+C.RELAY_PROBE_COOLDOWN = 45  -- per-target probe gap AND the answer window
+C.RELAY_PROBE_MAX = 1        -- unanswered probes before ignoring
+C.RELAY_IGNORE_TTL = 7200    -- ignore-list decay (2h)
 C.RELAY_HI_COOLDOWN = 30     -- min gap between HI replies to the same target
 
 -- How long (seconds) the scanned club roster (factions, GUIDs and opposite-

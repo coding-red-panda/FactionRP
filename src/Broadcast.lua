@@ -72,9 +72,15 @@ function Broadcast:init()
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   pendingServes[key] = { subject, unitID, medium, target, at }
 	--     where key = "<peer>:<guid>" — grants we may serve.
+	-- Global fanout pacing: sightings arrive in bursts but the mesh hears at
+	-- most one request per REQ_ISSUE_INTERVAL. Deferred subjects wait in a
+	-- dedup'd FIFO and are re-validated when released.
 	self.requests = {}
 	self.recentReqs = {}
 	self.pendingServes = {}
+	self.reqBacklog = {} -- [guid] = true (membership, for dedup)
+	self.reqBacklogOrder = { head = 1, tail = 0 } -- FIFO of { guid, unitID }
+	self.lastFanoutAt = 0 -- GetTime() of the last issued fanout
 	self.relayProbeAt = 0 -- last whisper probe burst
 	self.probeCursor = 0 -- rotating index into the flattened probe rosters
 
@@ -102,6 +108,7 @@ function Broadcast:start()
 	end)
 	C_Timer.NewTicker(C.INJECT_INTERVAL, function()
 		self:drainInject()
+		self:drainRequests()
 	end)
 	-- One ticker drives the BNet + whisper probe rotations and the sweeps.
 	C_Timer.NewTicker(C.BNET_PROBE_INTERVAL, function()
@@ -176,9 +183,9 @@ function Broadcast:relayIgnored(key, now)
 	return p ~= nil and p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL
 end
 
---- Next probe target via rotating cursor over both rosters, allowing
---- new targets to be probed in sequence and not get stuck trying to probe
---- the same people until ignored.
+--- Next probe target via rotating cursor over both rosters: one probe per
+--- target, and an unanswered one past RELAY_PROBE_COOLDOWN ignores the
+--- target instead of re-probing. Confirmed relays are never probed.
 function Broadcast:whisperProbeTarget(now)
 	local guildRoster = Util.xfacGuildMembers()
 	local commRoster = Util.xfacClubMembers()
@@ -196,17 +203,30 @@ function Broadcast:whisperProbeTarget(now)
 			if p and p.ign ~= 0 and (now - p.ign) >= C.RELAY_IGNORE_TTL then
 				p.ign, p.pr = 0, 0 -- served their time: fresh slate
 			end
-			if not (p and p.ign ~= 0) then
-				local fresh = p and p.conf ~= 0
+			if p and p.ign == 0 then
+				local fresh = p.conf ~= 0
 					and (now - p.conf) < C.RELAY_CONFIRM_TTL
-				local due = not p or p.lp == 0
-					or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
-				if due and (not fresh
-					or (now - p.conf) >= C.RELAY_CONFIRM_TTL * 0.5)
-				then
-					self.probeCursor = idx
-					return key, name
+				if not fresh then
+					if p.pr >= C.RELAY_PROBE_MAX then
+						-- Already spent their probe: silence past the answer
+						-- window is a miss — ignore, never re-probe.
+						if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
+							p.ign = now
+							if ns.debugPeer then
+								ns.debugPeer("whisper " .. name
+									.. " ignored (unanswered probe)")
+							end
+						end
+					elseif p.lp == 0
+						or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
+					then
+						self.probeCursor = idx
+						return key, name
+					end
 				end
+			elseif not p then
+				self.probeCursor = idx
+				return key, name
 			end
 		end
 	end
@@ -460,8 +480,9 @@ function Broadcast:tick()
 	end
 
 	-- Whisper relay probing in bursts: up to RELAY_PROBE_BURST candidates per
-	-- RELAY_PROBE_INTERVAL — unconfirmed roster members first (or refresh a
-	-- stale confirmed relay). Same lifecycle as BNet.
+	-- RELAY_PROBE_INTERVAL. The rotation only returns unconfirmed candidates
+	-- with their one probe still unspent — spent-and-silent targets are
+	-- kicked to the ignore list inside whisperProbeTarget itself.
 	if (now - self.relayProbeAt) >= C.RELAY_PROBE_INTERVAL then
 		self.relayProbeAt = now
 		for _ = 1, C.RELAY_PROBE_BURST do
@@ -478,12 +499,6 @@ function Broadcast:tick()
 				end
 				if ns.debugPeer then
 					ns.debugPeer("probe -> whisper " .. wname)
-				end
-				if p.pr >= C.RELAY_PROBE_MAX and p.ign == 0 then
-					p.ign = now
-					if ns.debugPeer then
-						ns.debugPeer("whisper " .. wname .. " ignored (" .. p.pr .. " unanswered probes)")
-					end
 				end
 			end
 		end
@@ -515,7 +530,9 @@ end
 
 --- Request `guid`'s profile from the mesh (we just saw an opposite-faction
 -- player). No-op when the cache already holds a fresh copy, a request is
--- pending, or the subject is still on cooldown.
+-- pending, the subject is still on cooldown, or it already waits in the
+-- pacing backlog. A subject arriving while a fanout went out less than
+-- REQ_ISSUE_INTERVAL ago is deferred rather than spraying a second fanout.
 function Broadcast:requestProfile(guid, unitID)
 	if not guid then
 		return
@@ -524,14 +541,65 @@ function Broadcast:requestProfile(guid, unitID)
 	if ns.cache:fresh(guid) then
 		return
 	end
-	if self.requests[guid] then
-		return -- already pending
+	if self.requests[guid] or self.reqBacklog[guid] then
+		return -- already pending, or already waiting its fanout turn
 	end
 	local last = self.recentReqs[guid]
 	if last and (now - last) < C.REQ_COOLDOWN then
 		return
 	end
+	if (now - self.lastFanoutAt) < C.REQ_ISSUE_INTERVAL then
+		-- Bounded FIFO, the oldest waits are the least useful on overflow.
+		local o = self.reqBacklogOrder
+		while (o.tail - o.head + 1) >= C.REQ_BACKLOG_CAP do
+			local old = o[o.head]
+			o[o.head] = nil
+			o.head = o.head + 1
+			self.reqBacklog[old.guid] = nil
+		end
+		o.tail = o.tail + 1
+		o[o.tail] = { guid = guid, unitID = unitID }
+		self.reqBacklog[guid] = true
+		if ns.debugPeer then
+			ns.debugPeer("req " .. guid .. " deferred (fanout pacing)")
+		end
+		return
+	end
+	self:issueRequest(guid, unitID, now)
+end
 
+--- Release one deferred subject once REQ_ISSUE_INTERVAL has elapsed since
+--- the last fanout.
+function Broadcast:drainRequests()
+	local o = self.reqBacklogOrder
+	if o.head > o.tail then
+		return
+	end
+	local now = GetTime()
+	if (now - self.lastFanoutAt) < C.REQ_ISSUE_INTERVAL then
+		return
+	end
+	while o.head <= o.tail do
+		local entry = o[o.head]
+		o[o.head] = nil
+		o.head = o.head + 1
+		self.reqBacklog[entry.guid] = nil
+		local last = self.recentReqs[entry.guid]
+		if not self.requests[entry.guid]
+			and not ns.cache:fresh(entry.guid)
+			and not (last and (now - last) < C.REQ_COOLDOWN)
+		then
+			self:issueRequest(entry.guid, entry.unitID, now)
+			break
+		end
+	end
+	if o.head > o.tail then
+		o.head, o.tail = 1, 0
+	end
+end
+
+--- Issue the actual REQ fanout for `guid`.
+function Broadcast:issueRequest(guid, unitID, now)
 	-- Bound outstanding requests; the oldest pending is the least useful.
 	local n = 0
 	local oldest, oldestAt
@@ -557,6 +625,7 @@ function Broadcast:requestProfile(guid, unitID)
 	local sent = self:sendCtlFanout(self:buildCtl("REQ", arg))
 	self.requests[guid] = { state = "open", at = now, unitID = unitID }
 	self.recentReqs[guid] = now
+	self.lastFanoutAt = now
 	if ns.statsLeg then
 		ns.statsLeg("req", 1)
 	end
