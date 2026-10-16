@@ -134,7 +134,7 @@ decode `data` as a profile, and drop it harmlessly.
 | `REQ`   | subjectGuid [unitID]| pull request — "who can serve this profile?"|
 | `ACK`   | subjectGuid         | "I can serve it"                            |
 | `OK`    | subjectGuid         | grant — "you may send it"                   |
-| `NOK`   | subjectGuid         | deny — "stand down"                         |
+| `NOK`   | subjectGuid         | cancel — winner mid-send, data landed elsewhere |
 
 `REQ` is the only two-argument verb: `unitID` is the subject's
 `"Name-Realm"` as computed by the requester's RP AddOn — the exact key its
@@ -212,14 +212,19 @@ requester                                candidate servers
     │                                          └ can extract? → ACK
     │                                            cannot?  → silent
     │  ◄── ACK <guid> ── (first wins, direct to requester)
-    │  ── OK <guid> ──► winner only
-    │  ── NOK <guid> ─► every later ACKer
+    │  ── OK <guid> ──► winner only; later ACKers get
+    │                     silence — their pendingServe
+    │                     expires via SERVE_TIMEOUT
     │  ◄── data envelope ── winner serves direct
 ```
 
 **Requester rules**
 - Skip if the subject is already cached-fresh, a request is pending, or the
   subject is on `REQ_COOLDOWN` (60s) after a prior attempt.
+- Skip if the subject shares a club with us (community or guild): the RP
+  AddOn's own cross-faction whisper query already pulls that profile on
+  mouseover/target — a `REQ` would duplicate the native pull, whose landing
+  fills our cache via the received listener anyway.
 - Fanouts are globally paced: at most one `REQ` fanout per
   `REQ_ISSUE_INTERVAL` (4s). Sightings that arrive sooner wait in a dedup'd
   FIFO (`REQ_BACKLOG_CAP`=8, oldest dropped on overflow) and are re-validated
@@ -253,8 +258,8 @@ requester                                candidate servers
   `NOK` discards it.
 - Our serve rate is breaker-limited: once `SERVE_RATE_LIMIT` (10) serves
   are *granted* inside `SERVE_RATE_WINDOW` (30s) we stop answering REQs
-  for `SERVE_RATE_MUTE` (60s). Only winning the ACK race counts — a NOK'd
-  ACK never cost real work, and grants arriving while muted complete
+  for `SERVE_RATE_MUTE` (60s). Only winning the ACK race counts — an
+  ungranted ACK never cost real work, and grants arriving while muted complete
   their serve without extending it. This is a silent bow-out, not a
   message — the requester's own timeout and subject-cooldown *are* the
   backpressure signal, so no wire traffic is spent reporting saturation.
