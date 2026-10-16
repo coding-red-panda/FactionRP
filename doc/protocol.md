@@ -226,9 +226,13 @@ requester                                candidate servers
   mouseover/target — a `REQ` would duplicate the native pull, whose landing
   fills our cache via the received listener anyway.
 - Fanouts are globally paced: at most one `REQ` fanout per
-  `REQ_ISSUE_INTERVAL` (4s). Sightings that arrive sooner wait in a dedup'd
-  FIFO (`REQ_BACKLOG_CAP`=8, oldest dropped on overflow) and are re-validated
-  on release — a subject cached or served while waiting never sends.
+  `REQ_ISSUE_INTERVAL` (4s). Initiated sends — `REQ` fanouts and `HELLO`
+  probes — also share an in-flight budget: no more than
+  `FANOUT_INFLIGHT_MAX` (3) may occupy the send queue at once, so a new
+  send waits for earlier chunks to drain. Sightings that arrive sooner
+  wait in a dedup'd FIFO (`REQ_BACKLOG_CAP`=8, oldest dropped on
+  overflow) and are re-validated on release — a subject cached or served
+  while waiting never sends.
 - At most `REQ_MAX_PENDING` (32) outstanding requests.
 - `open` state expires after `REQ_ACK_TIMEOUT` (15s) without an ACK;
   `awaiting-data` expires after `REQ_DATA_TIMEOUT` (30s) without data.

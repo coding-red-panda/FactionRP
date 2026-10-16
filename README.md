@@ -188,8 +188,10 @@ legs always fire, and answering faction-mates whisper back, which needs no
 shared membership.
 
 Fanouts themselves are globally paced too: at most one new `REQ` fanout per
-`REQ_ISSUE_INTERVAL` seconds, so sweeping mouseover across a crowd cannot
-burst requests at the mesh. Further subjects wait in a small dedup'd FIFO
+`REQ_ISSUE_INTERVAL` seconds. Initiated sends — `REQ` fanouts and `HELLO`
+probes — also share an in-flight budget of `FANOUT_INFLIGHT_MAX` sends
+still queued on the wire, so nothing new stacks behind a saturated queue.
+Further subjects wait in a small dedup'd FIFO
 (`REQ_BACKLOG_CAP`) and are re-validated when released — a subject whose
 profile arrived from another exchange while it waited never sends.
 

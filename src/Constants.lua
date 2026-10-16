@@ -125,6 +125,8 @@ C.REQ_MAX_PENDING = 32   -- bound on outstanding requests
 -- dedup'd FIFO.
 C.REQ_ISSUE_INTERVAL = 4 -- min seconds between request fanouts
 C.REQ_BACKLOG_CAP = 8    -- deferred subjects awaiting fanout
+C.FANOUT_INFLIGHT_MAX = 3 -- initiated sends (REQ fanouts, HELLO probes)
+                         -- allowed outstanding in the send queue
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
 

@@ -275,8 +275,9 @@ ns.RegisterCommand("relays", function()
 	if b.serveMuteUntil and GetTime() < b.serveMuteUntil then
 		mute = (" | serve muted %ds"):format(math.ceil(b.serveMuteUntil - GetTime()))
 	end
-	ns.Print(("exchange — pending requests: %d | pending serves: %d%s"):format(
-		mapSize(b.requests or {}), mapSize(b.pendingServes or {}), mute))
+	ns.Print(("exchange — pending requests: %d | pending serves: %d | sends in flight: %d%s"):format(
+		mapSize(b.requests or {}), mapSize(b.pendingServes or {}),
+		b.fanoutsInFlight and b:fanoutsInFlight() or 0, mute))
 	local p = b.lastLegPicks
 	ns.Print(("last fanout — community: %s | guild: %s | bnet: %s | pinned: %s"):format(
 		joined(p.community), joined(p.guild), joined(p.bnet), joined(p.pinned)))

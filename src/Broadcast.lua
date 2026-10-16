@@ -81,6 +81,7 @@ function Broadcast:init()
 	self.reqBacklog = {} -- [guid] = true (membership, for dedup)
 	self.reqBacklogOrder = { head = 1, tail = 0 } -- FIFO of { guid, unitID }
 	self.lastFanoutAt = 0 -- GetTime() of the last issued fanout
+	self.fanoutInFlight = {} -- queue tail positions of issued fanouts/probes
 	self.relayProbeAt = 0 -- last whisper probe burst
 	self.probeCursor = 0 -- rotating index into the flattened probe rosters
 
@@ -466,25 +467,34 @@ function Broadcast:tick()
 	local now = GetTime()
 	local comms = ns.comms
 
-	-- Probe the next unconfirmed, non-ignored online BNet account.
-	local id = comms:probeTarget(now)
-	if id and comms:sendChunksBNet(self:ctlHello(), id) then
-		comms:markProbed(id, now)
-		if ns.statsLeg then
-			ns.statsLeg("bnet_probe", 1)
-		end
-		if ns.debugPeer then
-			ns.debugPeer("probe -> bnet " .. id)
+	-- Probe the next unconfirmed, non-ignored online BNet account. Probes are
+	-- initiated traffic like REQ fanouts and share their in-flight budget:
+	-- none go out while the queue already holds the cap.
+	if self:fanoutsInFlight() < C.FANOUT_INFLIGHT_MAX then
+		local id = comms:probeTarget(now)
+		if id and comms:sendChunksBNet(self:ctlHello(), id) then
+			comms:markProbed(id, now)
+			self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
+			if ns.statsLeg then
+				ns.statsLeg("bnet_probe", 1)
+			end
+			if ns.debugPeer then
+				ns.debugPeer("probe -> bnet " .. id)
+			end
 		end
 	end
 
 	-- Whisper relay probing in bursts: up to RELAY_PROBE_BURST candidates per
 	-- RELAY_PROBE_INTERVAL. The rotation only returns unconfirmed candidates
 	-- with their one probe still unspent and spent-and-silent targets are
-	-- kicked to the ignore list inside whisperProbeTarget itself.
+	-- kicked to the ignore list inside whisperProbeTarget itself. Each probe
+	-- consumes an in-flight slot, so a saturated queue ends the burst early.
 	if (now - self.relayProbeAt) >= C.RELAY_PROBE_INTERVAL then
 		self.relayProbeAt = now
 		for _ = 1, C.RELAY_PROBE_BURST do
+			if self:fanoutsInFlight() >= C.FANOUT_INFLIGHT_MAX then
+				break
+			end
 			local wkey, wname = self:whisperProbeTarget(now)
 			if not wkey then
 				break
@@ -493,6 +503,7 @@ function Broadcast:tick()
 			if comms:sendChunksAddon(self:ctlHello(), "WHISPER", wname) then
 				p.lp = now
 				p.pr = p.pr + 1
+				self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
 				if ns.statsLeg then
 					ns.statsLeg("wprobe", 1)
 				end
@@ -547,7 +558,10 @@ function Broadcast:requestProfile(guid, unitID)
 	if last and (now - last) < C.REQ_COOLDOWN then
 		return
 	end
-	if (now - self.lastFanoutAt) < C.REQ_ISSUE_INTERVAL then
+	local inflight = self:fanoutsInFlight()
+	if (now - self.lastFanoutAt) < C.REQ_ISSUE_INTERVAL
+		or inflight >= C.FANOUT_INFLIGHT_MAX
+	then
 		-- Bounded FIFO, the oldest waits are the least useful on overflow.
 		local o = self.reqBacklogOrder
 		while (o.tail - o.head + 1) >= C.REQ_BACKLOG_CAP do
@@ -560,22 +574,52 @@ function Broadcast:requestProfile(guid, unitID)
 		o[o.tail] = { guid = guid, unitID = unitID }
 		self.reqBacklog[guid] = true
 		if ns.debugPeer then
-			ns.debugPeer("req " .. guid .. " deferred (fanout pacing)")
+			ns.debugPeer("req " .. guid .. " deferred (fanout pacing, "
+				.. inflight .. " in flight)")
 		end
 		return
 	end
 	self:issueRequest(guid, unitID, now)
 end
 
+--- Fanouts whose chunks have not fully left the send queue. A fanout's
+--- chunks enqueue contiguously, so the queue tail position recorded at
+--- issue is "in flight" while the queue head has not passed it. Markers
+--- are pruned in place; an empty queue clears all markers outright.
+function Broadcast:fanoutsInFlight()
+	local q = ns.comms.queue
+	if q.tail < q.head then
+		for i = #self.fanoutInFlight, 1, -1 do
+			self.fanoutInFlight[i] = nil
+		end
+		return 0
+	end
+	local w = 0
+	for i = 1, #self.fanoutInFlight do
+		local pos = self.fanoutInFlight[i]
+		if pos <= q.tail and pos >= q.head then
+			w = w + 1
+			self.fanoutInFlight[w] = pos
+		end
+	end
+	for i = #self.fanoutInFlight, w + 1, -1 do
+		self.fanoutInFlight[i] = nil
+	end
+	return w
+end
+
 --- Release one deferred subject once REQ_ISSUE_INTERVAL has elapsed since
---- the last fanout.
+--- the last fanout and fewer than FANOUT_INFLIGHT_MAX initiated sends still
+--- occupy the send queue.
 function Broadcast:drainRequests()
 	local o = self.reqBacklogOrder
 	if o.head > o.tail then
 		return
 	end
 	local now = GetTime()
-	if (now - self.lastFanoutAt) < C.REQ_ISSUE_INTERVAL then
+	if (now - self.lastFanoutAt) < C.REQ_ISSUE_INTERVAL
+		or self:fanoutsInFlight() >= C.FANOUT_INFLIGHT_MAX
+	then
 		return
 	end
 	while o.head <= o.tail do
@@ -622,6 +666,9 @@ function Broadcast:issueRequest(guid, unitID, now)
 	end
 
 	local sent = self:sendCtlFanout(self:buildCtl("REQ", arg))
+	if sent > 0 then
+		self.fanoutInFlight[#self.fanoutInFlight + 1] = ns.comms.queue.tail
+	end
 	self.requests[guid] = { state = "open", at = now, unitID = unitID }
 	self.recentReqs[guid] = now
 	self.lastFanoutAt = now
@@ -876,8 +923,7 @@ function Broadcast:onControl(msg, context)
 				peer("ack " .. arg .. " <- " .. tostring(target) .. " (granted)")
 			end
 		elseif peer and req then
-			-- Denied ACKs get no reply — the server's pendingServe expires via
-			-- SERVE_TIMEOUT on its own, so a NOK is pure cost per loser.
+			-- Denied ACKs get no reply.
 			peer("ack " .. arg .. " <- " .. tostring(target) .. " (denied)")
 		end
 	elseif verb == "OK" then
