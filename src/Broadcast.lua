@@ -428,7 +428,7 @@ end
 
 --- Own "Name-Realm", validated inside getUnitID each call.
 local function ownUnitID()
-	return Util.getUnitID("player") or nil
+	return Util.getUnitID("player") or ""
 end
 
 --- Build (and chunk) a control envelope: subject "_frp", data "FRP1 <verb>
