@@ -193,8 +193,15 @@ end
 function Comms:sendDescriptor(desc)
 	local text = desc.text
 	if desc.kind == "CHANNEL" then
-		desc.target = self:channelIndex() -- always refresh channelindex.
-		if not desc.target then
+		-- Always refresh the index at dispatch: a name-pinned leg resolves its
+		-- own channel, anything else rides the relay channel. Reorders between
+		-- enqueue and dispatch can otherwise re-point a leg at a stale index.
+		if desc.channelName then
+			desc.target = GetChannelName(desc.channelName)
+		else
+			desc.target = self:channelIndex()
+		end
+		if not desc.target or desc.target == 0 then
 			return
 		end
 	end
@@ -280,6 +287,7 @@ function Comms:sendAddon(text, kind, target)
 	desc.text = text
 	desc.kind = kind
 	desc.target = target
+	desc.channelName = nil
 	desc.enqueuedAt = GetTime()
 	self:enqueue(desc)
 	return desc
@@ -323,6 +331,33 @@ function Comms:sendChunksAddon(chunks, kind, target)
 	end
 	for i = 1, n do
 		local desc = self:sendAddon(chunks[i], kind, target)
+		if i == n then
+			desc.legStartedAt = startedAt
+			desc.legBytes = bytes
+			desc.legTotal = n
+		end
+	end
+	return n
+end
+
+--- Send a chunk list over a named custom channel (e.g. a previous-generation
+-- comm channel for the version announcement). The name resolves to an index
+-- at dispatch time like the relay channel does.
+function Comms:sendChunksChannel(chunks, channelName)
+	local n = #chunks
+	if not legFits(self, n) then
+		if ns.statsError then
+			ns.statsError("send_queue_drop")
+		end
+		return false
+	end
+	local bytes, startedAt = 0, GetTime()
+	for i = 1, n do
+		bytes = bytes + #chunks[i]
+	end
+	for i = 1, n do
+		local desc = self:sendAddon(chunks[i], "CHANNEL", nil)
+		desc.channelName = channelName
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes

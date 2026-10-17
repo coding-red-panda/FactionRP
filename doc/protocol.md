@@ -60,9 +60,9 @@ sender || subject || unitID || addon || originTime || contentVersion || protoMaj
 | `subject`        | GUID of the profile owner, or the reserved token `_frp`          |
 | `unitID`         | "Name-Realm" of the subject                                      |
 | `addon`          | source RP AddOn id (`TRP3`) — `"FRP"` on control messages        |
-| `originTime`     | `time()` when the data was authored                              |
+| `originTime`     | freshness claim: `time()` for self-serves; the holder's last-seen "as of" stamp otherwise |
 | `contentVersion` | opaque version string (`c#:k#:m#` section versions)              |
-| `protoMajor`     | wire-protocol generation (`C.PROTO_MAJOR`, currently 3)          |
+| `protoMajor`     | wire-protocol generation (`C.PROTO_MAJOR`, currently 4)          |
 | `data`           | payload; may itself contain `||` — it is always the last field   |
 
 A message is malformed unless all seven separators are present and
@@ -74,7 +74,7 @@ A message is malformed unless all seven separators are present and
 advertising a lower generation (`statsError("proto_old")`), *before* any
 peer-state side effect — a too-old or forged message cannot confirm a relay,
 serve a request, or enter the cache. The comm channel also carries the
-generation (`frp3comms`), so older-protocol clients sit on a disjoint channel
+generation (`frp4comms`), so older-protocol clients sit on a disjoint channel
 by construction. On load and on every (re)join we additionally *leave* the
 legacy `FactionRP` channel and any `frp<N>comms` channel of a different
 generation — channel membership survives `/reload` (until logout), so an
@@ -106,7 +106,7 @@ of at most `C.CHUNK_SIZE` (220) payload bytes with a framing header:
 
 Receivers reassemble per `(senderKey, messageId)` (two-level map — senderKey
 is the whisper name/channel sender or `bn:<gameAccountID>`). Partial buffers
-expire after `C.REASSEMBLY_TIMEOUT` (60s); duplicate chunks are counted and
+expire after `C.REASSEMBLY_TIMEOUT` (120s); duplicate chunks are counted and
 ignored.
 
 ## Pacing and the send queue
@@ -132,17 +132,33 @@ decode `data` as a profile, and drop it harmlessly.
 | `HELLO` | addonVer            | BNet probe — "I run FactionRP"              |
 | `HI`    | addonVer            | handshake reply                             |
 | `VER`   | addonVer            | one-time version broadcast on login (see below) |
-| `REQ`   | subjectGuid [unitID]| pull request — "who can serve this profile?"|
-| `ACK`   | subjectGuid         | "I can serve it"                            |
+| `REQ`   | subjectGuid [unitID] [seenAt] [pid] [cvHash] | pull request — "who can serve this profile?" |
+| `ACK`   | subjectGuid [seenAt]| "I can serve it, as of `seenAt`"            |
 | `OK`    | subjectGuid         | grant — "you may send it"                   |
 | `NOK`   | subjectGuid         | cancel — winner mid-send, data landed elsewhere |
 
-`REQ` is the only two-argument verb: `unitID` is the subject's
-`"Name-Realm"` as computed by the requester's RP AddOn — the exact key its
-register uses. It is optional (older/adapter-less clients send the guid
-alone) and lets any server answer straight from its register without local
-guid→unitID state. `ACK`/`OK`/`NOK` still carry the guid only — it is the
-wire identity.
+`REQ` is the only multi-argument verb:
+
+- `unitID` — the subject's `"Name-Realm"` as computed by the requester's RP
+  AddOn — the exact key its register uses. It is optional
+  (adapter-less requesters send the guid alone) and lets any server answer
+  straight from its register without local guid→unitID state.
+- `seenAt` — the requester's freshness floor: the best "as of" claim it has
+  accepted for the subject (see *Freshness floor* below).
+- `pid` — the profileID the requester's copy is bound to, or `-`.
+- `cvHash` — an 8-hex-char hash of the requester's contentVersion, or `-`.
+
+`seenAt`/`pid`/`cvHash` are only sent when `unitID` is present. A server
+whose own claim (`seenAt`) is no newer than `seenAt` *and* whose held
+profileID or contentVersion matches suppresses its ACK — serving identical
+or staler lineage would only cost a wasted data leg. A server holding a
+*different* profileID (the subject switched profiles) still ACKs: the
+requester's floor arbitrates on arrival anyway.
+
+`ACK` carries the server's own `seenAt` claim; the requester denies (no
+`OK`) an ACK whose claim is below its floor — a fast-but-stale holder can
+never win the grant. `OK`/`NOK` still carry the guid only — it is the wire
+identity.
 
 ### BNet peer confirmation
 
@@ -201,10 +217,16 @@ request never whispers strangers.
 ### Version announcement (`VER <addonVer>`)
 
 Once per session, shortly after login, every client broadcasts its addon
-version — a single `VER <addonVer>` control chunk (addonVer read from the
+version — a `VER <addonVer>` control chunk (addonVer read from the
 .toc's `## Version:` via `C_AddOns.GetAddOnMetadata`) on the same-faction comm
 channel only (no BNet/whisper legs; faction-mates logging in with an updated
-build keep the channel covered anyway). A receiver that hears a newer version
+build keep the channel covered anyway). Because old-generation peers sit on
+a disjoint channel and could never hear the announcement otherwise, the
+broadcast also joins the previous generation's channel
+(`C.COMM_CHANNEL_PROTO3`, currently `frp3comms`) just long enough to launch
+the chunk there — membership is dropped `VER_PREV_CHANNEL_HOLD` (30s) later.
+Proto-3 clients accept a proto-4 `VER` (the gate only rejects *lower*
+generations), so the notice still reaches them. A receiver that hears a newer version
 than its own prints a chat notice that it is outdated. Notices are deduped by
 the highest version already announced that session, so a wave of peers
 logging in cannot spam the chat; `/frp status` shows the newest version
@@ -218,14 +240,15 @@ targets an opposite-faction player whose profile we do not hold fresh.
 
 ```
 requester                                candidate servers
-    │  REQ <guid> [unitID] ──────────────────► (1 chunk on frp<N>comms —
+    │  REQ <guid> [unitID] [seenAt] [pid] [cvHash] ─► (1 chunk on frp<N>comms —
     │                                          all same-faction listeners
     │                                          + group + confirmed BNet
     │                                          + one whisper per proven
     │                                          xfac relay)
     │                                          └ can extract? → ACK
     │                                            cannot?  → silent
-    │  ◄── ACK <guid> ── (first wins, direct to requester)
+    │  ◄── ACK <guid> <seenAt> ── (first non-stale wins, direct
+    │      to requester)
     │  ── OK <guid> ──► winner only; later ACKers get
     │                     silence — their pendingServe
     │                     expires via SERVE_TIMEOUT
@@ -249,7 +272,9 @@ requester                                candidate servers
   while waiting never sends.
 - At most `REQ_MAX_PENDING` (32) outstanding requests.
 - `open` state expires after `REQ_ACK_TIMEOUT` (15s) without an ACK;
-  `awaiting-data` expires after `REQ_DATA_TIMEOUT` (30s) without data.
+  `awaiting-data` expires after `REQ_DATA_TIMEOUT` (120s) without data.
+- An `ACK` claiming `seenAt` below our freshness floor (minus
+  `FRESHNESS_SKEW`) is denied: it cannot contain anything newer.
 - Data received for a pending subject completes the request from any source;
   if it arrived from a non-winner, the winner is NOK'd best-effort.
 - Misses get no reply — relay confirmation rides the `HELLO`/`HI` probes
@@ -283,8 +308,44 @@ requester                                candidate servers
   backpressure signal, so no wire traffic is spent reporting saturation.
   REQs for our own GUID bypass the breaker (we are the authoritative
   server for ourselves).
-- Served data uses a normal data envelope stamped with the server's
-  `originTime` (the original authoring time is unknowable server-side).
+- Served data uses a normal data envelope. Its `originTime` is the holder's
+  *claim* for that copy — the persisted record's as-of stamp, or the
+  register's own last-seen stamp when it holds content the record does not
+  cover — never plain `time()`. Stamping "now" would launder an old copy
+  into looking freshly authored; a stale relay must stay stale on the
+  wire. Self-serves claim `time()` (we are the author).
+
+### Freshness floor
+
+Every client keeps a persisted per-subject record,
+`FactionRPDB.seen[guid] = { at, unitID, pid, cv, addon }`, where `at` is
+the highest "as of" claim ever accepted for that subject. The record
+survives relog (the session cache does not), so a stale serve cannot
+re-enter after a restart once a fresher copy has landed.
+
+- `at` advances on accepted NEW/UPDATED stores and on same-content
+  REFRESHED sightings — never on rejects. Claims are clamped to
+  `time() + FRESHNESS_SKEW` so a far-future claim cannot poison the floor.
+- When no record exists, the floor seeds from the RP AddOn's own last-seen
+  stamp (TRP3 `profile.time`) for the copy we hold.
+- Candidates claiming `originTime < floor - FRESHNESS_SKEW` are REJECTED
+  whether or not a cache entry exists. `FRESHNESS_SKEW` (3600s) absorbs
+  cross-client clock skew: `time()` is each client's local epoch, not a
+  shared clock.
+- The record — not the register's `profile.time` — is authoritative once
+  present: TRP3 re-stamps `profile.time` on every profile bind, including
+  the binds our own injections perform, so the register stamp alone would
+  let injected stale data launder itself as fresh.
+- Records are reconciled against the RP AddOn's register on the cache
+  sweep: a record whose unit no longer holds a profile is dropped (this
+  follows the user's manual purges and the AddOn's own auto-purge, both of
+  which can bypass observable events), and a record whose register-bound
+  profileID has changed re-anchors `at` to the register's stamp — the
+  subject switched profiles, so the old lineage's floor is released.
+- Ordering is timestamp-only. A profileID is compared for *equality* (REQ
+  suppression, sweep re-anchor), never for freshness: TRP3 mints IDs
+  locally with no shared ordering, and a stale copy carrying an unfamiliar
+  ID is still stale.
 
 **What changed vs. push-gossip**: there is no relay leg for data at all.
 Inbound data is cached and injected into the RP AddOn's register — never

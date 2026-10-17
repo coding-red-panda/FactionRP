@@ -123,9 +123,10 @@ SENDER-PLAYER-GUID||SUBJECT-PLAYER-GUID||SUBJECT-NAME-REALM||SOURCE-ADDON||ORIGI
   data store by `Name-Realm`, so we must carry it to be able to display the profile later.
 * `SOURCE-ADDON` is the AddOn the profile originated from (e.g. `TRP3`), so the receiver knows
   which adapter to use.
-* `ORIGIN-TIME` is the server `time()` stamped by the serving client when it sends the
-  profile (a server cannot know the original authoring time). It is the ordering key:
-  a copy with a newer origin-time always supersedes an older one.
+* `ORIGIN-TIME` is the sender's freshness *claim* for the copy it serves: `time()`
+  for self-serves, the holder's own last-seen "as of" stamp otherwise — never the
+  serve time, so a stale held copy cannot masquerade as freshly authored. It is the
+  ordering key: a copy with a newer origin-time always supersedes an older one.
 * `CONTENT-VERSION` identifies the profile content. For TRP3 it is the combination of its
   per-section version counters (`.v`). Because those counters wrap (1..99) and are not globally
   ordered, content-version is only ever compared for *equality* (to detect "same vs changed");
@@ -133,7 +134,7 @@ SENDER-PLAYER-GUID||SUBJECT-PLAYER-GUID||SUBJECT-NAME-REALM||SOURCE-ADDON||ORIGI
   and prevent stale and fresh copies from flapping between peers.
 * `PROTO-VERSION` is the wire-protocol generation (`C.PROTO_MAJOR`). Receivers reject
   any envelope advertising a lower generation *before* touching peer state, and the
-  comm channel carries the generation in its name (`frp3comms`) — older-protocol
+  comm channel carries the generation in its name (`frp4comms`) — older-protocol
   clients, including modified ones, can neither interop nor confirm themselves.
   A sender whose completed message fails this gate (or fails to parse at all) is
   additionally placed on a short blocklist (`REJECTED_SENDER_TTL`), so a hostile or
@@ -165,7 +166,10 @@ cross-faction club members double as discovery — a reply proves the AddOn.
 Because there is otherwise no way to learn that your FactionRP is outdated
 except checking Curse, every client announces its addon version once per
 session: shortly after logging in it broadcasts a single version message on
-our hidden comm channel (see "Request fanout"). Since that channel is
+our hidden comm channel (see "Request fanout"). The announcement also goes
+to the previous protocol generation's channel — old-protocol peers are on a
+disjoint channel by design, so we briefly join `frp3comms`, launch the
+announcement, and leave again. Since that channel is
 faction-scoped, every faction-mate running FactionRP hears the announcement
 the moment someone logs in with a newer build.
 
@@ -188,7 +192,7 @@ profile data moves once per exchange. A pull's *subject* is always
 opposite-faction, but its *servers* need not be — every faction-mate who
 previously pulled the same subject is a holder. A `REQ` therefore goes to:
 
-* **The hidden same-faction comm channel** — `frp3comms`, an ordinary custom
+* **The hidden same-faction comm channel** — `frp4comms`, an ordinary custom
   chat channel (like `/1`) joined via `JoinTemporaryChannel`. Custom
   channels are faction-scoped, so one chunk reaches *every* same-faction
   FactionRP listener — the biggest pool of candidate servers. Channel sends

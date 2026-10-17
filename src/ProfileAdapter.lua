@@ -65,6 +65,24 @@ function ProfileAdapter:inject(unitID, data, classID) -- luacheck: ignore
 	error("ProfileAdapter:inject must be implemented by a subclass")
 end
 
+--- Freshness metadata for the copy we currently hold of a unit, read from the
+-- RP AddOn's register without copying profile data. Used to advertise what we
+-- hold in REQ and to seed freshness floors. Returns nil for the local player,
+-- unknown units, and units with no bound profile.
+-- @param unitID string "Name-Realm".
+-- @return table|nil { at = last-seen epoch, pid = profileID, cv = contentVersion }
+function ProfileAdapter:profileMeta(unitID) -- luacheck: ignore
+	return nil
+end
+
+--- The profileID inside an adapter-private `data` payload, for bookkeeping
+-- (freshness records). Returns nil when the payload does not carry one.
+-- @param data table The adapter-private `data` payload.
+-- @return string|nil
+function ProfileAdapter:dataProfileID(data) -- luacheck: ignore
+	return nil
+end
+
 --- Subscribe to "this unit's profile changed/arrived" notifications from the
 -- underlying AddOn, so the Scanner can react when async data lands. Optional;
 -- the default is a no-op for AddOns without such a signal.

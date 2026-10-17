@@ -19,6 +19,12 @@
 --   * originTime uses time() (Unix/server epoch) so it is comparable ACROSS
 --     clients for ordering which copy of a profile is newer.
 --   * added uses GetTime() (a local monotonic clock) purely for local expiry.
+--
+-- A persisted freshness record (FactionRPDB.seen[guid] = { at, unitID, pid,
+-- cv, addon }) survives this session-only store: `at` is the highest "as of"
+-- claim we have accepted for the subject, so a stale copy cannot be stored
+-- again after a relog once a fresher one has landed. Records are swept against
+-- the RP AddOn's register.
 
 local _, ns = ...
 local C = ns.Const
@@ -50,12 +56,59 @@ local function isExpired(entry, now)
 	return (now - entry.added) > C.CACHE_TTL
 end
 
+--- The freshness floor for a subject: the persisted record's as-of claim when
+-- one exists, else the register's own last-seen stamp for the copy we hold.
+-- The record wins over the register stamp because TRP3 re-stamps profile.time
+-- on every profile bind, including our own injections.
+-- @return number Epoch seconds; 0 when nothing is known.
+function Cache:freshnessFloor(guid, unitID, addonName)
+	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+	if rec and rec.at and rec.at > 0 then
+		return rec.at
+	end
+	local adapter = (addonName and ns.getAdapter(addonName))
+		or ns.getAvailableAdapter()
+	local meta = adapter and unitID and adapter:profileMeta(unitID)
+	return (meta and meta.at) or 0
+end
+
+--- Advance the persisted freshness record for a subject. Called on NEW,
+-- UPDATED and REFRESHED results; never on rejects.
+function Cache:noteSeen(candidate)
+	local db = ns.db
+	if not db or not candidate.guid then
+		return
+	end
+	db.seen = db.seen or {}
+	local rec = db.seen[candidate.guid]
+	if not rec then
+		rec = { at = 0 }
+		db.seen[candidate.guid] = rec
+	end
+	-- Clamp to now+skew: a claim cannot legitimately come from the future.
+	local at = math.min(candidate.originTime or 0, time() + C.FRESHNESS_SKEW)
+	if at > rec.at then
+		rec.at = at
+	end
+	if candidate.unitID and candidate.unitID ~= "" then
+		rec.unitID = candidate.unitID
+	end
+	rec.cv = candidate.contentVersion or rec.cv
+	rec.addon = candidate.addon or rec.addon
+	local adapter = candidate.addon and ns.getAdapter(candidate.addon)
+	local pid = adapter and candidate.data and adapter:dataProfileID(candidate.data)
+	if pid then
+		rec.pid = pid
+	end
+end
+
 --- Attempt to store a candidate profile, applying the de-dup rules.
 --
 -- Rules (see doc/protocol.md):
---   * No existing entry            -> store (NEW).
+--   * No existing entry            -> store (NEW), unless under the floor.
 --   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED), not new content.
---   * Incoming ORIGIN-TIME older   -> ignore (REJECTED).
+--   * Incoming ORIGIN-TIME older   -> ignore (REJECTED); the persisted floor
+--                                    applies the same rule across sessions.
 --   * Otherwise (changed & newer)  -> store (UPDATED).
 --
 -- @param candidate table An entry table WITHOUT `added` (we stamp it here).
@@ -69,14 +122,23 @@ function Cache:tryStore(candidate)
 		existing = nil
 	end
 
+	local floor = self:freshnessFloor(
+		candidate.guid, candidate.unitID, candidate.addon)
+
 	local result
 	if not existing then
+		if candidate.originTime < floor - C.FRESHNESS_SKEW then
+			return Cache.RESULT.REJECTED
+		end
 		result = Cache.RESULT.NEW
 	elseif existing.contentVersion == candidate.contentVersion then
 		-- Same content: just keep it alive, nothing to propagate.
 		existing.added = now
+		self:noteSeen(candidate)
 		return Cache.RESULT.REFRESHED
-	elseif candidate.originTime < existing.originTime then
+	elseif candidate.originTime < existing.originTime
+		or candidate.originTime < floor - C.FRESHNESS_SKEW
+	then
 		-- A different but staler copy; reject so it cannot flap with the
 		-- fresher copy we already hold.
 		return Cache.RESULT.REJECTED
@@ -86,6 +148,7 @@ function Cache:tryStore(candidate)
 
 	candidate.added = now
 	self.entries[candidate.guid] = candidate
+	self:noteSeen(candidate)
 	return result
 end
 
@@ -104,12 +167,21 @@ function Cache:peek(candidate)
 		existing = nil
 	end
 
+	local floor = self:freshnessFloor(
+		candidate.guid, candidate.unitID, candidate.addon)
+
 	if not existing then
+		if candidate.originTime < floor - C.FRESHNESS_SKEW then
+			return Cache.RESULT.REJECTED
+		end
 		return nil -- NEW: needs data
 	elseif existing.contentVersion == candidate.contentVersion then
 		existing.added = now
+		self:noteSeen(candidate)
 		return Cache.RESULT.REFRESHED
-	elseif candidate.originTime < existing.originTime then
+	elseif candidate.originTime < existing.originTime
+		or candidate.originTime < floor - C.FRESHNESS_SKEW
+	then
 		return Cache.RESULT.REJECTED
 	end
 	return nil -- UPDATED: needs data
@@ -147,6 +219,33 @@ function Cache:clear()
 	return n
 end
 
+--- Drop freshness records whose unit the RP AddOn's register no longer holds
+-- a profile for, so they follow the user's manual and automatic purges. A
+-- record whose adapter is missing or not loaded is kept: no adapter is not
+-- proof of absence. When the register shows a different profileID the subject
+-- switched profiles; the record re-anchors to the register's last-seen stamp.
+function Cache:sweepSeen()
+	local seen = ns.db and ns.db.seen
+	if not seen then
+		return
+	end
+	for guid, rec in pairs(seen) do
+		local adapter = (rec.addon and ns.getAdapter(rec.addon))
+			or ns.getAvailableAdapter()
+		if adapter and adapter:isAvailable() and rec.unitID
+			and rec.unitID ~= adapter:getPlayerUnitID()
+		then
+			local meta = adapter:profileMeta(rec.unitID)
+			if not meta then
+				seen[guid] = nil
+			elseif rec.pid ~= meta.pid then
+				rec.pid = meta.pid
+				rec.at = meta.at or rec.at
+			end
+		end
+	end
+end
+
 --- Remove all expired entries. Invoked on a timer; safe to call manually.
 function Cache:sweep()
 	local now = GetTime()
@@ -155,6 +254,7 @@ function Cache:sweep()
 			self.entries[guid] = nil
 		end
 	end
+	self:sweepSeen()
 end
 
 --- Number of live (non-expired) entries currently held.

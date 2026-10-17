@@ -493,13 +493,32 @@ end
 function Broadcast:broadcastVersion()
 	local version = ownVersion()
 	local comms = ns.comms
+
+	-- Old-generation peers sit on their own channel and cannot hear ours;
+	-- join the previous generation's just long enough to launch the
+	-- announcement there too.
+	local prevChan = C.COMM_CHANNEL_PROTO3
+	local prevIdx = prevChan and GetChannelName(prevChan)
+	if prevIdx == 0 then
+		prevIdx = nil
+	end
+	if prevChan and not prevIdx then
+		JoinTemporaryChannel(prevChan)
+		prevIdx = GetChannelName(prevChan)
+		if prevIdx == 0 then
+			prevIdx = nil
+		end
+	end
+
 	local idx = comms and comms:channelIndex()
-	if not idx then
+	if not idx or (prevChan and not prevIdx) then
 		self.verAttempts = self.verAttempts + 1
 		if self.verAttempts < C.VER_BROADCAST_ATTEMPTS then
 			C_Timer.After(C.VER_BROADCAST_RETRY, function()
 				self:broadcastVersion()
 			end)
+		elseif prevChan then
+			LeaveChannelByName(prevChan)
 		end
 		if ns.debugPeer then
 			ns.debugPeer("ver broadcast deferred (channel join pending)")
@@ -513,6 +532,18 @@ function Broadcast:broadcastVersion()
 		if ns.debugPeer then
 			ns.debugPeer("ver " .. version .. " -> channel")
 		end
+	end
+	if prevChan then
+		if comms:sendChunksChannel(self:buildCtl("VER", version), prevChan)
+			and ns.debugPeer
+		then
+			ns.debugPeer("ver " .. version .. " -> " .. prevChan)
+		end
+		-- The chunk still sits in the paced send queue; keep the membership
+		-- until it has had time to flush, then leave the channel again.
+		C_Timer.After(C.VER_PREV_CHANNEL_HOLD, function()
+			LeaveChannelByName(prevChan)
+		end)
 	end
 end
 
@@ -712,12 +743,29 @@ function Broadcast:issueRequest(guid, unitID, now)
 		self.requests[oldest] = nil
 	end
 
-	-- Carry the subject's unitID on the wire when known.
+	-- Carry the subject's unitID on the wire when known, plus our held
+	-- freshness (as-of stamp, profileID, content-version hash) so stale
+	-- holders can suppress their own ACK.
 	local arg = guid
 	if unitID then
 		local wire = Util.fullUnitName(unitID)
 		if wire then
-			arg = guid .. " " .. wire
+			local floor = ns.cache:freshnessFloor(guid, unitID)
+			local pid, cvh = "-", "-"
+			local adapter = ns.getAvailableAdapter()
+			local meta = adapter and adapter.profileMeta
+				and adapter:profileMeta(unitID)
+			if meta then
+				pid = meta.pid or "-"
+				cvh = meta.cv and Util.hashStr(meta.cv) or "-"
+			else
+				local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+				if rec then
+					pid = rec.pid or "-"
+					cvh = rec.cv and Util.hashStr(rec.cv) or "-"
+				end
+			end
+			arg = string.format("%s %s %d %s %s", guid, wire, floor, pid, cvh)
 		end
 	end
 
@@ -736,6 +784,31 @@ function Broadcast:issueRequest(guid, unitID, now)
 	end
 end
 
+--- The freshness claim we can honestly make for a subject: our persisted
+-- record's as-of stamp, or the register's last-seen stamp when it holds
+-- different content (a register copy differing from our record arrived after
+-- it, so its bind stamp is an honest receipt time; an identical copy may
+-- carry a stamp our own injection re-dated). A holder never claims fresher
+-- than its own last contact, so re-serving an old copy cannot masquerade as
+-- new. Self is authoritative.
+function Broadcast:claimAt(guid, unitID, addonName)
+	if guid == self:senderGUID() then
+		return time()
+	end
+	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+	local adapter = (addonName and ns.getAdapter(addonName))
+		or ns.getAvailableAdapter()
+	local meta = adapter and adapter.profileMeta and unitID
+		and adapter:profileMeta(unitID)
+	if meta and meta.at then
+		if not rec or meta.cv ~= rec.cv then
+			return meta.at
+		end
+		return rec.at or meta.at
+	end
+	return (rec and rec.at) or time()
+end
+
 --- Send the requested profile directly to a granted peer.
 function Broadcast:serveData(serve)
 	local adapter = ns.getAvailableAdapter()
@@ -752,8 +825,9 @@ function Broadcast:serveData(serve)
 		subject = serve.subject,
 		unitID = serve.unitID,
 		addon = profile.addon,
-		-- We do not know the original authoring time; our clock stamps the copy.
-		originTime = time(),
+		-- We do not know the original authoring time; we claim the copy's own
+		-- freshness instead of now, so stale held data stays stale on the wire.
+		originTime = self:claimAt(serve.subject, serve.unitID, profile.addon),
 		contentVersion = profile.contentVersion,
 		data = encoded,
 	})
@@ -857,7 +931,8 @@ end
 function Broadcast:onControl(msg, context)
 	local comms = ns.comms
 	local now = GetTime()
-	local verb, arg, arg2 = msg.data:match("^FRP1 (%S+)%s*(%S*)%s*(%S*)")
+	local verb, arg, arg2, arg3, arg4, arg5 =
+		msg.data:match("^FRP1 (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
 	if not verb then
 		return
 	end
@@ -936,6 +1011,25 @@ function Broadcast:onControl(msg, context)
 			return
 		end
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
+			-- The requester advertises what it already holds (as-of stamp,
+			-- profileID, content-version hash). Suppress our ACK when our copy
+			-- is no newer than their claim and of the same lineage or content:
+			-- serving it would only cost both ends a wasted data leg.
+			local offerAt = self:claimAt(arg, unitID, adapter.name)
+			local reqAt = tonumber(arg3) or 0
+			if not selfReq and offerAt <= reqAt + C.FRESHNESS_SKEW then
+				local meta = adapter.profileMeta and adapter:profileMeta(unitID)
+				if meta and ((arg4 ~= "" and meta.pid == arg4)
+					or (arg5 ~= "" and meta.cv
+						and Util.hashStr(meta.cv) == arg5))
+				then
+					if peer then
+						peer("ack " .. arg .. " -> " .. tostring(target)
+							.. " skipped (stale copy)")
+					end
+					return
+				end
+			end
 			-- Bound granted-or-awaiting serves: over the cap we simply do not
 			-- ACK (same as a miss — the requester still times out cleanly).
 			local pending = 0
@@ -945,7 +1039,10 @@ function Broadcast:onControl(msg, context)
 			if pending >= C.SERVE_PENDING_CAP then
 				return
 			end
-			if self:sendToPeer(self:buildCtl("ACK", arg), context.medium, target) then
+			if self:sendToPeer(
+				self:buildCtl("ACK", arg .. " " .. offerAt),
+				context.medium, target
+			) then
 				local key = serveKey(context, arg)
 				self.pendingServes[key] = {
 					subject = arg, unitID = unitID,
@@ -963,8 +1060,16 @@ function Broadcast:onControl(msg, context)
 		-- requester's timeout. Discovery/confirmation rides the whisper
 		-- HELLO/HI probes instead.
 	elseif verb == "ACK" then
+		-- ACK carries the holder's claimed freshness (arg2). A claim at or
+		-- below our persisted floor cannot contain anything newer; denying it
+		-- keeps a fast-but-stale holder from winning the grant.
 		local req = self.requests[arg]
+		local ackAt = tonumber(arg2) or 0
+		local stale = req ~= nil
+			and ackAt + C.FRESHNESS_SKEW
+				< ns.cache:freshnessFloor(arg, req.unitID)
 		local won = req
+			and not stale
 			and req.state == "open"
 			and target
 			and self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
@@ -980,7 +1085,8 @@ function Broadcast:onControl(msg, context)
 			end
 		elseif peer and req then
 			-- Denied ACKs get no reply.
-			peer("ack " .. arg .. " <- " .. tostring(target) .. " (denied)")
+			peer("ack " .. arg .. " <- " .. tostring(target)
+				.. (stale and " (denied: stale)" or " (denied)"))
 		end
 	elseif verb == "OK" then
 		local key = serveKey(context, arg)
@@ -1032,7 +1138,7 @@ function Broadcast:publish(guid, unitID, profile)
 		guid = guid,
 		unitID = unitID,
 		addon = profile.addon,
-		originTime = time(), -- we are the origin: authoritative timestamp
+		originTime = self:claimAt(guid, unitID, profile.addon),
 		contentVersion = profile.contentVersion,
 		data = profile.data,
 	}

@@ -32,6 +32,7 @@ function TRP3Adapter:isAvailable()
 		and reg.getUnitIDProfileID ~= nil
 		and reg.isUnitIDKnown ~= nil
 		and reg.hasProfile ~= nil
+		and reg.profileExists ~= nil
 		and reg.saveInformation ~= nil
 		and reg.saveCurrentProfileID ~= nil
 		and reg.addCharacter ~= nil
@@ -171,6 +172,36 @@ function TRP3Adapter:canServe(unitID)
 	return reg.isUnitIDKnown(unitID)
 		and reg.hasProfile(unitID)
 		and reg.getUnitIDProfileID(unitID) ~= nil
+end
+
+--- Freshness metadata for the register's current copy of a unit: the TRP3
+-- "last seen" stamp (profile.time), the bound profileID, and the content
+-- version of the held sections. Reads live tables; nothing is copied.
+-- @return table|nil { at, pid, cv }, or nil for self/unknown/profileless units.
+function TRP3Adapter:profileMeta(unitID)
+	if not self:isAvailable() then
+		return nil
+	end
+	local reg = TRP3_API.register
+	if not unitID
+		or (TRP3_API.globals and unitID == TRP3_API.globals.player_id)
+		or not reg.isUnitIDKnown(unitID)
+		or not reg.profileExists(unitID)
+	then
+		return nil
+	end
+	local profile = reg.getUnitIDProfile(unitID)
+	local cv = buildContentVersion({
+		characteristics = profile.characteristics,
+		character = profile.character,
+		misc = profile.misc,
+	}, profile.mspver)
+	return { at = profile.time, pid = reg.getUnitIDProfileID(unitID), cv = cv }
+end
+
+--- The profileID inside a TRP3 `data` payload.
+function TRP3Adapter:dataProfileID(data)
+	return data and data.profileID
 end
 
 --- Inject a received profile into TRP3's register so TRP3 renders it.

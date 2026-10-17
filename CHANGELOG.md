@@ -1,5 +1,14 @@
 ﻿# FactionRP Changelog
 
+## 0.3.5
+
+### Changed
+
+- NEW PROTOCOL VERSION!
+- **Stale copies can no longer regress a fresher profile in session.** Regressions may still happen early on in your gaming sessions for reasons of caching and simply needing to update things, but eventually you will synchronise with the most updated profile.
+- REQ and ACK calls now also include additional metadata to help inform when who should serve what.
+
+
 ## 0.3.4
 
 ### Fixes

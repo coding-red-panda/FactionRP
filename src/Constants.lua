@@ -17,7 +17,7 @@ C.VERSION = "0.3.4"
 -- Wire-protocol generation. Stamped into every envelope and the comm-channel
 -- name; peers advertising a lower PROTO_MAJOR are rejected outright, so each
 -- incompatible protocol change gets a hard partition (bump this).
-C.PROTO_MAJOR = 3
+C.PROTO_MAJOR = 4
 
 -- Communication -------------------------------------------------------------
 
@@ -28,7 +28,8 @@ C.MSG_PREFIX = "FactionRP"
 -- Name of the hidden chat channel used to relay messages between same-faction
 -- clients (joined via JoinTemporaryChannel). Carries the protocol generation
 -- so older-protocol clients sit on a disjoint channel and never interop.
-C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp3comms"
+C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp4comms"
+C.COMM_CHANNEL_PROTO3 = "frp3comms"
 
 -- Field separator used inside a logical message payload. `||` is chosen
 -- because it virtually never appears in serialized profile data.
@@ -67,11 +68,13 @@ C.SEND_QUEUE_CAP = 384
 -- control-protocol revision for forward compatibility. Verbs:
 --   HELLO <version>  BNet peer probe ("I run FactionRP")
 --   HI <version>     handshake reply
---   REQ <subjectGuid> [unitID]   pull-exchange request: "who has this
---      profile?" The optional unitID (subject's "Name-Realm") lets any
---      server answer straight from the RP AddOn's register; the guid
---      remains the wire identity carried back by ACK/OK/NOK.
---   ACK <subjectGuid>   "I can serve it"
+--   REQ <subjectGuid> [unitID] [seenAt] [profileID] [cvHash]
+--      pull-exchange request: "who has this profile?" The unitID (subject's
+--      "Name-Realm") lets any server answer straight from the RP AddOn's
+--      register; the guid remains the wire identity carried back by
+--      ACK/OK/NOK. seenAt/profileID/cvHash advertise what the requester
+--      already holds so stale holders can skip their ACK.
+--   ACK <subjectGuid> <seenAt>   "I can serve it, as of <seenAt>"
 --   OK  <subjectGuid>   grant: "you may send it"
 --   NOK <subjectGuid>   cancel: winner mid-send, data landed elsewhere
 -- Control messages are never cached, injected, or relayed.
@@ -139,6 +142,15 @@ C.SERVE_RATE_WINDOW = 30
 C.SERVE_RATE_LIMIT = 10
 C.SERVE_RATE_MUTE = 60
 
+-- Freshness floor ------------------------------------------------------------
+--
+-- db.seen[guid] persists the best "as of" claim we have accepted per subject
+-- ({ at, unitID, pid, cv, addon }): servers stamp serves with their last-seen
+-- time instead of the serve time, and copies claiming older than our floor are
+-- rejected. The floor is clock-derived on both ends, so comparisons carry a
+-- skew tolerance.
+C.FRESHNESS_SKEW = 3600
+
 -- Version announcement (issue #19) -----------------------------------------
 --
 -- Once per session, shortly after login, we broadcast our addon version
@@ -150,6 +162,10 @@ C.SERVE_RATE_MUTE = 60
 C.VER_BROADCAST_DELAY = 15  -- seconds after login before the first attempt
 C.VER_BROADCAST_RETRY = 30  -- gap between retries (channel join pending)
 C.VER_BROADCAST_ATTEMPTS = 3 -- total attempts before giving up
+-- The previous generation's channel is joined only to launch the
+-- announcement; membership is held this long so the paced queue can flush
+-- the chunk, then we leave again.
+C.VER_PREV_CHANNEL_HOLD = 30
 
 -- Caching -------------------------------------------------------------------
 

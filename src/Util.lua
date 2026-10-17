@@ -726,6 +726,18 @@ function Util.versionCompare(a, b)
 	return 0
 end
 
+--- Deterministic 32-bit hash of a string, as 8 hex chars. Used to compare
+-- content versions on the wire without shipping the whole string.
+-- @param s string
+-- @return string
+function Util.hashStr(s)
+	local h = 5381
+	for i = 1, #s do
+		h = (h * 33 + s:byte(i)) % 4294967296
+	end
+	return ("%08x"):format(h)
+end
+
 --- False (+ index of the offender) if any supplied value is secret or
 --- inaccessible. A table result only certifies that it can be indexed.
 --- Fields could still be secret which is what we have Util.fieldsUsable() for.
