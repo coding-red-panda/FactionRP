@@ -262,7 +262,7 @@ function Broadcast:broadcastVersion()
 	end
 
 	local idx = comms and comms:channelIndex()
-	if not idx or (prevChan and not prevIdx) then
+	if Util.commsRestricted() or not idx or (prevChan and not prevIdx) then
 		self.verAttempts = self.verAttempts + 1
 		if self.verAttempts < C.VER_BROADCAST_ATTEMPTS then
 			C_Timer.After(C.VER_BROADCAST_RETRY, function()
@@ -303,6 +303,81 @@ end
 function Broadcast:tick()
 	local now = GetTime()
 	local comms = ns.comms
+	local restricted = Util.commsRestricted()
+
+	-- Request expiry still runs while restricted, but contact timeouts
+	-- drop outright: a response window lost to restriction cannot be
+	-- recovered by a channel fallback.
+	local pump = false
+	for guid, req in pairs(self.requests) do
+		if req.state == "contact"
+			and (now - req.at) > C.REQ_CONTACT_TIMEOUT
+		then
+			if restricted then
+				self.requests[guid] = nil
+				self.recentReqs[guid] = now
+				pump = true
+				if ns.debugPeer then
+					ns.debugPeer("req " .. guid .. " dropped (restricted)")
+				end
+			else
+				local idx = comms:channelIndex()
+				local sent = idx and comms:sendChunksAddon(
+					self:buildCtl("REQ", reqArg(guid, req.unitID)),
+					"CHANNEL", idx)
+				if sent then
+					req.state = "channel"
+					req.at = now
+					req.medium, req.target = nil, nil
+					self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
+					if ns.statsLeg then
+						ns.statsLeg("channel", 1)
+					end
+					if ns.debugPeer then
+						ns.debugPeer("req " .. guid .. " -> channel (contact silent)")
+					end
+				else
+					self.requests[guid] = nil
+					self.recentReqs[guid] = now
+					pump = true
+				end
+			end
+		elseif req.state == "channel"
+			and (now - req.at) > C.REQ_ACK_TIMEOUT
+		then
+			self.requests[guid] = nil
+			self.recentReqs[guid] = now
+			pump = true
+			if ns.debugPeer then
+				ns.debugPeer("req " .. guid .. " expired (channel)")
+			end
+		elseif req.state == "awaiting-data"
+			and (now - req.at) > C.REQ_DATA_TIMEOUT
+		then
+			-- The serve stalled or died; drop the sender's partial chunks
+			-- so a resumed send cannot complete a ghost message.
+			local src = req.winner or req
+			if src.medium and src.target then
+				local key = comms:senderKeyFor(src.medium, src.target)
+				if comms.assembler:drop(key) > 0 and ns.debugPeer then
+					ns.debugPeer("dropped partial data from " .. tostring(key))
+				end
+			end
+			self.requests[guid] = nil
+			self.recentReqs[guid] = now
+			pump = true
+			if ns.debugPeer then
+				ns.debugPeer("req " .. guid .. " expired (awaiting-data)")
+			end
+		end
+	end
+	if pump and not restricted then
+		self:pumpRequests()
+	end
+
+	if restricted then
+		return -- no probes, sends, or further transitions while restricted
+	end
 
 	-- Probe the next unconfirmed BNet account. Probes consume the
 	-- in-flight budget, so none go out while the queue holds the cap.
@@ -347,58 +422,6 @@ function Broadcast:tick()
 		end
 	end
 
-	-- Drive the request state machine: a silent contact drops to the
-	-- faction channel, a silent channel or missing data drops the subject.
-	-- Each outcome frees the pump.
-	local pump = false
-	for guid, req in pairs(self.requests) do
-		if req.state == "contact"
-			and (now - req.at) > C.REQ_CONTACT_TIMEOUT
-		then
-			local idx = comms:channelIndex()
-			local sent = idx and comms:sendChunksAddon(
-				self:buildCtl("REQ", reqArg(guid, req.unitID)),
-				"CHANNEL", idx)
-			if sent then
-				req.state = "channel"
-				req.at = now
-				req.medium, req.target = nil, nil
-				self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
-				if ns.statsLeg then
-					ns.statsLeg("channel", 1)
-				end
-				if ns.debugPeer then
-					ns.debugPeer("req " .. guid .. " -> channel (contact silent)")
-				end
-			else
-				self.requests[guid] = nil
-				self.recentReqs[guid] = now
-				pump = true
-			end
-		elseif req.state == "channel"
-			and (now - req.at) > C.REQ_ACK_TIMEOUT
-		then
-			self.requests[guid] = nil
-			self.recentReqs[guid] = now
-			pump = true
-			if ns.debugPeer then
-				ns.debugPeer("req " .. guid .. " expired (channel)")
-			end
-		elseif req.state == "awaiting-data"
-			and (now - req.at) > C.REQ_DATA_TIMEOUT
-		then
-			self.requests[guid] = nil
-			self.recentReqs[guid] = now
-			pump = true
-			if ns.debugPeer then
-				ns.debugPeer("req " .. guid .. " expired (awaiting-data)")
-			end
-		end
-	end
-	if pump then
-		self:pumpRequests()
-	end
-
 	-- Expire grants we were never asked to serve.
 	for key, serve in pairs(self.pendingServes) do
 		if (now - serve.at) > C.SERVE_TIMEOUT then
@@ -418,7 +441,7 @@ end
 --- Queue a request for `guid`'s profile. No-op when the cache is fresh,
 -- the subject is pending or queued, or it is on cooldown.
 function Broadcast:requestProfile(guid, unitID)
-	if not guid then
+	if not guid or Util.commsRestricted() then
 		return
 	end
 	if ns.cache:fresh(guid)
@@ -474,8 +497,8 @@ end
 --- Issue the next queued subject when no request is in flight.
 -- Entries are re-validated on release.
 function Broadcast:pumpRequests()
-	if next(self.requests) then
-		return -- serial: one request in flight
+	if Util.commsRestricted() or next(self.requests) then
+		return -- restricted, or serial: one request in flight
 	end
 	local o = self.reqQueueOrder
 	local now = GetTime()
@@ -1042,7 +1065,6 @@ function Broadcast:onControl(msg, context)
 		then
 			req.state = "awaiting-data"
 			req.at = now
-			req.winner = { medium = context.medium, target = target }
 			-- Compat: earlier proto-5 servers gate the serve on OK.
 			self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
 			if leg then
@@ -1204,8 +1226,8 @@ function Broadcast:onMessage(raw, context)
 		ns.statsOriginAge(time() - msg.originTime)
 	end
 
-	-- Data for a pending subject completes the exchange. If it came from a
-	-- non-winner, NOK the winner so it stops.
+	-- Data for a pending subject completes the exchange. Channel arbitration
+	-- only: if it came from a non-winner, NOK the winner so it stops.
 	local req = self.requests[msg.subject]
 	if req then
 		local src = context.gameAccountID or context.senderName

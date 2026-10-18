@@ -706,6 +706,14 @@ function Util.canWeUse(...)
 	return true
 end
 
+--- Whether comms must stay silent: combat lockdown, a chat-messaging
+-- lockdown (encounters, M+), or an active challenge-mode run.
+function Util.commsRestricted()
+	return InCombatLockdown()
+		or C_ChatInfo.InChatMessagingLockdown()
+		or C_ChallengeMode.IsChallengeModeActive()
+end
+
 --- Whether the table is indexable and the named fields hold no secrets.
 function Util.fieldsUsable(t, ...)
 	if type(t) ~= "table" or not canaccesstable(t) then

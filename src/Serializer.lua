@@ -222,6 +222,24 @@ function ChunkReassembler:add(sender, chunkString)
 	return nil
 end
 
+--- Drop every partial buffer for one sender (e.g. a serve that stalled).
+-- @return number How many buffers were dropped.
+function ChunkReassembler:drop(sender)
+	local perSender = self.buffers[sender]
+	if not perSender then
+		return 0
+	end
+	local dropped = 0
+	for msgId, buf in pairs(perSender) do
+		perSender[msgId] = nil
+		self.pieceRelease(buf.pieces)
+		self.bufRelease(buf)
+		dropped = dropped + 1
+	end
+	self.buffers[sender] = nil
+	return dropped
+end
+
 --- Drop partially-received messages older than `maxAge` seconds, so a lost
 -- chunk cannot leak its buffer forever. Call periodically.
 -- @param maxAge number Seconds.

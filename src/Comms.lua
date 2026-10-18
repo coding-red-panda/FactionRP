@@ -31,6 +31,7 @@ function Comms:init()
 	-- [senderKey] = GetTime() expiry; chunks from senders whose messages
 	-- failed the version/malformed gates are dropped before reassembly.
 	self.rejectedSenders = {}
+	self.restricted = false -- edge flag: partials pruned once per restriction
 	-- Scratch transport contexts, mutated per inbound event. Valid only
 	-- for the duration of the synchronous handler call; do not retain.
 	self.chatCtx = { medium = nil, senderName = nil, senderKey = nil, gameAccountID = nil }
@@ -227,6 +228,16 @@ end
 -- token bucket. Credit caps at one send's worth so an idle queue cannot
 -- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
 function Comms:flushQueue()
+	-- Hold all sends while restricted; the queue drains after. On entry,
+	-- drop partial inbound buffers: their missing chunks can never arrive.
+	if ns.Util.commsRestricted() then
+		if not self.restricted then
+			self.restricted = true
+			self.assembler:prune(0)
+		end
+		return
+	end
+	self.restricted = nil
 	-- Hold all sends while our own GUID is unreadable.
 	if not ns.Util.canWeUse(UnitGUID("player")) then
 		return
@@ -593,7 +604,19 @@ end
 
 --- Reassemble a chunk; hand full messages to the message handler with
 -- `context` (a shared scratch table, valid only for this call chain).
+--- The reassembly senderKey for a (medium, target) pair: BNet accounts
+-- key as "bn:<id>", chat media key by raw sender name.
+function Comms:senderKeyFor(medium, target)
+	if medium == "BNET" then
+		return "bn:" .. tostring(target)
+	end
+	return target
+end
+
 function Comms:handleIncoming(chunkString, context)
+	if ns.Util.commsRestricted() then
+		return -- inbound chunks are dropped outright while restricted
+	end
 	-- Reassembly is keyed by a stable per-sender identity.
 	local senderKey = context.senderKey
 	if ns.statsChunkIn then
