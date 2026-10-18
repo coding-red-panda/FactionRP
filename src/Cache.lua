@@ -1,8 +1,7 @@
 -- Cache.lua
 --
--- The profile cache: a GUID-keyed store of profiles we have observed or
--- received, with a time-to-live and the version logic that drives
--- de-duplication.
+-- The profile cache: a GUID-keyed store of observed/received profiles with
+-- a TTL and the version logic driving de-duplication.
 --
 -- Each entry is a plain table:
 --   {
@@ -15,16 +14,12 @@
 --     added          = <GetTime()>,          -- local clock, drives TTL/expiry
 --   }
 --
--- Two clocks are used deliberately:
---   * originTime uses time() (Unix/server epoch) so it is comparable ACROSS
---     clients for ordering which copy of a profile is newer.
---   * added uses GetTime() (a local monotonic clock) purely for local expiry.
+-- Two clocks: originTime uses time() so copies compare across clients;
+-- added uses GetTime() purely for local expiry.
 --
--- A persisted freshness record (FactionRPDB.seen[guid] = { at, unitID, pid,
--- cv, addon }) survives this session-only store: `at` is the highest "as of"
--- claim we have accepted for the subject, so a stale copy cannot be stored
--- again after a relog once a fresher one has landed. Records are swept against
--- the RP AddOn's register.
+-- FactionRPDB.seen[guid] = { at, unitID, pid, cv, addon } persists the
+-- highest accepted "as of" claim per subject, so a stale copy cannot be
+-- stored again after a relog. Records are swept against the register.
 
 local _, ns = ...
 local C = ns.Const
@@ -44,8 +39,7 @@ Cache.RESULT = {
 --- Constructor: initialise the store and start the expiry sweep.
 function Cache:init()
 	self.entries = {} -- [guid] = entry
-	-- Periodically drop expired entries so memory does not grow unbounded even
-	-- if nobody looks the entries up.
+	-- Drop expired entries periodically so memory stays bounded.
 	self.ticker = C_Timer.NewTicker(C.CACHE_SWEEP_INTERVAL, function()
 		self:sweep()
 	end)
@@ -56,10 +50,9 @@ local function isExpired(entry, now)
 	return (now - entry.added) > C.CACHE_TTL
 end
 
---- The freshness floor for a subject: the persisted record's as-of claim when
--- one exists, else the register's own last-seen stamp for the copy we hold.
--- The record wins over the register stamp because TRP3 re-stamps profile.time
--- on every profile bind, including our own injections.
+--- The freshness floor for a subject: the persisted record's as-of claim,
+-- else the register's last-seen stamp. The record wins because TRP3
+-- re-stamps profile.time on every bind, including our own injections.
 -- @return number Epoch seconds; 0 when nothing is known.
 function Cache:freshnessFloor(guid, unitID, addonName)
 	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
@@ -106,9 +99,9 @@ end
 --
 -- Rules (see doc/protocol.md):
 --   * No existing entry            -> store (NEW), unless under the floor.
---   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED), not new content.
---   * Incoming ORIGIN-TIME older   -> ignore (REJECTED); the persisted floor
---                                    applies the same rule across sessions.
+--   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED).
+--   * Incoming ORIGIN-TIME older   -> ignore (REJECTED); the persisted
+--                                    floor applies the rule across sessions.
 --   * Otherwise (changed & newer)  -> store (UPDATED).
 --
 -- @param candidate table An entry table WITHOUT `added` (we stamp it here).
@@ -116,7 +109,7 @@ end
 function Cache:tryStore(candidate)
 	local now = GetTime()
 
-	-- Auto-generated default profiles carry no user content; never store.
+	-- Default profiles carry no user content; never store.
 	local adapter = candidate.addon and ns.getAdapter(candidate.addon)
 	if candidate.data and adapter and adapter.dataIsDefault
 		and adapter:dataIsDefault(candidate.data)
@@ -148,8 +141,7 @@ function Cache:tryStore(candidate)
 	elseif candidate.originTime < existing.originTime
 		or candidate.originTime < floor - C.FRESHNESS_SKEW
 	then
-		-- A different but staler copy; reject so it cannot flap with the
-		-- fresher copy we already hold.
+		-- A staler copy; reject so it cannot flap the fresher one we hold.
 		return Cache.RESULT.REJECTED
 	else
 		result = Cache.RESULT.UPDATED
@@ -161,11 +153,10 @@ function Cache:tryStore(candidate)
 	return result
 end
 
---- Resolve the store decision for a candidate WITHOUT its `data` payload.
--- Returns a Cache.RESULT (REFRESHED or REJECTED) when the outcome doesn't
--- need the payload, or nil when the caller must supply data via :tryStore
--- (NEW or UPDATED). Lets the receive path skip expensive payload decoding
--- for duplicates and stale copies. MUST stay in lockstep with :tryStore.
+--- Resolve the store decision for a candidate WITHOUT its `data` payload:
+-- REFRESHED/REJECTED, or nil when the caller must decode data and call
+-- :tryStore. Lets the receive path skip payload decoding for duplicates.
+-- MUST stay in lockstep with :tryStore.
 --
 -- @param candidate table An entry table WITHOUT `data` or `added`.
 -- @return string|nil Cache.RESULT.REFRESHED / Cache.RESULT.REJECTED, or nil.
@@ -228,11 +219,10 @@ function Cache:clear()
 	return n
 end
 
---- Drop freshness records whose unit the RP AddOn's register no longer holds
--- a profile for, so they follow the user's manual and automatic purges. A
--- record whose adapter is missing or not loaded is kept: no adapter is not
--- proof of absence. When the register shows a different profileID the subject
--- switched profiles; the record re-anchors to the register's last-seen stamp.
+--- Drop freshness records whose unit the register no longer holds a profile
+-- for, so they follow the user's purges. Records with no loaded adapter are
+-- kept: no adapter is not proof of absence. A changed register profileID
+-- means the subject switched profiles; the record re-anchors to its stamp.
 function Cache:sweepSeen()
 	local seen = ns.db and ns.db.seen
 	if not seen then

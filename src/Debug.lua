@@ -1,28 +1,17 @@
 -- Debug.lua
 --
--- Optional verbose logging, fractionalised into the categories listed in
--- Const.DEBUG_CATEGORIES. Each is toggled independently with
--- "/factionrp debug <category>", or all at once with "/factionrp debug all".
--- The flags live in saved variables as ns.db.debug = { all=bool, <cat>=bool }.
+-- Optional verbose logging, split into the Const.DEBUG_CATEGORIES list and
+-- toggled via "/factionrp debug <category>" or "all".
 --
--- Rather than checking flags inside the logging functions, enabled hooks are
--- *installed* onto ns (ns.debugReceive, ns.debugPeer, ...) and disabled
--- ones removed. Call sites in Broadcast/Scanner/Comms are nil-guarded
--- ("if ns.debugReceive then"), so a disabled category costs a single table
--- lookup and an enabled one runs with zero flag checks. ns.refreshDebugHooks
--- re-applies the installation whenever flags change.
---
--- The "targets" category has no log hook of its own: it gates whether pinned
--- whisper targets ("/frp debug target") actually send — Broadcast queries it
--- through ns.debugEnabled.
+-- Enabled hooks install onto ns (ns.debugReceive, ...); call sites are
+-- nil-guarded so a disabled category costs one table lookup. The "targets"
+-- category has no hook: it gates whether pinned whisper targets send.
 
 local _, ns = ...
 local C = ns.Const
 
---- Whether a debug category is currently enabled (directly or via `all`).
--- This is the general query for flag state (used by Broadcast for the
--- `targets` gate and by Stats for its collector); the log hooks themselves
--- are installed/removed instead of querying per call.
+--- Whether a debug category is enabled (directly or via `all`). The flag
+-- query for non-hook call sites (Broadcast's `targets` gate, Stats).
 -- @param category string One of Const.DEBUG_CATEGORIES keys.
 -- @return boolean
 function ns.debugEnabled(category)
@@ -62,10 +51,8 @@ local function pickText(t)
 	return #t > 0 and (tostring(#t) .. " (" .. table.concat(t, ", ") .. ")") or "0"
 end
 
-local function logFanout(community, guild, pinned)
-	ns.Print(("|cffffd200[fanout]|r whispers — community: %s | guild: %s | pinned: %s"):format(
-		pickText(community), pickText(guild), pickText(pinned)
-	))
+local function logFanout(pick)
+	ns.Print("|cffffd200[fanout]|r req -> " .. tostring(pick))
 end
 
 local function logChunk(direction, medium, peer, bytes)
@@ -89,9 +76,8 @@ local HOOKS = {
 	debugPeer      = { "peers",     logPeer },
 }
 
---- Install enabled log hooks onto ns and remove disabled ones. Also refreshes
--- the stats collector (Stats.lua exposes applyStatsHooks for the same
--- install/uninstall pattern). Safe to call before saved variables load.
+--- Install enabled log hooks onto ns, remove disabled ones, and refresh
+-- the stats collector. Safe before saved variables load.
 function ns.refreshDebugHooks()
 	for name, hook in pairs(HOOKS) do
 		ns[name] = ns.debugEnabled(hook[1]) and hook[2] or nil
@@ -212,9 +198,8 @@ local function mapNames(t)
 	return names
 end
 
---- Show what the relay-selection machinery currently knows: confirmed FRP
--- whisper relays, proven xfac contacts, online roster candidates, and the
--- actual picks from the most recent fanout.
+--- Show confirmed FRP relays, proven xfac contacts, roster candidates,
+-- and pipeline state.
 ns.RegisterCommand("relays", function()
 	local b = ns.broadcast
 	if not b then
@@ -240,16 +225,15 @@ ns.RegisterCommand("relays", function()
 		end
 	end
 	ns.Print("known relays (confirmed FRP): " .. joined(conf))
-	ns.Print(("relay probes — probing: %s | ignored: %d"):format(joined(probing), ignored))
+	ns.Print(("relay probes | probing: %s | ignored: %d"):format(joined(probing), ignored))
 	ns.Print("xfac contacts (reachable, unconfirmed): " .. joined(mapNames(b.xfacContacts)))
 	ns.Print(("roster candidates: %d community / %d guild"):format(
 		#ns.Util.xfacClubMembers(), #ns.Util.xfacGuildMembers()))
-	-- Raw club-membership counts (all factions, not just xfac candidates):
-	-- distinguishes "guild club never scanned" (0) from "members scanned but
-	-- none opposite-faction" (>0 while candidates stay 0).
+	-- Raw membership counts (all factions): distinguishes "club never
+	-- scanned" (0) from "scanned, none xfac" (>0 while candidates stay 0).
 	local r = ns.Util._roster and ns.Util._roster()
 	if r then
-		ns.Print(("roster membership — community: %d | guild: %d | built %ds ago"):format(
+		ns.Print(("roster membership | community: %d | guild: %d | built %ds ago"):format(
 			mapSize(r.communityByName), mapSize(r.guildByName),
 			math.floor(GetTime() - (r.at or 0))))
 	end
@@ -258,30 +242,29 @@ ns.RegisterCommand("relays", function()
 	local bnetConf = {}
 	for _, id in ipairs(lists.confirmed) do
 		local name
-		if type(BNGetGameAccountInfo) == "function" then
-			local ok, info = pcall(BNGetGameAccountInfo, id)
-			local char = ok and ns.Util.fieldsUsable(info, "characterName", "realmName")
-				and info.characterName
-			if char and char ~= "" then
-				local realm = info.realmName
-				name = (realm and realm ~= "") and (char .. "-" .. realm) or char
-			end
+		local ok, info = pcall(BNGetGameAccountInfo, id)
+		local char = ok and ns.Util.fieldsUsable(info, "characterName", "realmName")
+			and info.characterName
+		if char and char ~= "" then
+			local realm = info.realmName
+			name = (realm and realm ~= "") and (char .. "-" .. realm) or char
 		end
 		bnetConf[#bnetConf + 1] = name or tostring(id)
 	end
-	ns.Print(("bnet peers — confirmed: %s | probing: %s | ignored: %d"):format(
+	ns.Print(("bnet peers | confirmed: %s | probing: %s | ignored: %d"):format(
 		joined(bnetConf), joined(lists.probing), #lists.ignored))
 	local mute = ""
 	if b.serveMuteUntil and GetTime() < b.serveMuteUntil then
 		mute = (" | serve muted %ds"):format(math.ceil(b.serveMuteUntil - GetTime()))
 	end
-	ns.Print(("exchange — pending requests: %d | pending serves: %d | sends in flight: %d%s"):format(
-		mapSize(b.requests or {}), mapSize(b.pendingServes or {}),
+	ns.Print(("exchange | pending requests: %d | queued: %d | pending serves: %d | sends in flight: %d%s"):format(
+		mapSize(b.requests or {}),
+		b.reqQueueOrder and math.max(0, b.reqQueueOrder.tail - b.reqQueueOrder.head + 1) or 0,
+		mapSize(b.pendingServes or {}),
 		b.fanoutsInFlight and b:fanoutsInFlight() or 0, mute))
-	local p = b.lastLegPicks
-	ns.Print(("last fanout — community: %s | guild: %s | bnet: %s | pinned: %s"):format(
-		joined(p.community), joined(p.guild), joined(p.bnet), joined(p.pinned)))
-end, "Show learned relays/contacts and the last fanout's chosen targets")
+	ns.Print(("contact cursor: %d | pinned targets: %d"):format(
+		b.contactIdx or 0, mapSize(b.forcedTargets or {})))
+end, "Show learned relays/contacts and the pull pipeline state")
 
 -- Richer status command (overrides the placeholder registered in Core).
 ns.RegisterCommand("status", function()

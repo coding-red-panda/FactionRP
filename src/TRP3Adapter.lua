@@ -1,9 +1,7 @@
 -- TRP3Adapter.lua
 --
--- Concrete ProfileAdapter for Total RP 3. All TRP3-specific knowledge lives
--- here; if TRP3's internal APIs change, this is the only file that should need
--- updating. TRP3 may load after us, so we resolve TRP3_API lazily at call time
--- rather than caching references at file load.
+-- Concrete ProfileAdapter for Total RP 3; all TRP3-specific knowledge lives
+-- here. TRP3 may load after us, so TRP3_API is resolved lazily at call time.
 --
 -- v1 replicates three profile sections: characteristics, character and misc.
 -- The "about" section is intentionally excluded (see README "Additional Plans").
@@ -57,12 +55,9 @@ function TRP3Adapter:getPlayerUnitID()
 	return ns.ProfileAdapter.getPlayerUnitID(self)
 end
 
--- Build the opaque content-version from the sections' per-section counters.
--- Missing sections contribute 0. Equality of this string means "same content".
---
--- MSP-sourced profiles (non-TRP3 RP addons) lack .v counters; TRP3 instead
--- tracks per-field CRC versions in profile.mspver. We fold them in as a sorted
--- suffix so MSP updates still produce a distinct content version.
+-- Build the opaque content-version from the sections' per-section counters;
+-- missing sections contribute 0. MSP-sourced profiles lack .v counters, so
+-- profile.mspver CRC versions fold in as a sorted suffix.
 local mspFields = {} -- scratch: refilled per buildContentVersion call
 
 local function buildContentVersion(sections, mspver)
@@ -102,9 +97,8 @@ local function getLocalSections()
 	}
 end
 
--- Gather the three sections for another known unit from TRP3's register.
--- Also returns the profile's mspver table (nil for non-MSP profiles) so the
--- caller can fold it into the content version.
+-- Gather the three sections for a known unit plus the profile's mspver
+-- table (nil for non-MSP profiles) for the content version.
 local function getRegisteredSections(unitID)
 	local profile = TRP3_API.register.getUnitIDProfile(unitID)
 	if not profile then
@@ -140,8 +134,7 @@ function TRP3Adapter:extract(unitID)
 		rawSections, mspver = getRegisteredSections(unitID)
 	end
 
-	-- Without a profile id we cannot inject on the receiving end, so this
-	-- profile is not shareable.
+	-- No profile id means the receiver cannot inject it; not shareable.
 	if not profileID or not rawSections then
 		return nil
 	end
@@ -159,9 +152,8 @@ function TRP3Adapter:extract(unitID)
 	}
 end
 
---- Cheap "could we serve this unit's profile" check for the pull exchange:
--- true when TRP3 holds a profile for the unit (or it is us). Does not
--- extract — the expensive copy only runs once a request is granted.
+--- Cheap "could we serve this unit's profile" check: true when TRP3 holds
+-- a profile for the unit (or it is us). Does not extract.
 function TRP3Adapter:canServe(unitID)
 	if not unitID or not self:isAvailable() then
 		return false
@@ -175,9 +167,8 @@ function TRP3Adapter:canServe(unitID)
 		and reg.getUnitIDProfileID(unitID) ~= nil
 end
 
---- Freshness metadata for the register's current copy of a unit: the TRP3
--- "last seen" stamp (profile.time), the bound profileID, and the content
--- version of the held sections. Reads live tables; nothing is copied.
+--- Freshness metadata for the register's current copy: profile.time, the
+-- bound profileID, and the held sections' content version. Reads live tables.
 -- @return table|nil { at, pid, cv }, or nil for self/unknown/profileless units.
 function TRP3Adapter:profileMeta(unitID)
 	if not self:isAvailable() then
@@ -206,7 +197,7 @@ function TRP3Adapter:dataProfileID(data)
 end
 
 --- TRP3 marks auto-generated default profiles with a trailing "*" on the
--- profileID so other players can identify them. isDefaultProfile wraps that.
+-- profileID; isDefaultProfile wraps that marker.
 local function isDefaultPid(pid)
 	return pid ~= nil and TRP3_API.profile.isDefaultProfile(pid)
 end
@@ -282,9 +273,8 @@ function TRP3Adapter:inject(unitID, data, classID)
 	reg.saveClientInformation(unitID, "Total RP 3", "", false, 0, false, "", nil, classID)
 	reg.saveCurrentProfileID(unitID, data.profileID)
 
-	-- Write each present section, skipping ones TRP3 already holds at the same
-	-- version to avoid redundant writes and update events (unrolled: the
-	-- section map would be a per-call allocation for only three entries).
+	-- Skip sections TRP3 already holds at the same version to avoid
+	-- redundant writes and update events.
 	local injected = false
 	local section = data.sections.characteristics
 	if section and reg.shouldUpdateInformation(unitID, types.CHARACTERISTICS, section.v) then
@@ -320,10 +310,9 @@ function TRP3Adapter:registerUpdateListener(callback)
 end
 
 --- Hook TRP3's profile-receipt signals so the Scanner can re-publish data
---- that arrived over TRP3's own comm channels. Two sources:
----   * REGISTER_DATA_RECEIVED: TRP3 exchange protocol section receipts.
----   * msp.callback.received: MSP profiles merged from non-TRP3 RP AddOns.
---- Neither fires for FactionRP's own injections, so this is loop-safe.
+-- that arrived over TRP3's own channels. Sources: REGISTER_DATA_RECEIVED
+-- (TRP3 exchange) and msp.callback.received (MSP merges). Neither fires for
+-- FactionRP's own injections, so this is loop-safe.
 -- @param callback function Invoked as callback(unitID).
 function TRP3Adapter:registerReceivedListener(callback)
 	if not self:isAvailable() then
@@ -336,9 +325,8 @@ function TRP3Adapter:registerReceivedListener(callback)
 			end
 		end)
 	end
-	-- LibMSP exposes a plain callback list on the `msp` global. Our listener is
-	-- appended after TRP3's own (it registers during init, before login), so
-	-- the register writes have already landed when we fire.
+	-- Our listener appends after TRP3's own, so register writes have
+	-- already landed when we fire.
 	if msp and msp.callback and msp.callback.received then
 		msp.callback.received[#msp.callback.received + 1] = function(unitID)
 			callback(unitID)

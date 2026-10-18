@@ -1,7 +1,6 @@
 -- Util.lua
 --
--- Small, pure helper functions shared across modules. Nothing here touches
--- AddOn state; everything is a stateless utility.
+-- Stateless helper functions shared across modules.
 
 local _, ns = ...
 local C = ns.Const
@@ -9,9 +8,7 @@ local C = ns.Const
 local Util = {}
 ns.Util = Util
 
---- A tiny table pool: `acquire` returns a wiped reusable table (or a fresh one
--- when the pool is empty), `release` returns a table to the pool, and `size`
--- reports pooled count.
+--- A tiny table pool. Returns acquire (wiped table or fresh), release, size.
 -- @param cap number Maximum tables retained in the pool.
 -- @return acquire, release, size
 function Util.newPool(cap)
@@ -41,8 +38,7 @@ function Util.trim(s)
 	return (s:gsub("^%s*(.-)%s*$", "%1"))
 end
 
---- Build the "Name-Realm" identifier for a unit, matching the convention used
--- by RP AddOns for keying their character store.
+--- Build the "Name-Realm" identifier for a unit, the key RP AddOns use.
 
 local REALM_STRIP = "[%s%-%.]+"
 
@@ -66,11 +62,8 @@ function Util.getUnitID(unit)
 	else
 		realm = realm:gsub(REALM_STRIP, "")
 	end
-	-- Issue #26: GetNormalizedRealmName() can hand back nil while the client is
-	-- mid-transition (entering a follower dungeon), and canWeUse(nil) is true —
-	-- nil is accessible, merely absent — so the secrecy guard above cannot catch
-	-- it. Refuse an unusable realm instead of concatenating it: every caller
-	-- already treats a nil result as "unit not identified".
+	-- Issue #26: GetNormalizedRealmName can return nil mid-transition, and
+	-- canWeUse(nil) is true, so the secrecy guard cannot catch it.
 	if type(realm) ~= "string" or realm == "" then
 		return nil
 	end
@@ -90,18 +83,15 @@ function Util.isOppositeFaction(unit)
 	if not Util.canWeUse(isPlayer, theirs, mine) or not isPlayer then
 		return false
 	end
-	-- UnitFactionGroup returns "Alliance"/"Horde"/"Neutral"/nil. Treat any
-	-- mismatch between two known, differing groups as opposite faction.
+	-- Any mismatch between two known, differing groups is opposite-faction.
 	return theirs ~= nil and mine ~= nil and theirs ~= mine
 end
 
 -- GUID resolution -----------------------------------------------------------
 --
--- The wire format and cache key profiles by the subject's real GUID, but
--- profiles received over the RP AddOn's comm channels arrive keyed only by
--- "Name-Realm". resolveGUID is a best-effort, name-based lookup over every
--- source that can map a character name to a GUID: nearby unit tokens,
--- Battle.net friends, and WoW community/club rosters.
+-- Profiles arrive keyed by "Name-Realm" but the wire/cache key is the GUID.
+-- resolveGUID maps name to GUID over nearby unit tokens, BNet friends, and
+-- club rosters.
 
 -- Unit tokens that can refer to other players near enough to have a GUID.
 local GUID_UNIT_TOKENS = { "target", "targettarget", "mouseover", "focus", "softenemy" }
@@ -118,9 +108,8 @@ for i = 1, 5 do
 	GUID_UNIT_TOKENS[#GUID_UNIT_TOKENS + 1] = "arena" .. i
 end
 
---- Normalize a character name to "Name-Realm" for comparison: strips spaces
--- from the realm (matching getUnitID) and defaults a missing realm to the
--- local realm.
+--- Normalize a name to lowercase "Name-Realm" for comparison; a missing
+-- realm defaults to ours.
 -- @param name string "Name" or "Name-Realm".
 -- @return string|nil
 local function normalizeUnitName(name)
@@ -140,8 +129,7 @@ local function normalizeUnitName(name)
 end
 Util.normalizeUnitName = normalizeUnitName
 
---- Same normalization as normalizeUnitName but preserving case: produces the
---- "Name-Realm" form suitable for a whisper target.
+--- Same as normalizeUnitName but case-preserving, for whisper targets.
 local function fullUnitName(name)
 	if not Util.canWeUse(name) or not name or name == "" then
 		return nil
@@ -161,22 +149,16 @@ Util.fullUnitName = fullUnitName
 
 -- Community roster ----------------------------------------------------------
 --
--- Members of our own subscribed WoW communities are the one group of
--- opposite-faction players we can reach directly: addon whispers work between
--- community members across factions, and ClubMemberInfo exposes a NeverSecret
--- `faction` field we can filter on. The roster also doubles as the name->GUID
--- map for resolveGUID's club fallback.
+-- Subscribed-club members are the one group of opposite-faction players
+-- reachable by addon whisper; the roster also doubles as resolveGUID's
+-- name->GUID fallback.
 --
--- A full scan is O(total club membership) — too much for one frame on large
--- communities — so a stale roster is rebuilt incrementally: ROSTER_SLICE
--- member lookups per frame via self-rescheduling timers, then the memo is
--- swapped atomically. Callers always see the last complete roster (possibly
--- stale or, before the first build finishes, empty); lookups during a build
--- degrade to graceful misses.
+-- A full scan is O(club membership), too much for one frame, so a stale
+-- roster rebuilds incrementally: ROSTER_SLICE member lookups per frame,
+-- then an atomic swap. Readers always see the last complete roster.
 
--- ClubMemberPresence values that mean the character is logged in (1 Online,
--- 4 Away, 5 Busy). OnlineMobile (2) is the phone app and cannot receive addon
--- messages; Unknown (0) and Offline (3) are useless targets.
+-- ClubMemberPresence values meaning logged-in (1 Online, 4 Away, 5 Busy).
+-- OnlineMobile (2) cannot receive addon messages.
 local PRESENCE_ONLINE = { [1] = true, [4] = true, [5] = true }
 
 local function rosterTables()
@@ -192,9 +174,8 @@ local function rosterTables()
 	}
 end
 
--- Two persistent table-sets: builds write into rosterBack while readers keep
--- rosterFront; finishing a build swaps them atomically. This keeps the every-
--- COMM_ROSTER_MEMO rebuild from re-allocating O(roster size) of tables.
+-- Builds write into rosterBack while readers keep rosterFront; finishing a
+-- build swaps them, so rebuilds do not re-allocate per memo window.
 local rosterFront = rosterTables()
 rosterFront.at = 0
 local rosterBack = rosterTables()
@@ -212,9 +193,8 @@ local function selfFaction()
 	return Util.canWeUse(f) and f == "Alliance" and 1 or 0
 end
 
--- raceID -> PvPFaction, memoized: race determines faction unambiguously
--- (dual-faction races use distinct raceIDs). Sole faction source —
--- ClubMemberInfo.faction arrives absent on the current client.
+-- raceID -> PvPFaction memo. Sole faction source; ClubMemberInfo.faction
+-- arrives absent on the current client.
 local raceFaction = {}
 local function factionFromRace(race)
 	if type(race) ~= "number" or not Util.canWeUse(race) then
@@ -222,8 +202,7 @@ local function factionFromRace(race)
 	end
 	local f = raceFaction[race]
 	if f == nil then
-		local info = C_CreatureInfo and C_CreatureInfo.GetFactionInfo
-			and C_CreatureInfo.GetFactionInfo(race)
+		local info = C_CreatureInfo.GetFactionInfo(race)
 		local tag = type(info) == "table" and Util.canWeUse(info.groupTag)
 			and info.groupTag
 		f = (tag == "Alliance") and 1 or (tag == "Horde") and 0 or false
@@ -241,26 +220,23 @@ local function mapCount(t)
 end
 
 local function finishRosterBuild(build)
-	-- A build that collected GUIDs but saw no faction data likely raced the
-	-- member-info stream (faction arrives lazily). Publishing it would give
-	-- the whisper legs an empty roster for a whole memo window, so keep the
-	-- old roster and retry shortly instead.
+	-- GUIDs but no faction data means the build raced the lazy member-info
+	-- stream; keep the old roster and retry shortly.
 	if not build.sawFaction and next(build.target.guidByName) then
 		suspectBuilds = suspectBuilds + 1
 		if suspectBuilds < 3 then
 			rebuildRetryAt = GetTime() + C.ROSTER_RETRY
 			rosterBuild = nil
 			if ns.debugPeer then
-				ns.debugPeer("roster build suspect (guids but no factions) — retrying")
+				ns.debugPeer("roster build suspect (guids but no factions), retrying")
 			end
 			return
 		end
 		if ns.debugPeer then
-			ns.debugPeer("roster build suspect — publishing anyway (no faction data)")
+			ns.debugPeer("roster build suspect, publishing anyway (no faction data)")
 		end
 	end
-	-- Deferred members (online, faction unknown at their scan point): classify
-	-- now that every club's faction claims are accumulated.
+	-- Classify deferred members now that every club's claims accumulated.
 	for _, d in ipairs(build.deferred) do
 		local f = build.target.factionByName[d.key]
 		if f ~= nil and f ~= selfFaction() then
@@ -273,7 +249,7 @@ local function finishRosterBuild(build)
 			end
 		end
 	end
-	-- The build wrote into the back buffer; publish it by swapping buffers.
+	-- Publish the back buffer by swapping.
 	rosterBack.at = GetTime()
 	rosterFront, rosterBack = rosterBack, rosterFront
 	rosterBuild = nil
@@ -286,12 +262,10 @@ local function finishRosterBuild(build)
 	end
 end
 
--- Forward declaration: stepRosterBuild reschedules via stepCurrentBuild,
--- which in turn calls stepRosterBuild.
+-- Forward declaration: stepRosterBuild reschedules via stepCurrentBuild.
 local stepCurrentBuild
 
--- Process up to ROSTER_SLICE member lookups, then reschedule for the next
--- frame. On completion the accumulated tables replace the memo atomically.
+-- Process up to ROSTER_SLICE member lookups, then reschedule.
 local function stepRosterBuild(build)
 	if build ~= rosterBuild then
 		return -- superseded
@@ -323,7 +297,7 @@ local function stepRosterBuild(build)
 		end
 		local memberId = build.members[build.m]
 		if not Util.canWeUse(memberId) then
-			-- Sporadically secret element: skip the member, keep building.
+			-- Sporadically secret element: skip, keep building.
 			build.m = build.m + 1
 			budget = budget - 1
 		elseif not memberId then
@@ -354,14 +328,13 @@ local function stepRosterBuild(build)
 					end
 					if PRESENCE_ONLINE[info.presence] then
 						t.onlineByName[key] = true
-						-- A member's faction can be absent on *this* club's
-						-- record (race doesn't always populate): any club's
-						-- claim counts. Still-unknown members defer to
-						-- end-of-build so a later club's record can supply it.
+						-- Faction can be absent on this club's record; any
+						-- club's claim counts. Unknown members defer to
+						-- end-of-build so a later club can supply it.
 						local faction = t.factionByName[key]
 						if faction ~= nil and faction ~= selfFaction() then
-							-- Dedup per leg: a member in the guild AND a
-							-- community is a candidate in both lists.
+							-- A member in the guild AND a community is a
+							-- candidate in both lists.
 							local list = club.guild and t.xfacGuild or t.xfac
 							local seen = club.guild and buildSeenGuild or buildSeenXfac
 							local dk = info.guid or key
@@ -384,8 +357,7 @@ local function stepRosterBuild(build)
 	C_Timer.After(0, stepCurrentBuild)
 end
 
--- Hoisted reschedule closure: reads the current build so the timer allocates
--- nothing per slice.
+-- Hoisted reschedule closure so the timer allocates nothing per slice.
 stepCurrentBuild = function()
 	if rosterBuild then
 		stepRosterBuild(rosterBuild)
@@ -393,14 +365,9 @@ stepCurrentBuild = function()
 end
 
 local function startRosterBuild()
-	if not C_Club or not C_Club.GetSubscribedClubs or not C_Club.GetClubMembers then
-		return
-	end
-	-- Club APIs can fail before clubs are initialized or during lockdown.
-	-- Member info streams in lazily after login; build only once the client
-	-- reports clubs fully loaded (the sawFaction check in finishRosterBuild
-	-- is the backstop for clients where this API is absent or wrong).
-	if C_Club.ClubsHaveBeenLoaded and not C_Club.ClubsHaveBeenLoaded() then
+	-- Member info streams in lazily; build only once clubs report loaded.
+	-- sawFaction in finishRosterBuild is the backstop for wrong reports.
+	if not C_Club.ClubsHaveBeenLoaded() then
 		return
 	end
 	local ok, clubs = pcall(C_Club.GetSubscribedClubs)
@@ -411,13 +378,12 @@ local function startRosterBuild()
 		end
 		return
 	end
-	-- Our own guild is a club too (C_Club.GetGuildClubId) and gets the same
-	-- coverage — cross-faction guilds make its opposite-faction members
-	-- whisper-reachable. It is kept as a separate target list.
+	-- Our own guild is a club too; its xfac members are whisper-reachable.
+	-- Kept as a separate target list.
 	local list = {}
 	for _, club in ipairs(clubs) do
 		if Util.fieldsUsable(club, "clubId", "clubType") then
-			local isGuild = Enum and Enum.ClubType and club.clubType == Enum.ClubType.Guild
+			local isGuild = club.clubType == Enum.ClubType.Guild
 			list[#list + 1] = { id = club.clubId, guild = isGuild or nil }
 		end
 	end
@@ -439,7 +405,7 @@ local function startRosterBuild()
 			list[#list + 1] = { id = guildClubId, guild = true }
 		end
 	end
-	-- Rebuild into the back buffer (wiped); readers keep the front until swap.
+	-- Rebuild into the wiped back buffer; readers keep the front until swap.
 	local back = rosterBack
 	wipe(back.xfac)
 	wipe(back.xfacGuild)
@@ -468,23 +434,20 @@ local function clubRoster()
 	return rosterFront
 end
 
---- Online, opposite-faction members of our subscribed clubs — the players we
---- can reach with a cross-faction addon whisper.
+--- Online opposite-faction club members we can reach by addon whisper.
 -- @return table List of "Name-Realm" strings, deduplicated by GUID.
 function Util.xfacClubMembers()
 	return clubRoster().xfac
 end
 
---- Whether a "Name-Realm" belongs to an opposite-faction member of one of our
---- clubs, per the roster's NeverSecret faction field.
+--- Whether a "Name-Realm" is an opposite-faction member of our clubs.
 function Util.isXfacClubMember(unitID)
 	local key = normalizeUnitName(unitID)
 	local faction = key and clubRoster().factionByName[key]
 	return faction ~= nil and faction ~= selfFaction()
 end
 
---- Online, opposite-faction members of our own guild — the players we can
---- reach with a cross-faction addon whisper (cross-faction guilds).
+--- Online opposite-faction members of our own guild (cross-faction guilds).
 -- @return table List of "Name-Realm" strings, deduplicated by GUID.
 function Util.xfacGuildMembers()
 	return clubRoster().xfacGuild
@@ -496,8 +459,8 @@ function Util.isGuildClubMember(unitID)
 	return key ~= nil and clubRoster().guildByName[key] == true
 end
 
---- Whether a "Name-Realm" is a club member currently logged in (per the
--- roster memo's presence field — mobile-app presences count as offline).
+--- Whether a "Name-Realm" is a club member currently logged in.
+-- Mobile-app presences count as offline.
 function Util.isClubMemberOnline(unitID)
 	local key = normalizeUnitName(unitID)
 	return key ~= nil and clubRoster().onlineByName[key] == true
@@ -509,21 +472,19 @@ function Util.isCommunityClubMember(unitID)
 	return key ~= nil and clubRoster().communityByName[key] == true
 end
 
---- Reverse lookup: the display "Name-Realm" of a club member by GUID, or nil.
--- Used to resolve request subjects to extractable unit IDs.
+--- Reverse lookup: display "Name-Realm" of a club member by GUID.
 function Util.unitForGuid(guid)
 	return guid and clubRoster().nameByGuid[guid] or nil
 end
 
---- Reverse lookup via the client's own player-info cache
--- (GetPlayerInfoByGUID -> name + normalizedRealmName).
+--- Reverse lookup via the client's own player-info cache.
 -- @param guid string
--- @return string|nil "Name-Realm", or nil if the GUID is unknown to the client.
+-- @return string|nil "Name-Realm", or nil if unknown to the client.
 function Util.unitForGuidFromClient(guid)
-	if not guid or not GetPlayerInfoByGUID then
+	if not guid then
 		return nil
 	end
-	-- May fail outright or yield secret values during lockdown.
+	-- May error or yield secret values during lockdown.
 	local ok, _, _, _, _, _, name, realm = pcall(GetPlayerInfoByGUID, guid)
 	if not ok or not Util.canWeUse(name, realm)
 		or not name or name == ""
@@ -547,10 +508,7 @@ local function guidFromUnits(unitID)
 end
 
 local function guidFromBNetFriends(unitID)
-	if BNFeaturesEnabledAndConnected and not BNFeaturesEnabledAndConnected() then
-		return
-	end
-	if not C_BattleNet then
+	if not BNFeaturesEnabledAndConnected() then
 		return
 	end
 	local numFriends = BNGetNumFriends()
@@ -577,8 +535,7 @@ local function guidFromBNetFriends(unitID)
 end
 
 local function guidFromClubs(unitID)
-	-- Shares the (memoized, incrementally-built) community roster rather than
-	-- walking every club member itself.
+	-- Shares the memoized roster rather than walking club members.
 	return clubRoster().guidByName[unitID]
 end
 
@@ -604,8 +561,7 @@ function Util.resolveGUID(unitID)
 		or guidFromBNetFriends(key)
 		or guidFromClubs(key)
 
-	-- Periodically prune expired memos so the table cannot grow unbounded
-	-- over a long session.
+	-- Prune expired memos periodically so the table stays bounded.
 	memoPruneCounter = memoPruneCounter + 1
 	if memoPruneCounter >= 50 then
 		memoPruneCounter = 0
@@ -617,8 +573,7 @@ function Util.resolveGUID(unitID)
 	end
 
 	if not guid and rosterBuild then
-		-- The roster is mid-rebuild: this miss may resolve once it finishes,
-		-- so do not memoize it as a negative result.
+		-- Mid-rebuild miss may resolve later; do not memoize it negative.
 		return nil
 	end
 	if not memo then
@@ -639,8 +594,7 @@ function Util._guidMemo()
 	return guidMemo
 end
 
---- Retarget FRP messages still queued in CTL after channel reorder,
---- so that the queue sends to the correct channel.
+--- Retarget FRP messages still queued in CTL after a channel reorder.
 function Util.fixChompChannelTargets(channelInx)
 	if type(channelInx) ~= "number" or channelInx == 0 then
 		return
@@ -651,8 +605,7 @@ function Util.fixChompChannelTargets(channelInx)
 	end
 	local ctl = ChatThrottleLib
 	if not ctl or type(ctl.Prio) ~= "table" then
-		-- if it doesn't exist or if something corrupted ctl.Prio into a non-table,
-		-- fuck off
+		-- Absent or corrupted; nothing to fix.
 		return
 	end
 	local rewritten = 0
@@ -681,8 +634,7 @@ function Util.fixChompChannelTargets(channelInx)
 					if debug then
 						currentId[#currentId + 1] =  msg[4] or 0
 					end
-					-- we still want to fix and send nils
-					-- msg.n == 3 if channel was nil
+					-- msg.n == 3 when the channel field was nil; still fix it.
 					if msg.n == 3 then
 						msg.n = 4
 					end
@@ -696,9 +648,8 @@ function Util.fixChompChannelTargets(channelInx)
 	end
 end
 
---- Compare two dot-separated version strings numerically ("0.3.2", "1.0",
--- "2"). Non-numeric suffixes are ignored, so "0.3.2-beta" compares as "0.3.2";
--- short versions pad with zeros ("1.0" == "1.0.0").
+--- Compare two dot-separated version strings numerically. Non-numeric
+-- suffixes are ignored; short versions pad with zeros.
 -- @param a string First version.
 -- @param b string Second version.
 -- @return number -1 when a < b, 1 when a > b, 0 when equal.
@@ -727,7 +678,7 @@ function Util.versionCompare(a, b)
 end
 
 --- Deterministic 32-bit hash of a string, as 8 hex chars. Used to compare
--- content versions on the wire without shipping the whole string.
+-- content versions without shipping the string.
 -- @param s string
 -- @return string
 function Util.hashStr(s)
@@ -738,9 +689,9 @@ function Util.hashStr(s)
 	return ("%08x"):format(h)
 end
 
---- False (+ index of the offender) if any supplied value is secret or
---- inaccessible. A table result only certifies that it can be indexed.
---- Fields could still be secret which is what we have Util.fieldsUsable() for.
+--- False (+ offender index) if any supplied value is secret or
+-- inaccessible. Tables only certify indexability; use fieldsUsable for
+-- secret fields.
 function Util.canWeUse(...)
 	for i = 1, select("#", ...) do
 		local v = select(i, ...)
@@ -755,8 +706,7 @@ function Util.canWeUse(...)
 	return true
 end
 
---- Check if supplied table is indexable and, if it is,
---- discover whether the supplied fields contain secrets.
+--- Whether the table is indexable and the named fields hold no secrets.
 function Util.fieldsUsable(t, ...)
 	if type(t) ~= "table" or not canaccesstable(t) then
 		return false

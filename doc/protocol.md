@@ -32,14 +32,14 @@ deliveries *legal* across factions; the roster exists purely to enumerate
 those whisper-reachable targets. BNet works between any friends and ignores
 faction entirely.
 
-**Every leg is a single hop.** The requester sends `REQ` on each medium
-itself; a recipient that can serve replies `ACK` and, if granted, sends the
-profile *directly* to the requester. "Relay" in this document means a
-reachable cross-faction *endpoint* — never a forwarder: no client relays or
-re-sends anything on behalf of another. A requester with no cross-faction
-clubs or friends therefore still gets full use of the channel and group
-legs — answering peers are faction-mates, so their reply whisper needs no
-shared club.
+**Every leg is a single hop.** The requester unicasts `REQ` to one contact
+at a time (or broadcasts once on the channel as last resort); a recipient
+that can serve replies `ACK` and sends the profile *directly* to the
+requester. "Relay" in this document means a reachable cross-faction
+*endpoint* — never a forwarder: no client relays or re-sends anything on
+behalf of another. A requester with no cross-faction clubs or friends
+still gets the channel fallback — answering peers are faction-mates, so
+their reply whisper needs no shared club.
 
 Sends are routed through AddOn_Chomp's `SendAddonMessage`/`BNSendGameData`
 when available (raw ChatThrottleLib passthrough — the prefix and text reach
@@ -210,9 +210,9 @@ lifecycle as BNet accounts:
   re-enter rotation with a fresh slate — the slow recovery path. Ignored
   targets are skipped by `REQ` fanouts too.
 
-`REQ` whisper legs reach only proven targets — confirmed relays and known
-xfac contacts; the unconfirmed roster is the probe rotation's job, so a
-request never whispers strangers.
+`REQ` whisper legs reach only proven targets — confirmed BNet peers and
+confirmed whisper relays; the unconfirmed roster is the probe rotation's
+job, so a request never whispers strangers.
 
 ### Version announcement (`VER <addonVer>`)
 
@@ -237,18 +237,43 @@ the goal, awareness is.
 
 Profiles move on demand. A pull is triggered when the user mouseovers or
 targets an opposite-faction player whose profile we do not hold fresh.
+Requests are **serial**: at most one subject is in flight, and each subject
+is tried against exactly one contact before falling back to the faction
+channel. A round-robin cursor walks the contact roster so every contact
+serves at most one request per cycle:
+
+1. confirmed BNet peers (subject-first when the subject themselves is a
+   BNet-reachable FRP peer — a self-serve is authoritative),
+2. confirmed guild-club relays,
+3. confirmed community-club relays.
+
+The cursor wraps after the last contact; new requests resume from the
+first.
 
 ```
-requester                                candidate servers
-    │  REQ <guid> [unitID] [seenAt] [pid] [cvHash] ─► (1 chunk on frp<N>comms —
-    │                                          all same-faction listeners
-    │                                          + group + confirmed BNet
-    │                                          + one whisper per proven
-    │                                          xfac relay)
+requester                                one contact
+    │  REQ <guid> [unitID] [seenAt] [pid] [cvHash] ─► (direct whisper/BNet)
+    │                                          └ can serve? → ACK + data
+    │                                            cannot?  → silence
+    │  ◄── ACK <guid> <seenAt> ── opens the data window
+    │  ◄── data envelope ── holder serves direct
+    │
+    │  no ACK within REQ_CONTACT_TIMEOUT (4s):
+    │  REQ rebroadcast on frp<N>comms ──► same-faction holder pool
+    │       (ACK/OK arbitration as below)
+```
+
+Silence is the only rejection — there is no `NOK` on the unicast path.
+After the ACK the requester waits up to `REQ_DATA_TIMEOUT` (120s, covering
+TRP3's own 60s query lifetime plus margin) for the profile; other subjects
+queue meanwhile.
+
+```
+requester                                same-faction channel (fallback)
+    │  REQ <guid> [unitID] [seenAt] [pid] [cvHash] ─► (1 chunk, all listeners)
     │                                          └ can extract? → ACK
     │                                            cannot?  → silent
-    │  ◄── ACK <guid> <seenAt> ── (first non-stale wins, direct
-    │      to requester)
+    │  ◄── ACK <guid> <seenAt> ── (first non-stale wins, direct)
     │  ── OK <guid> ──► winner only; later ACKers get
     │                     silence — their pendingServe
     │                     expires via SERVE_TIMEOUT
@@ -256,54 +281,59 @@ requester                                candidate servers
 ```
 
 **Requester rules**
-- Skip if the subject is already cached-fresh, a request is pending, or the
-  subject is on `REQ_COOLDOWN` (60s) after a prior attempt.
+- Skip if the subject is already cached-fresh, a request is pending or
+  queued, or the subject is on `REQ_COOLDOWN` (60s) after a prior attempt.
 - Skip if the subject shares a club with us (community or guild): the RP
   AddOn's own cross-faction whisper query already pulls that profile on
   mouseover/target — a `REQ` would duplicate the native pull, whose landing
   fills our cache via the received listener anyway.
-- Fanouts are globally paced: at most one `REQ` fanout per
-  `REQ_ISSUE_INTERVAL` (4s). Initiated sends — `REQ` fanouts and `HELLO`
-  probes — also share an in-flight budget: no more than
-  `FANOUT_INFLIGHT_MAX` (3) may occupy the send queue at once, so a new
-  send waits for earlier chunks to drain. Sightings that arrive sooner
-  wait in a dedup'd FIFO (`REQ_BACKLOG_CAP`=8, oldest dropped on
+- Pending subjects queue dedup'd (`REQ_BACKLOG_CAP`=8, oldest dropped on
   overflow) and are re-validated on release — a subject cached or served
   while waiting never sends.
-- At most `REQ_MAX_PENDING` (32) outstanding requests.
-- `open` state expires after `REQ_ACK_TIMEOUT` (15s) without an ACK;
-  `awaiting-data` expires after `REQ_DATA_TIMEOUT` (120s) without data.
-- An `ACK` claiming `seenAt` below our freshness floor (minus
-  `FRESHNESS_SKEW`) is denied: it cannot contain anything newer.
-- Data received for a pending subject completes the request from any source;
-  if it arrived from a non-winner, the winner is NOK'd best-effort.
+- `contact` state expires after `REQ_CONTACT_TIMEOUT` (4s) without an ACK
+  and falls to the faction channel; `channel` expires after
+  `REQ_ACK_TIMEOUT` (15s); `awaiting-data` expires after
+  `REQ_DATA_TIMEOUT` (120s). Every outcome frees the pump for the next
+  queued subject.
+- A unicast `ACK` is accepted unconditionally — there is one candidate, so
+  there is nothing to arbitrate. On the channel an `ACK` claiming
+  `seenAt` below our freshness floor (minus `FRESHNESS_SKEW`) is denied:
+  it cannot contain anything newer.
+- Data received for a pending subject completes the request from any
+  source; if it arrived from a non-winner, the winner is NOK'd
+  best-effort.
 - Misses get no reply — relay confirmation rides the `HELLO`/`HI` probes
   instead of paying a reply per non-holder.
 
 **Server rules**
-- A `REQ` is ACKed only when we can actually extract the profile: the
+- A `REQ` is answered only when we can actually extract the profile: the
   subject resolves to a unitID *and* the RP AddOn's register holds the
   profile (`adapter:canServe` reads the register live — including profiles
   received in earlier sessions; the register is persisted state, unlike
   our cache).
-- A servable REQ first asks the RP AddOn to **refresh our held copy from the
-  author** before ACKing (`adapter:refreshQuery` — for TRP3, its own vernum
-  and MSP queries, the same headless calls `/trp3 open` makes). The ACK
-  decision — suppression check, pending cap, the `seenAt` claim we advertise —
-  is deferred until updated profile data is saved (`REGISTER_DATA_UPDATED`) or
-  `REQ_FRESHEN_DELAY` (2s) elapses, so a copy verified fresh mid-wait claims
-  its new stamp and a stale copy stays stale. Deferred ACKs are bounded
-  (`REQ_FRESHEN_MAX`=16, overflow answers immediately) and are never
-  self-requests — we are the authority on ourselves. If the adapter cannot
-  or will not refresh, the REQ answers exactly as it would without the
-  feature. A subject we merely know of but hold no profile for is never
-  queried — `canServe` gates the whole branch.
+- A servable REQ asks the RP AddOn to **refresh our held copy from the
+  author** (`adapter:refreshQuery` — for TRP3, its own vernum and MSP
+  queries, the same headless calls `/trp3 open` makes). On the unicast
+  path the `ACK` goes out immediately (it only marks the requester's data
+  window); the serve itself waits for updated profile data
+  (`REGISTER_DATA_UPDATED`) or `REQ_FRESHEN_DELAY` (2s), so the payload
+  carries post-refresh content. On the channel path the whole `ACK`
+  decision defers the same way, since the claim it advertises must reflect
+  the refreshed copy. Deferred replies are bounded (`REQ_FRESHEN_MAX`=16,
+  overflow answers immediately) and are never self-requests — we are the
+  authority on ourselves. If the adapter cannot or will not refresh, the
+  REQ answers exactly as it would without the feature. A subject we merely
+  know of but hold no profile for is never queried — `canServe` gates the
+  whole branch.
+- Unicast REQs are throttled per sender (`REQ_SENDER_INTERVAL`=2s); the
+  channel path instead uses the serve breaker below, since a broadcast can
+  reach many holders at once.
 - Auto-generated default profiles are never served or stored. TRP3 marks
-  them with a trailing `*` on the profileID; holders ACK as if the subject
-  were a miss, and wire data carrying a `*` profileID is rejected on ingest.
-  The refresh query itself is not gated: a held default profile still
-  triggers one, so an author's newly-created real profile can be discovered
-  and served.
+  them with a trailing `*` on the profileID; holders answer as if the
+  subject were a miss, and wire data carrying a `*` profileID is rejected
+  on ingest. The refresh query itself is not gated: a held default profile
+  still triggers one, so an author's newly-created real profile can be
+  discovered and served.
 - Subject identity resolves by **consensus**: every claim we hold for the
   guid — our cache's guid→unitID map, the client player-info cache
   (`GetPlayerInfoByGUID`), the club roster, and the requester-asserted
@@ -314,24 +344,45 @@ requester                                candidate servers
   we are the authority on ourselves.
 - Misses stay silent — a reply per non-holder costs more than the
   requester's timeout.
-- An ACK records a *pending serve* (`SERVE_PENDING_CAP`=16, expires at
-  `SERVE_TIMEOUT`=30s). `OK` triggers extraction and a direct send;
-  `NOK` discards it.
-- Our serve rate is breaker-limited: once `SERVE_RATE_LIMIT` (10) serves
-  are *granted* inside `SERVE_RATE_WINDOW` (30s) we stop answering REQs
-  for `SERVE_RATE_MUTE` (60s). Only winning the ACK race counts — an
-  ungranted ACK never cost real work, and grants arriving while muted complete
-  their serve without extending it. This is a silent bow-out, not a
-  message — the requester's own timeout and subject-cooldown *are* the
-  backpressure signal, so no wire traffic is spent reporting saturation.
-  REQs for our own GUID bypass the breaker (we are the authoritative
-  server for ourselves).
+- On the channel path an `ACK` records a *pending serve*
+  (`SERVE_PENDING_CAP`=16, expires at `SERVE_TIMEOUT`=30s). `OK` triggers
+  extraction and a direct send; `NOK` discards it.
+- Channel serves are breaker-limited: once `SERVE_RATE_LIMIT` (10) serves
+  are *granted* inside `SERVE_RATE_WINDOW` (30s) we stop answering
+  broadcast REQs for `SERVE_RATE_MUTE` (60s). Only winning the ACK race
+  counts — an ungranted ACK never cost real work, and grants arriving
+  while muted complete their serve without extending it. This is a silent
+  bow-out, not a message — the requester's own timeout and
+  subject-cooldown *are* the backpressure signal, so no wire traffic is
+  spent reporting saturation. REQs for our own GUID bypass the breaker
+  (we are the authoritative server for ourselves).
 - Served data uses a normal data envelope. Its `originTime` is the holder's
   *claim* for that copy — the persisted record's as-of stamp, or the
   register's own last-seen stamp when it holds content the record does not
   cover — never plain `time()`. Stamping "now" would launder an old copy
   into looking freshly authored; a stale relay must stay stale on the
   wire. Self-serves claim `time()` (we are the author).
+
+### Traffic shape
+
+The serial pipeline exists to bound per-request traffic. Rough message
+counts per request, before profile data:
+
+| Scenario (one subject request)        | Old fanout                          | New pipeline                     |
+|---------------------------------------|-------------------------------------|----------------------------------|
+| REQ legs sent                         | 1 channel + 1 group + N BNet + up to 10 relay whispers | 1 whisper (or 1 channel chunk) |
+| ACKs generated                        | one per reachable holder            | 1 (contact) or per-holder on fallback |
+| OK/NOK arbitration                    | 1 OK + implicit loser timeouts      | none on unicast                  |
+| TRP3 refreshes triggered at the subject | up to one **per holder** (every ACKer queried) | at most 1 total |
+| Profile data legs                     | 1 (winner only)                     | 1                                |
+
+Worst cases: under fanout, a subject nobody held could still wake every
+listener plus 5 guild + 5 community whispers per request, and every holder
+that ACKed had already paid a TRP3 vernum exchange at the subject — the
+amplification the pipeline removes. Under the pipeline, a dead contact
+costs 4s of silence then a single channel chunk; a contact that ACKs but
+cannot deliver costs one bounded 120s window. Repeated cycles only repeat
+the single-contact pattern — the cursor wraps rather than fanning out.
 
 ### Freshness floor
 

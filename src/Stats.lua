@@ -1,19 +1,12 @@
 -- Stats.lua
 --
--- Session-only traffic statistics for debugging: message rates, byte sizes
--- (average AND median), profile reassembly time (first to last chunk), per-leg
--- transmit time, per-medium breakdowns, cache outcomes, error tallies, queue
--- health, and a ring buffer of the most recent messages for close inspection.
+-- Session-only traffic statistics: message rates, byte sizes, reassembly
+-- and per-leg transmit time, cache outcomes, error tallies, queue health,
+-- and a recent-messages ring buffer.
 --
--- Collection is gated on the "stats" debug category (or `all`): while
--- disabled, the recorder entry points (ns.statsIn / ns.statsOutLeg / ...) are
--- simply absent, so instrumentation call sites behind nil-guards cost one
--- table lookup and nothing runs. Debug.lua's ns.refreshDebugHooks re-applies
--- the installation via ns.applyStatsHooks whenever flags change.
---
--- Memory is bounded: sizes/durations live in fixed-cap reservoirs (only used
--- for medians and last-N queries), rates in a bucketed ring, and the recent
--- log in a ring buffer.
+-- Collection is gated on the "stats" debug category; while disabled the
+-- ns.stats* entry points are simply absent. Memory is bounded via fixed-cap
+-- reservoirs and ring buffers.
 
 local _, ns = ...
 local C = ns.Const
@@ -209,7 +202,7 @@ end
 
 -- Recorders --------------------------------------------------------------------
 -- Installed onto ns while the "stats" flag is on; absent otherwise. Each
--- upvalues the store and helpers directly — no flag checks, no extra lookups.
+-- upvalues the store and helpers directly, no flag checks, no extra lookups.
 
 local function recChunkIn(medium, bytes)
 	stats.inChunks = stats.inChunks + 1
@@ -414,7 +407,7 @@ end
 
 local function offHint()
 	if not ns.debugEnabled("stats") then
-		ns.Print("|cffff5555(stats collection is off — '/frp debug stats' to enable)|r")
+		ns.Print("|cffff5555(stats collection is off; '/frp debug stats' to enable)|r")
 	end
 end
 
@@ -589,9 +582,9 @@ local function printCensus()
 	end
 	local b = ns.broadcast
 	if b then
-		ns.Print(("  inject %d | relays %d | contacts %d | commUsage %d | pinned %d | reqs %d | serves %d"):format(
+		ns.Print(("  inject %d | relays %d | contacts %d | reqQ %d | pinned %d | reqs %d | serves %d"):format(
 			b:injectDepth(), mapSize(b.relays), mapSize(b.xfacContacts),
-			mapSize(b.commUsage), mapSize(b.forcedTargets),
+			mapSize(b.reqQueued), mapSize(b.forcedTargets),
 			mapSize(b.requests), mapSize(b.pendingServes)))
 	end
 	local sc = ns.scanner
@@ -613,8 +606,7 @@ ns.RegisterCommand("mem", function(arg)
 	local sub, rest = arg:match("^(%S*)%s*(.-)$")
 	sub = sub and sub:lower() or ""
 	if sub == "churn" then
-		-- Sample the (uncollected) counter each second after a forced GC: the
-		-- peak-to-baseline delta approximates the allocation backlog, i.e.
+		-- Sample the counter each second; peak-to-baseline approximates
 		-- churn between GC cycles.
 		local ticks = math.max(1, math.floor(tonumber(rest) or 10))
 		local baseline = memKB()

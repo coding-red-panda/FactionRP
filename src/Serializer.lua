@@ -1,18 +1,15 @@
 -- Serializer.lua
 --
--- Everything about turning messages into bytes safe for the wire, and back:
---   1. Profile codec   - table <-> compact, compressed, addon-channel-safe string
+-- Messages to wire-safe bytes and back:
+--   1. Profile codec   - table <-> compressed, channel-safe string
 --   2. Envelope codec  - the "||"-delimited message header + data
---   3. Chunking         - splitting a message across the 255-byte addon-message
---                         limit, and reassembling it on the far side.
+--   3. Chunking        - split across the 255-byte message limit, reassemble
 --
--- Pipeline for the profile data field (LibSerialize is designed to pair with
--- LibDeflate exactly this way):
+-- Profile data pipeline:
 --   table --Serialize--> string --CompressDeflate--> bytes --EncodeForWoWAddonChannel--> safe string
 --
--- The encoded string is guaranteed to contain no NULL byte (the only byte the
--- addon channel forbids); it MAY still contain "|" or ":", so all framing below
--- parses positionally with numeric-only header fields that cannot collide.
+-- The encoded string contains no NULL byte (the only byte the channel
+-- forbids); it may contain "|" or ":", so framing parses positionally.
 
 local _, ns = ...
 local C = ns.Const
@@ -20,8 +17,8 @@ local C = ns.Const
 local Serializer = {}
 ns.Serializer = Serializer
 
-local LibSerialize = LibStub and LibStub("LibSerialize")
-local LibDeflate = LibStub and LibStub("LibDeflate")
+local LibSerialize = LibStub("LibSerialize")
+local LibDeflate = LibStub("LibDeflate")
 
 -- Profile data codec --------------------------------------------------------
 
@@ -30,11 +27,7 @@ local LibDeflate = LibStub and LibStub("LibDeflate")
 -- @param data table
 -- @return string|nil
 function Serializer.encodeProfile(data)
-	if not LibSerialize or not LibDeflate then
-		return nil
-	end
-	-- pcall guards against unexpected unserializable values rather than letting
-	-- a single bad profile error out the calling path.
+	-- pcall keeps a single unserializable profile from erroring the caller.
 	local ok, serialized = pcall(function()
 		return LibSerialize:Serialize(data)
 	end)
@@ -49,9 +42,6 @@ end
 -- @param encoded string
 -- @return table|nil
 function Serializer.decodeProfile(encoded)
-	if not LibSerialize or not LibDeflate then
-		return nil
-	end
 	local compressed = LibDeflate:DecodeForWoWAddonChannel(encoded)
 	if not compressed then
 		return nil
@@ -72,11 +62,8 @@ end
 -- Wire layout (see doc/protocol.md):
 --   SENDER || SUBJECT || NAME-REALM || ADDON || ORIGIN-TIME || CONTENT-VERSION
 --        || PROTO-MAJOR || DATA
--- PROTO-MAJOR is stamped automatically and gates interop: receivers reject
--- any envelope advertising a lower protocol generation (see Broadcast), so
--- older-protocol clients — including modified ones on our prefix — cannot be
--- served or confirmed. DATA is always last so any "||" inside the encoded
--- payload is preserved.
+-- Receivers reject envelopes on a lower PROTO_MAJOR. DATA is always last so
+-- "||" inside the payload is preserved.
 
 local SEP_LEN = #C.SEPARATOR
 
@@ -86,11 +73,8 @@ local SEP_LEN = #C.SEPARATOR
 -- @return string
 function Serializer.buildMessage(msg)
 	local sep = C.SEPARATOR
-	-- The unitID field is optional on the wire: parseMessage yields "" for an
-	-- absent one and Broadcast:resolveSubject documents "" as "not asserted".
-	-- Our own unitID is legitimately unknown whenever getUnitID refuses to guess
-	-- a realm it cannot see (issue #26), so encode it as absent rather than
-	-- raising on the concatenation one frame deeper.
+	-- unitID is optional on the wire; "" means "not asserted". Our own unitID
+	-- can be unknown when getUnitID cannot see the realm (issue #26).
 	return msg.sender .. sep .. msg.subject .. sep .. (msg.unitID or "") .. sep
 		.. msg.addon .. sep .. tostring(msg.originTime) .. sep
 		.. msg.contentVersion .. sep .. C.PROTO_MAJOR .. sep .. msg.data
@@ -131,9 +115,8 @@ end
 
 -- Chunking ------------------------------------------------------------------
 --
--- Each chunk on the wire is: "MSGID:INDEX:TOTAL:PIECE". The three header fields
--- are integers (never contain ":"), so a positional split with maxFields=4
--- recovers PIECE intact even when it contains ":".
+-- Wire chunk: "MSGID:INDEX:TOTAL:PIECE". Header fields are integers, so a
+-- positional split recovers PIECE intact even when it contains ":".
 
 local chunkCounter = 0 -- per-session id, unique together with the sender
 
@@ -154,9 +137,8 @@ function Serializer.chunk(message)
 	return chunks
 end
 
--- ChunkReassembler: buffers incoming chunks per (sender, msgId) until complete.
--- Buffer and piece tables are pooled so steady-state reassembly allocates
--- nothing beyond the inbound substrings themselves.
+-- ChunkReassembler: buffers chunks per (sender, msgId) until complete.
+-- Buffers and piece tables are pooled so steady state allocates nothing.
 local ChunkReassembler = ns.Class("ChunkReassembler")
 Serializer.ChunkReassembler = ChunkReassembler
 
@@ -168,12 +150,9 @@ function ChunkReassembler:init()
 	self.pieceAcquire, self.pieceRelease = ns.Util.newPool(BUF_POOL_CAP)
 end
 
---- Feed one received chunk. Once the final missing chunk arrives, returns the
--- fully reassembled message string plus
---   chunks  = total chunks in the message,
---   elapsed = seconds first->last chunk,
---   dupes   = duplicate chunk arrivals observed;
--- otherwise returns nil.
+--- Feed one received chunk. On the final missing chunk, returns the full
+-- message plus chunk count, first->last elapsed seconds, and dupe count;
+-- otherwise nil.
 -- @param sender      string A stable identifier for the sender.
 -- @param chunkString string The raw chunk as received.
 -- @return string|nil, number|nil, number|nil, number|nil

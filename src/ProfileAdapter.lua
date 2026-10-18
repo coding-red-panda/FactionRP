@@ -1,18 +1,15 @@
 -- ProfileAdapter.lua
 --
--- The abstraction that decouples FactionRP from any specific RP AddOn. Each
--- supported RP AddOn (TRP3 first; MRP/XRP could follow) provides a concrete
--- subclass implementing this contract. The rest of FactionRP only ever talks
--- to the abstract interface and the adapter registry below.
+-- The abstraction decoupling FactionRP from a specific RP AddOn; each
+-- supported AddOn (TRP3 first) provides a subclass of this contract.
 --
--- The "profile" object an adapter produces and consumes has this shape:
+-- The "profile" object adapters produce and consume:
 --   {
 --     addon          = "TRP3",          -- which adapter owns it (ns.Const.SOURCE)
 --     contentVersion = "5:3:1",          -- opaque content identifier (equality only)
 --     data           = <opaque table>,   -- adapter-private payload (e.g. profileID + sections)
 --   }
--- `data` is deliberately opaque to the generic layers: only the owning adapter
--- knows how to read it, so the wire/cache stay AddOn-agnostic.
+-- `data` is opaque to the generic layers; only the owning adapter reads it.
 
 local _, ns = ...
 
@@ -47,16 +44,15 @@ function ProfileAdapter:getPlayerUnitID()
 end
 
 --- Extract a profile for a known unit from the RP AddOn's own data store.
--- Only meaningful for units the AddOn has authoritative data for (same faction
--- or the player). Returns nil when no data is (yet) available.
+-- Returns nil when no data is (yet) available.
 -- @param unitID string "Name-Realm".
 -- @return table|nil A profile object (see file header), or nil.
 function ProfileAdapter:extract(unitID) -- luacheck: ignore
 	error("ProfileAdapter:extract must be implemented by a subclass")
 end
 
---- Inject a received profile into the RP AddOn so it can display it (e.g. in
--- its tooltip). Idempotent and version-aware where the AddOn supports it.
+--- Inject a received profile into the RP AddOn for display. Idempotent and
+-- version-aware where the AddOn supports it.
 -- @param unitID  string  "Name-Realm".
 -- @param data    table   The adapter-private `data` payload from a profile object.
 -- @param classID number? Optional class id of the present unit, for display.
@@ -65,10 +61,9 @@ function ProfileAdapter:inject(unitID, data, classID) -- luacheck: ignore
 	error("ProfileAdapter:inject must be implemented by a subclass")
 end
 
---- Freshness metadata for the copy we currently hold of a unit, read from the
--- RP AddOn's register without copying profile data. Used to advertise what we
--- hold in REQ and to seed freshness floors. Returns nil for the local player,
--- unknown units, and units with no bound profile.
+--- Freshness metadata for our held copy of a unit, read without copying
+-- data. Used for REQ claims and freshness floors. Nil for self, unknown
+-- units, and units with no bound profile.
 -- @param unitID string "Name-Realm".
 -- @return table|nil { at = last-seen epoch, pid = profileID, cv = contentVersion }
 function ProfileAdapter:profileMeta(unitID) -- luacheck: ignore
@@ -98,38 +93,32 @@ function ProfileAdapter:dataIsDefault(data) -- luacheck: ignore
 	return false
 end
 
---- Ask the RP AddOn to refresh our held copy of a unit's profile from the
--- author (best-effort, asynchronous). Only called for units we can serve.
+--- Ask the RP AddOn to refresh our held copy from the author (best-effort,
+-- asynchronous). Only called for units we can serve.
 -- @param unitID string "Name-Realm".
 -- @return boolean Whether a refresh was actually requested.
 function ProfileAdapter:refreshQuery(unitID) -- luacheck: ignore
 	return false
 end
 
---- Subscribe to "this unit's profile changed/arrived" notifications from the
--- underlying AddOn, so the Scanner can react when async data lands. Optional;
--- the default is a no-op for AddOns without such a signal.
+--- Subscribe to "this unit's profile changed/arrived" notifications.
+-- Optional; default is a no-op.
 -- @param callback function Invoked as callback(unitID).
 function ProfileAdapter:registerUpdateListener(callback) -- luacheck: ignore
 	-- no-op by default
 end
 
---- Subscribe to "profile data for this unit arrived over the RP AddOn's own
--- network channels" notifications, so the Scanner can re-extract and publish
--- it into the local cache (servable to peers under the pull model). The
--- callback MUST NOT fire for data injected by FactionRP itself (that would
--- loop), only for genuine network receipts.
--- Optional; the default is a no-op for AddOns without such a signal.
+--- Subscribe to "profile data arrived over the RP AddOn's own channels"
+-- notifications so the Scanner can re-publish. MUST NOT fire for data
+-- FactionRP itself injected (that would loop). Optional; default no-op.
 -- @param callback function Invoked as callback(unitID).
 function ProfileAdapter:registerReceivedListener(callback) -- luacheck: ignore
 	-- no-op by default
 end
 
 -- Adapter registry ----------------------------------------------------------
---
--- Adapters register themselves at load. Consumers look one up by source name
--- (to inject data that arrived tagged with that source) or ask for the first
--- available adapter (to extract local data).
+-- Adapters register at load; consumers look up by source name or take the
+-- first available one.
 
 ns.adapters = {} -- [name] = adapter instance
 

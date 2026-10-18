@@ -3,6 +3,9 @@
 ## UNRELEASED
 
 ### Changed
+- Profile requests are now serial: one subject at a time, asked of a single
+  contact (BNet first, then guild, then community relays, round-robin).
+  A silent contact drops the request to the faction channel as last resort.
 - Now requests fresh TRP profiles from subjects being served, but only if server has already seen them before.
 - Default profiles are now ignored and not served.
 

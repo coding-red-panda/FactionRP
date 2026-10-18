@@ -1,26 +1,11 @@
 -- Scanner.lua
 --
--- Watches for player "selection" (mouseover / target). Same-faction and own
--- profiles are extracted and *published to the local cache* (Broadcast:publish
--- — no wire traffic) so we can serve them when a peer asks. Selecting an
--- opposite-faction unit is the pull trigger: requestProfile asks the mesh
--- for that subject.
+-- Watches player selection (mouseover/target). Same-faction selections are
+-- extracted and published to the local cache; an xfac selection is the pull
+-- trigger. Also re-publishes when the adapter reports received data.
 --
--- Because the RP AddOn fetches a freshly-seen same-faction profile
--- asynchronously, we also listen for the adapter's "profile updated" signal and
--- re-publish when the data actually lands.
---
--- GUARD: every profile we *inject* (Tooltip module) also lands in the adapter's
--- register and therefore fires the same "profile updated" signal. Under the
--- pull model a re-publish only reaches the cache — but without a break in the
--- loop, one served profile becomes: inject -> REGISTER_DATA_UPDATED ->
--- re-extract -> re-publish, burning extraction work per injection and forcing
--- TRP3 to rebuild scan pins/tooltip groups from data whose profile bindings
--- change underneath it (observed as duplicated map-scan results, issue #1).
--- We therefore only re-publish for units the user actually selected
--- (mouseover/target), and only when the profile's content version differs from
--- what we last published (self-triggered writes are identical, so they
--- collapse to a no-op instead of cycling).
+-- GUARD: injected profiles fire the same update signal (issue #1), so we
+-- only re-publish user-selected units whose content version changed.
 
 local _, ns = ...
 local C = ns.Const
@@ -103,22 +88,21 @@ function Scanner:onSelect(unit)
 	if not ns.Util.canWeUse(isPlayer, isSelf) or not isPlayer or isSelf then
 		return -- non-players and ourselves are handled elsewhere
 	end
-	-- Opposite-faction players have no authoritative local data: this is the
-	-- pull-exchange trigger: ask the mesh for their profile (deduped and
-	-- rate-limited inside requestProfile).
+	-- Opposite-faction selection is the pull trigger; requestProfile
+	-- dedupes and rate-limits.
 	if ns.Util.isOppositeFaction(unit) then
 		local adapter = ns.getAvailableAdapter()
 		local unitID = adapter and adapter:getUnitID(unit)
 		local guid = UnitGUID(unit)
 		if ns.Util.canWeUse(unitID, guid) and guid then
-			-- Shared-club subjects are whisper-reachable, and TRP3 already
+			-- Shared-club subjects are whisper-reachable and TRP3 already
 			-- sends its own vernum query on mouseover/target.
 			if adapter and adapter.name == C.SOURCE.TRP3
 				and (ns.Util.isCommunityClubMember(unitID)
 					or ns.Util.isGuildClubMember(unitID))
 			then
 				if ns.debugPeer then
-					ns.debugPeer("req " .. tostring(guid) .. " skipped (shared club — native pull)")
+					ns.debugPeer("req " .. tostring(guid) .. " skipped (shared club, native pull)")
 				end
 			else
 				ns.broadcast:requestProfile(guid, unitID)
@@ -140,10 +124,9 @@ function Scanner:onSelect(unit)
 end
 
 --- Handle an asynchronous profile update from an adapter.
--- NOTE: this fires for ALL register writes, including our own injections (see
--- header). Only re-publish for units the user actually selected this session,
--- and skip when the content version is unchanged since our last publish,
--- otherwise our own injection writes would churn the cache for nothing.
+-- Fires for ALL register writes including our own injections, so only
+-- re-publish user-selected units; an unchanged content version collapses
+-- the feedback to a no-op.
 function Scanner:onAdapterUpdate(adapter, unitID)
 	local guid
 	local playerUnitID = adapter:getPlayerUnitID()
@@ -160,11 +143,9 @@ function Scanner:onAdapterUpdate(adapter, unitID)
 	end
 end
 
---- Handle an adapter's "profile data received over the network" signal.
--- Receipts fire per section while data is still landing, so rather than
--- extracting immediately we queue the unit with a jittered ready time: this
--- collapses the burst into a single extraction+publish, and the jitter keeps
--- several simultaneous receipts from all landing on the same tick.
+--- Handle an adapter's "profile data received" signal. Receipts fire per
+-- section, so we queue a jittered ready time that collapses the burst into
+-- one extraction and keeps simultaneous receipts off the same tick.
 function Scanner:onAdapterReceived(adapter, unitID)
 	local playerUnitID = adapter:getPlayerUnitID()
 	if not ns.Util.canWeUse(unitID, playerUnitID)
@@ -191,14 +172,12 @@ function Scanner:onAdapterReceived(adapter, unitID)
 		ns.debugReceived(unitID)
 	end
 
-	-- A profile received for an opposite-faction member of one of our clubs
-	-- proves the subject is reachable by cross-faction whisper: record them
-	-- as a preferred community relay target.
+	-- A received xfac club profile proves whisper reachability; record it.
 	if ns.Util.isXfacClubMember(unitID) then
 		ns.broadcast:noteXfacContact(unitID)
 	end
 
-	-- Bound the queue; the oldest pending receipts are the least valuable.
+	-- Bound the queue; oldest pending receipts are least valuable.
 	while #self.receivedQueue > C.RECEIVED_ORIGIN_QUEUE do
 		local dropped = table.remove(self.receivedQueue, 1)
 		local p = self.receivedPending[dropped]
@@ -250,11 +229,8 @@ function Scanner:drainReceived()
 end
 
 --- Extract the profile and hand it to Broadcast:publish (which de-dups).
--- The cache is content-version-aware, so unchanged content collapses to
--- REFRESHED; that alone does not fully close the loop, though: repeated
--- REFRESHED results keep the cache entry alive forever (TTL extension) and
--- cost an extraction each tick, so we also stop publishing early when the
--- version matches what we last published.
+-- Repeated publishes would only extend the TTL at an extraction per tick,
+-- so we also stop early when the version matches our last publish.
 function Scanner:share(adapter, unitID, guid)
 	local profile = adapter:extract(unitID)
 	if not profile then
