@@ -278,6 +278,17 @@ local function stepRosterBuild(build)
 			return
 		end
 		if not build.members then
+			-- Members stream in lazily per club; defer when not ready.
+			local okReady, ready = pcall(C_Club.AreMembersReady, club.id)
+			if okReady and not ready then
+				rebuildRetryAt = GetTime() + C.ROSTER_RETRY
+				rosterBuild = nil
+				if ns.debugPeer then
+					ns.debugPeer("roster build deferred: members not ready (club "
+						.. tostring(club.id) .. ")")
+				end
+				return
+			end
 			local ok, members = pcall(C_Club.GetClubMembers, club.id)
 			if ok and not Util.canWeUse(members) then
 				rebuildRetryAt = GetTime() + C.ROSTER_RETRY
@@ -365,10 +376,12 @@ stepCurrentBuild = function()
 end
 
 local function startRosterBuild()
-	-- Member info streams in lazily; build only once clubs report loaded.
-	-- sawFaction in finishRosterBuild is the backstop for wrong reports.
-	if not C_Club.ClubsHaveBeenLoaded() then
-		return
+	-- GetSubscribedClubs returns nothing until clubs initialize; a nil or
+	-- unusable result skips the build and retries next memo window.
+	-- factionFromRace is the sole faction source; fail once per build
+	-- rather than per member inside the slicer.
+	if not C_CreatureInfo or not C_CreatureInfo.GetFactionInfo then
+		error("FactionRP: C_CreatureInfo.GetFactionInfo missing; xfac roster cannot build")
 	end
 	local ok, clubs = pcall(C_Club.GetSubscribedClubs)
 	if not ok or type(clubs) ~= "table" or not Util.canWeUse(clubs) then
