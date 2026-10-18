@@ -5,7 +5,7 @@
 ### Changed
 
 - NEW PROTOCOL VERSION!
-- **Stale copies can no longer regress a fresher profile in session.** Regressions may still happen early on in your gaming sessions for reasons of caching and simply needing to update things, but eventually you will synchronise with the most updated profile.
+- Stale copies should no longer regress a fresher profile in session. NOTE: This is still very sketch and may be unreliable, but it should at least not be any worse than it was. Hopefully :)
 - REQ and ACK calls now also include additional metadata to help inform when who should serve what.
 
 
