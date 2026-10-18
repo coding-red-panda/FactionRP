@@ -17,7 +17,7 @@ C.VERSION = "0.3.4"
 -- Wire-protocol generation. Stamped into every envelope and the comm-channel
 -- name; peers advertising a lower PROTO_MAJOR are rejected outright, so each
 -- incompatible protocol change gets a hard partition (bump this).
-C.PROTO_MAJOR = 4
+C.PROTO_MAJOR = 5
 
 -- Communication -------------------------------------------------------------
 
@@ -28,7 +28,9 @@ C.MSG_PREFIX = "FactionRP"
 -- Name of the hidden chat channel used to relay messages between same-faction
 -- clients (joined via JoinTemporaryChannel). Carries the protocol generation
 -- so older-protocol clients sit on a disjoint channel and never interop.
-C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp4comms"
+C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp5comms"
+-- Previous released generation's channel, briefly joined to announce VER
+-- there. Bump on each release.
 C.COMM_CHANNEL_PROTO3 = "frp3comms"
 
 -- Field separator used inside a logical message payload. `||` is chosen
@@ -132,6 +134,11 @@ C.FANOUT_INFLIGHT_MAX = 3 -- initiated sends (REQ fanouts, HELLO probes)
                          -- allowed outstanding in the send queue
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
+
+-- A server holding a servable profile asks the RP AddOn to refresh it before
+-- ACKing; the ACK defers until data lands or the delay elapses.
+C.REQ_FRESHEN_DELAY = 2 -- seconds a serve waits for a refresh
+C.REQ_FRESHEN_MAX = 16  -- bound on deferred ACKs
 
 -- Outbound serve breaker: once SERVE_RATE_LIMIT granted serves (ACKs we
 -- were OK'd on) land within SERVE_RATE_WINDOW seconds we stop answering

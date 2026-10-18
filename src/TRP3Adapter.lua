@@ -37,6 +37,7 @@ function TRP3Adapter:isAvailable()
 		and reg.saveCurrentProfileID ~= nil
 		and reg.addCharacter ~= nil
 		and reg.registerInfoTypes ~= nil
+		and api.profile.isDefaultProfile ~= nil
 end
 
 --- Use TRP3's own unit-id helper so our keys match its register exactly.
@@ -202,6 +203,60 @@ end
 --- The profileID inside a TRP3 `data` payload.
 function TRP3Adapter:dataProfileID(data)
 	return data and data.profileID
+end
+
+--- TRP3 marks auto-generated default profiles with a trailing "*" on the
+-- profileID so other players can identify them. isDefaultProfile wraps that.
+local function isDefaultPid(pid)
+	return pid ~= nil and TRP3_API.profile.isDefaultProfile(pid)
+end
+
+--- True when the unit's bound profile is TRP3's auto-generated default.
+function TRP3Adapter:isDefaultUnit(unitID)
+	if not unitID or not self:isAvailable() then
+		return false
+	end
+	local pid
+	if TRP3_API.globals and unitID == TRP3_API.globals.player_id then
+		pid = TRP3_API.profile.getPlayerCurrentProfileID()
+	elseif TRP3_API.register.isUnitIDKnown(unitID) then
+		pid = TRP3_API.register.getUnitIDProfileID(unitID)
+	end
+	return isDefaultPid(pid)
+end
+
+--- True when a `data` payload carries a default profileID.
+function TRP3Adapter:dataIsDefault(data)
+	return self:isAvailable() and isDefaultPid(data and data.profileID)
+end
+
+--- Ask TRP3 to refresh our held copy via the same headless vernum and MSP
+-- queries /trp3 open makes. Missing or failing API raises one error per
+-- session and disables the feature; callers then serve without a refresh.
+function TRP3Adapter:refreshQuery(unitID)
+	if self.refreshDead then
+		return false
+	end
+	if not self:isAvailable() then
+		return false -- TRP3 not loaded right now; not dead, retry later
+	end
+	local r = TRP3_API.r
+	if type(r) ~= "table"
+		or type(r.sendQuery) ~= "function"
+		or type(r.sendMSPQuery) ~= "function"
+	then
+		self.refreshDead = true
+		geterrorhandler()("FactionRP: TRP3_API.r.sendQuery/sendMSPQuery missing: refreshQuery disabled")
+		return false
+	end
+	local ok = xpcall(function()
+		r.sendQuery(unitID)
+		r.sendMSPQuery(unitID)
+	end, geterrorhandler())
+	if not ok then
+		self.refreshDead = true
+	end
+	return ok
 end
 
 --- Inject a received profile into TRP3's register so TRP3 renders it.

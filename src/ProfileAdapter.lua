@@ -83,6 +83,29 @@ function ProfileAdapter:dataProfileID(data) -- luacheck: ignore
 	return nil
 end
 
+--- True when the unit's bound profile is an auto-generated default rather
+-- than user-authored content. Such profiles are never served or stored.
+-- @param unitID string "Name-Realm".
+-- @return boolean
+function ProfileAdapter:isDefaultUnit(unitID) -- luacheck: ignore
+	return false
+end
+
+--- Same check for a `data` payload, used on the ingest path.
+-- @param data table The adapter-private `data` payload.
+-- @return boolean
+function ProfileAdapter:dataIsDefault(data) -- luacheck: ignore
+	return false
+end
+
+--- Ask the RP AddOn to refresh our held copy of a unit's profile from the
+-- author (best-effort, asynchronous). Only called for units we can serve.
+-- @param unitID string "Name-Realm".
+-- @return boolean Whether a refresh was actually requested.
+function ProfileAdapter:refreshQuery(unitID) -- luacheck: ignore
+	return false
+end
+
 --- Subscribe to "this unit's profile changed/arrived" notifications from the
 -- underlying AddOn, so the Scanner can react when async data lands. Optional;
 -- the default is a no-op for AddOns without such a signal.

@@ -62,7 +62,7 @@ sender || subject || unitID || addon || originTime || contentVersion || protoMaj
 | `addon`          | source RP AddOn id (`TRP3`) — `"FRP"` on control messages        |
 | `originTime`     | freshness claim: `time()` for self-serves; the holder's last-seen "as of" stamp otherwise |
 | `contentVersion` | opaque version string (`c#:k#:m#` section versions)              |
-| `protoMajor`     | wire-protocol generation (`C.PROTO_MAJOR`, currently 4)          |
+| `protoMajor`     | wire-protocol generation (`C.PROTO_MAJOR`, currently 5)          |
 | `data`           | payload; may itself contain `||` — it is always the last field   |
 
 A message is malformed unless all seven separators are present and
@@ -74,7 +74,7 @@ A message is malformed unless all seven separators are present and
 advertising a lower generation (`statsError("proto_old")`), *before* any
 peer-state side effect — a too-old or forged message cannot confirm a relay,
 serve a request, or enter the cache. The comm channel also carries the
-generation (`frp4comms`), so older-protocol clients sit on a disjoint channel
+generation (`frp5comms`), so older-protocol clients sit on a disjoint channel
 by construction. On load and on every (re)join we additionally *leave* the
 legacy `FactionRP` channel and any `frp<N>comms` channel of a different
 generation — channel membership survives `/reload` (until logout), so an
@@ -286,6 +286,24 @@ requester                                candidate servers
   profile (`adapter:canServe` reads the register live — including profiles
   received in earlier sessions; the register is persisted state, unlike
   our cache).
+- A servable REQ first asks the RP AddOn to **refresh our held copy from the
+  author** before ACKing (`adapter:refreshQuery` — for TRP3, its own vernum
+  and MSP queries, the same headless calls `/trp3 open` makes). The ACK
+  decision — suppression check, pending cap, the `seenAt` claim we advertise —
+  is deferred until updated profile data is saved (`REGISTER_DATA_UPDATED`) or
+  `REQ_FRESHEN_DELAY` (2s) elapses, so a copy verified fresh mid-wait claims
+  its new stamp and a stale copy stays stale. Deferred ACKs are bounded
+  (`REQ_FRESHEN_MAX`=16, overflow answers immediately) and are never
+  self-requests — we are the authority on ourselves. If the adapter cannot
+  or will not refresh, the REQ answers exactly as it would without the
+  feature. A subject we merely know of but hold no profile for is never
+  queried — `canServe` gates the whole branch.
+- Auto-generated default profiles are never served or stored. TRP3 marks
+  them with a trailing `*` on the profileID; holders ACK as if the subject
+  were a miss, and wire data carrying a `*` profileID is rejected on ingest.
+  The refresh query itself is not gated: a held default profile still
+  triggers one, so an author's newly-created real profile can be discovered
+  and served.
 - Subject identity resolves by **consensus**: every claim we hold for the
   guid — our cache's guid→unitID map, the client player-info cache
   (`GetPlayerInfoByGUID`), the club roster, and the requester-asserted

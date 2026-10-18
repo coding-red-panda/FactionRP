@@ -134,7 +134,7 @@ SENDER-PLAYER-GUID||SUBJECT-PLAYER-GUID||SUBJECT-NAME-REALM||SOURCE-ADDON||ORIGI
   and prevent stale and fresh copies from flapping between peers.
 * `PROTO-VERSION` is the wire-protocol generation (`C.PROTO_MAJOR`). Receivers reject
   any envelope advertising a lower generation *before* touching peer state, and the
-  comm channel carries the generation in its name (`frp4comms`) — older-protocol
+  comm channel carries the generation in its name (`frp5comms`) — older-protocol
   clients, including modified ones, can neither interop nor confirm themselves.
   A sender whose completed message fails this gate (or fails to parse at all) is
   additionally placed on a short blocklist (`REJECTED_SENDER_TTL`), so a hostile or
@@ -192,7 +192,7 @@ profile data moves once per exchange. A pull's *subject* is always
 opposite-faction, but its *servers* need not be — every faction-mate who
 previously pulled the same subject is a holder. A `REQ` therefore goes to:
 
-* **The hidden same-faction comm channel** — `frp4comms`, an ordinary custom
+* **The hidden same-faction comm channel** — `frp5comms`, an ordinary custom
   chat channel (like `/1`) joined via `JoinTemporaryChannel`. Custom
   channels are faction-scoped, so one chunk reaches *every* same-faction
   FactionRP listener — the biggest pool of candidate servers. Channel sends

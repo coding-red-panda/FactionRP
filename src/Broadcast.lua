@@ -72,12 +72,16 @@ function Broadcast:init()
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   pendingServes[key] = { subject, unitID, medium, target, at }
 	--     where key = "<peer>:<guid>" — grants we may serve.
+	--   freshenPending[key] = { subject, unitID, medium, target,
+	--                           reqAt, reqPid, reqCvh }
+	--     REQs whose ACK waits on an RP-AddOn refresh of the held copy.
 	-- Global fanout pacing: sightings arrive in bursts but the mesh hears at
 	-- most one request per REQ_ISSUE_INTERVAL. Deferred subjects wait in a
 	-- dedup'd FIFO and are re-validated when released.
 	self.requests = {}
 	self.recentReqs = {}
 	self.pendingServes = {}
+	self.freshenPending = {}
 	self.reqBacklog = {} -- [guid] = true (membership, for dedup)
 	self.reqBacklogOrder = { head = 1, tail = 0 } -- FIFO of { guid, unitID }
 	self.lastFanoutAt = 0 -- GetTime() of the last issued fanout
@@ -114,6 +118,13 @@ function Broadcast:start()
 	ns.comms:setMessageHandler(function(raw, context)
 		self:onMessage(raw, context)
 	end)
+	-- Register writes flush matching deferred ACKs early. The update signal
+	-- fires after the save; the receipt signal fires before it.
+	for _, adapter in pairs(ns.adapters) do
+		adapter:registerUpdateListener(function(unitID)
+			self:onFreshenReceived(unitID)
+		end)
+	end
 	C_Timer.NewTicker(C.INJECT_INTERVAL, function()
 		self:drainInject()
 		self:drainRequests()
@@ -918,12 +929,94 @@ function Broadcast:bumpServe(now)
 	end
 end
 
---- Address key shared by pendingServes entries and OK/NOK lookups. Peers are
--- identified by account/name only — NOT medium: a REQ may arrive over the
--- channel while its OK arrives by whisper, and both must resolve the same key.
-local function serveKey(context, guid)
-	local peer = context.gameAccountID or context.senderName or "?"
-	return peer .. ":" .. guid
+--- Address key for pendingServes/freshenPending and OK/NOK lookups. Medium
+-- is excluded: a REQ may arrive by channel while its OK arrives by whisper.
+local function serveKey(peer, guid)
+	return (peer or "?") .. ":" .. guid
+end
+
+--- Decide whether to ACK a REQ and send it, recording a pending serve. Shared
+-- by the immediate path and the deferred flush so the advertised claim is
+-- evaluated at decision time.
+-- @return boolean Whether an ACK was sent.
+function Broadcast:tryAck(subject, unitID, adapter, medium, target,
+						  reqAt, reqPid, reqCvh, selfReq)
+	local now = GetTime()
+	local peer = ns.debugPeer
+	local leg = ns.statsLeg
+	-- Auto-generated default profiles carry no user content; never offer.
+	if adapter.isDefaultUnit and adapter:isDefaultUnit(unitID) then
+		return false
+	end
+	-- Suppress our ACK when our copy is no newer than the requester's claim
+	-- and of the same lineage or content.
+	local offerAt = self:claimAt(subject, unitID, adapter.name)
+	if not selfReq and offerAt <= reqAt + C.FRESHNESS_SKEW then
+		local meta = adapter.profileMeta and adapter:profileMeta(unitID)
+		if meta and ((reqPid ~= "" and meta.pid == reqPid)
+			or (reqCvh ~= "" and meta.cv
+				and Util.hashStr(meta.cv) == reqCvh))
+		then
+			if peer then
+				peer("ack " .. subject .. " -> " .. tostring(target)
+					.. " skipped (stale copy)")
+			end
+			return false
+		end
+	end
+	-- Over the cap we do not ACK; the requester times out like a miss.
+	local pending = 0
+	for _ in pairs(self.pendingServes) do
+		pending = pending + 1
+	end
+	if pending >= C.SERVE_PENDING_CAP then
+		return false
+	end
+	if not self:sendToPeer(
+		self:buildCtl("ACK", subject .. " " .. offerAt), medium, target
+	) then
+		return false
+	end
+	self.pendingServes[serveKey(target, subject)] = {
+		subject = subject, unitID = unitID,
+		medium = medium, target = target, at = now,
+	}
+	if leg then
+		leg("ack", 1)
+	end
+	if peer then
+		peer("ack " .. subject .. " -> " .. tostring(target))
+	end
+	return true
+end
+
+--- Resolve a deferred REQ on timer expiry or landed data. Re-checks the
+-- breaker and the serve gate, both of which can change during the wait.
+function Broadcast:flushFreshen(key)
+	local entry = self.freshenPending[key]
+	if not entry then
+		return
+	end
+	self.freshenPending[key] = nil
+	if self:serveThrottled(GetTime()) then
+		return
+	end
+	local adapter = ns.getAvailableAdapter()
+	-- The profile could have been purged during the deferral.
+	if adapter and adapter.canServe and adapter:canServe(entry.unitID) then
+		self:tryAck(entry.subject, entry.unitID, adapter, entry.medium,
+			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false)
+	end
+end
+
+--- A unit's register profile was written (our freshen query, native exchange,
+-- MSP merge, profileID rebind): flush deferred ACKs waiting on that unit.
+function Broadcast:onFreshenReceived(unitID)
+	for key, entry in pairs(self.freshenPending) do
+		if entry.unitID == unitID then
+			self:flushFreshen(key)
+		end
+	end
 end
 
 --- Dispatch an inbound control message. Reachable on every medium; the
@@ -1011,50 +1104,36 @@ function Broadcast:onControl(msg, context)
 			return
 		end
 		if unitID and adapter and adapter.canServe and adapter:canServe(unitID) then
-			-- The requester advertises what it already holds (as-of stamp,
-			-- profileID, content-version hash). Suppress our ACK when our copy
-			-- is no newer than their claim and of the same lineage or content:
-			-- serving it would only cost both ends a wasted data leg.
-			local offerAt = self:claimAt(arg, unitID, adapter.name)
-			local reqAt = tonumber(arg3) or 0
-			if not selfReq and offerAt <= reqAt + C.FRESHNESS_SKEW then
-				local meta = adapter.profileMeta and adapter:profileMeta(unitID)
-				if meta and ((arg4 ~= "" and meta.pid == arg4)
-					or (arg5 ~= "" and meta.cv
-						and Util.hashStr(meta.cv) == arg5))
+			-- Refresh the held copy before answering; the ACK defers until
+			-- data lands or REQ_FRESHEN_DELAY elapses. A refused query ACKs
+			-- at once.
+			if not selfReq and adapter.refreshQuery then
+				local freshenN = 0
+				for _ in pairs(self.freshenPending) do
+					freshenN = freshenN + 1
+				end
+				if freshenN < C.REQ_FRESHEN_MAX
+					and adapter:refreshQuery(unitID)
 				then
+					local key = serveKey(target, arg)
+					self.freshenPending[key] = {
+						subject = arg, unitID = unitID,
+						medium = context.medium, target = target,
+						reqAt = tonumber(arg3) or 0,
+						reqPid = arg4, reqCvh = arg5,
+					}
+					C_Timer.After(C.REQ_FRESHEN_DELAY, function()
+						self:flushFreshen(key)
+					end)
 					if peer then
-						peer("ack " .. arg .. " -> " .. tostring(target)
-							.. " skipped (stale copy)")
+						peer("freshen " .. arg .. " (defer ack -> "
+							.. tostring(target) .. ")")
 					end
 					return
 				end
 			end
-			-- Bound granted-or-awaiting serves: over the cap we simply do not
-			-- ACK (same as a miss — the requester still times out cleanly).
-			local pending = 0
-			for _ in pairs(self.pendingServes) do
-				pending = pending + 1
-			end
-			if pending >= C.SERVE_PENDING_CAP then
-				return
-			end
-			if self:sendToPeer(
-				self:buildCtl("ACK", arg .. " " .. offerAt),
-				context.medium, target
-			) then
-				local key = serveKey(context, arg)
-				self.pendingServes[key] = {
-					subject = arg, unitID = unitID,
-					medium = context.medium, target = target, at = now,
-				}
-				if leg then
-					leg("ack", 1)
-				end
-				if peer then
-					peer("ack " .. arg .. " -> " .. tostring(target))
-				end
-			end
+			self:tryAck(arg, unitID, adapter, context.medium, target,
+				tonumber(arg3) or 0, arg4, arg5, selfReq)
 		end
 		-- Misses stay silent: a reply per non-holder costs more than the
 		-- requester's timeout. Discovery/confirmation rides the whisper
@@ -1089,7 +1168,7 @@ function Broadcast:onControl(msg, context)
 				.. (stale and " (denied: stale)" or " (denied)"))
 		end
 	elseif verb == "OK" then
-		local key = serveKey(context, arg)
+		local key = serveKey(target, arg)
 		local serve = self.pendingServes[key]
 		if serve then
 			self.pendingServes[key] = nil
@@ -1101,7 +1180,7 @@ function Broadcast:onControl(msg, context)
 			self:serveData(serve)
 		end
 	elseif verb == "NOK" then
-		self.pendingServes[serveKey(context, arg)] = nil
+		self.pendingServes[serveKey(target, arg)] = nil
 	elseif verb == "VER" then
 		-- Issue #19: a same-faction peer announcing its addon version on
 		-- login. When it is newer than ours, print a one-shot update notice,

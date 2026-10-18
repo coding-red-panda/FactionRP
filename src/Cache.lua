@@ -115,6 +115,15 @@ end
 -- @return string One of Cache.RESULT.*
 function Cache:tryStore(candidate)
 	local now = GetTime()
+
+	-- Auto-generated default profiles carry no user content; never store.
+	local adapter = candidate.addon and ns.getAdapter(candidate.addon)
+	if candidate.data and adapter and adapter.dataIsDefault
+		and adapter:dataIsDefault(candidate.data)
+	then
+		return Cache.RESULT.REJECTED
+	end
+
 	local existing = self.entries[candidate.guid]
 
 	-- Treat an expired existing entry as if it were absent.

@@ -1,5 +1,11 @@
 ﻿# FactionRP Changelog
 
+## UNRELEASED
+
+### Changed
+- Now requests fresh TRP profiles from subjects being served, but only if server has already seen them before.
+- Default profiles are now ignored and not served.
+
 ## 0.3.5
 
 ### Changed
