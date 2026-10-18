@@ -205,13 +205,12 @@ function Comms:sendDescriptor(desc)
 	end
 	local chomp = AddOn_Chomp
 	if desc.mode == "bnet" then
+		-- BNet sends share ChatThrottleLib's queue via Chomp when present.
 		if chomp and chomp.BNSendGameData then
 			chomp.BNSendGameData(desc.target, self.prefix, text, "LOW")
 			return
 		end
-		if BNSendGameData then
-			BNSendGameData(desc.target, self.prefix, text)
-		end
+		C_BattleNet.SendGameData(desc.target, self.prefix, text)
 		return
 	end
 	-- Chomp coalesces our sends into ChatThrottleLib's global queues. Raw

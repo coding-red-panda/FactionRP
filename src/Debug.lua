@@ -242,7 +242,7 @@ ns.RegisterCommand("relays", function()
 	local bnetConf = {}
 	for _, id in ipairs(lists.confirmed) do
 		local name
-		local ok, info = pcall(BNGetGameAccountInfo, id)
+		local ok, info = pcall(C_BattleNet.GetGameAccountInfoByID, id)
 		local char = ok and ns.Util.fieldsUsable(info, "characterName", "realmName")
 			and info.characterName
 		if char and char ~= "" then
