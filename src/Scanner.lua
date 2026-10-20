@@ -102,7 +102,8 @@ function Scanner:onSelect(unit)
 					or ns.Util.isGuildClubMember(unitID))
 			then
 				if ns.debugPeer then
-					ns.debugPeer("req " .. tostring(guid) .. " skipped (shared club, native pull)")
+					ns.debugPeer("req " .. (unitID or tostring(guid))
+					.. " skipped (shared club, native pull)")
 				end
 			else
 				ns.broadcast:requestProfile(guid, unitID)

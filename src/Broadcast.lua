@@ -42,9 +42,8 @@ function Broadcast:init()
 	self.forcedTargets = {}
 
 	-- Pull-exchange state (session-only). At most one subject is in flight.
-	--   requests[guid]  = { state = "contact"|"channel"|"awaiting-data",
-	--                       at, unitID, medium, target,
-	--                       winner = { medium, target }|nil }
+	--   requests[guid]  = { state = "contact"|"awaiting-data",
+	--                       at, unitID, medium, target }
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   reqQueued[guid] + reqQueueOrder: deduped FIFO of waiting subjects
 	--   contactIdx: round-robin contact cursor
@@ -327,6 +326,21 @@ local function reqArg(guid, unitID)
 	return string.format("%s %s %d %s %s", guid, wire, floor, pid, cvh)
 end
 
+--- Whether the register's held copy is fresh enough to serve without a
+-- refresh query: seen within SERVE_REFRESH_TTL, or clearly newer than the
+-- requester's claim. `at` values are time() stamps.
+local function serveFreshEnough(adapter, unitID, reqAt)
+	local meta = adapter.profileMeta and adapter:profileMeta(unitID)
+	local at = meta and meta.at
+	if not at then
+		return false
+	end
+	if time() - at < C.SERVE_REFRESH_TTL then
+		return true
+	end
+	return reqAt and reqAt > 0 and at > reqAt + C.FRESHNESS_SKEW
+end
+
 -- Pull exchange --------------------------------------------------------------
 
 --- BNet and whisper probe rotations plus exchange expiry, one ticker.
@@ -335,60 +349,27 @@ function Broadcast:tick()
 	local comms = ns.comms
 	local restricted = Util.commsRestricted()
 
-	-- Request expiry still runs while restricted, but contact timeouts
-	-- drop outright: a response window lost to restriction cannot be
-	-- recovered by a channel fallback.
+	-- Silence is rejection: an unanswered contact REQ drops outright and
+	-- the queue advances.
 	local pump = false
 	for guid, req in pairs(self.requests) do
 		if req.state == "contact"
 			and (now - req.at) > C.REQ_CONTACT_TIMEOUT
 		then
-			if restricted then
-				self.requests[guid] = nil
-				self.recentReqs[guid] = now
-				pump = true
-				if ns.debugPeer then
-					ns.debugPeer("req " .. guid .. " dropped (restricted)")
-				end
-			else
-				local idx = comms:channelIndex()
-				local sent = idx and comms:sendChunksAddon(
-					self:buildCtl("REQ", reqArg(guid, req.unitID)),
-					"CHANNEL", idx)
-				if sent then
-					req.state = "channel"
-					req.at = now
-					req.medium, req.target = nil, nil
-					self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
-					if ns.statsLeg then
-						ns.statsLeg("channel", 1)
-					end
-					if ns.debugPeer then
-						ns.debugPeer("req " .. guid .. " -> channel (contact silent)")
-					end
-				else
-					self.requests[guid] = nil
-					self.recentReqs[guid] = now
-					pump = true
-				end
-			end
-		elseif req.state == "channel"
-			and (now - req.at) > C.REQ_ACK_TIMEOUT
-		then
 			self.requests[guid] = nil
 			self.recentReqs[guid] = now
 			pump = true
 			if ns.debugPeer then
-				ns.debugPeer("req " .. guid .. " expired (channel)")
+				ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+					.. " dropped (contact silent)")
 			end
 		elseif req.state == "awaiting-data"
 			and (now - req.at) > C.REQ_DATA_TIMEOUT
 		then
 			-- The serve stalled or died; drop the sender's partial chunks
 			-- so a resumed send cannot complete a ghost message.
-			local src = req.winner or req
-			if src.medium and src.target then
-				local key = comms:senderKeyFor(src.medium, src.target)
+			if req.medium and req.target then
+				local key = comms:senderKeyFor(req.medium, req.target)
 				if comms.assembler:drop(key) > 0 and ns.debugPeer then
 					ns.debugPeer("dropped partial data from " .. tostring(key))
 				end
@@ -397,7 +378,8 @@ function Broadcast:tick()
 			self.recentReqs[guid] = now
 			pump = true
 			if ns.debugPeer then
-				ns.debugPeer("req " .. guid .. " expired (awaiting-data)")
+				ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+					.. " expired (awaiting-data)")
 			end
 		end
 	end
@@ -593,29 +575,16 @@ function Broadcast:reqContact(guid, now)
 	return list[self.contactIdx]
 end
 
---- Issue one request: a unicast REQ to the next contact, or a channel
--- broadcast when none is reachable. Pinned targets get a copy either way.
+--- Issue one request as a unicast REQ to the next contact.
 function Broadcast:issueRequest(guid, unitID, now)
 	-- Stamp the cooldown up front so a failed send cannot retry-storm.
 	self.recentReqs[guid] = now
 	local chunks = self:buildCtl("REQ", reqArg(guid, unitID))
 	local comms = ns.comms
 	local contact = self:reqContact(guid, now)
-	local state
-	if contact then
-		if self:sendToPeer(chunks, contact.medium, contact.target) then
-			state = "contact"
-		end
-	else
-		local idx = comms:channelIndex()
-		if idx and comms:sendChunksAddon(chunks, "CHANNEL", idx) then
-			state = "channel"
-			if ns.statsLeg then
-				ns.statsLeg("channel", 1)
-			end
-		end
-	end
-	if not state then
+	if not contact
+		or not self:sendToPeer(chunks, contact.medium, contact.target)
+	then
 		return -- nobody reachable
 	end
 	self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
@@ -625,22 +594,18 @@ function Broadcast:issueRequest(guid, unitID, now)
 		end
 	end
 	self.requests[guid] = {
-		state = state, at = now, unitID = unitID,
-		medium = contact and contact.medium,
-		target = contact and contact.target,
+		state = "contact", at = now, unitID = unitID,
+		medium = contact.medium, target = contact.target,
 	}
 	if ns.statsLeg then
 		ns.statsLeg("req", 1)
 	end
 	if ns.debugFanout then
-		ns.debugFanout(contact
-			and (contact.medium .. " " .. tostring(contact.target))
-			or "channel")
+		ns.debugFanout(contact.medium .. " " .. tostring(contact.target))
 	end
 	if ns.debugPeer then
-		ns.debugPeer("req " .. guid .. " -> "
-			.. (contact and (contact.medium .. " " .. tostring(contact.target))
-				or "channel"))
+		ns.debugPeer("req " .. (unitID or Util.nameForGuid(guid)) .. " -> "
+			.. contact.medium .. " " .. tostring(contact.target))
 	end
 end
 
@@ -699,7 +664,8 @@ function Broadcast:serveData(serve)
 		ns.statsLeg("serve", 1)
 	end
 	if ns.debugPeer then
-		ns.debugPeer("serve " .. serve.subject .. " -> " .. serve.target)
+		ns.debugPeer("serve " .. (serve.unitID or Util.nameForGuid(serve.subject))
+			.. " -> " .. serve.target)
 	end
 end
 
@@ -730,13 +696,15 @@ function Broadcast:resolveSubject(guid, wireUnitID)
 	claim(wireUnitID ~= "" and wireUnitID or nil)
 	if conflict then
 		if ns.debugPeer then
-			ns.debugPeer("req " .. guid .. " dropped (identity conflict)")
+			ns.debugPeer("req " .. Util.nameForGuid(guid)
+				.. " dropped (identity conflict)")
 		end
 		return nil
 	end
 	if unitID and not hadLocal then
 		if ns.debugPeer then
-			ns.debugPeer("req " .. guid .. " resolved via wire unitID " .. unitID)
+			ns.debugPeer("req " .. Util.nameForGuid(guid)
+				.. " resolved via wire unitID " .. unitID)
 		end
 	end
 	return unitID
@@ -811,7 +779,7 @@ function Broadcast:tryAck(subject, unitID, adapter, medium, target,
 		subject, unitID, adapter, reqAt, reqPid, reqCvh, selfReq)
 	if suppressed then
 		if peer then
-			peer("ack " .. subject .. " -> " .. tostring(target)
+			peer("ack " .. Util.nameForGuid(subject) .. " -> " .. tostring(target)
 				.. " skipped (stale copy)")
 		end
 		return false
@@ -862,7 +830,7 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 		ns.statsLeg("ack", 1)
 	end
 	if ns.debugPeer then
-		ns.debugPeer("ack " .. subject .. " -> " .. tostring(target))
+		ns.debugPeer("ack " .. Util.nameForGuid(subject) .. " -> " .. tostring(target))
 	end
 	local freshenN = 0
 	for _ in pairs(self.freshenPending) do
@@ -871,6 +839,7 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 	if not selfReq
 		and adapter.refreshQuery
 		and freshenN < C.REQ_FRESHEN_MAX
+		and not serveFreshEnough(adapter, unitID, reqAt)
 		and adapter:refreshQuery(unitID)
 	then
 		local key = serveKey(target, subject)
@@ -882,8 +851,8 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 			self:flushFreshen(key)
 		end)
 		if ns.debugPeer then
-			ns.debugPeer("freshen " .. subject .. " (defer serve -> "
-				.. tostring(target) .. ")")
+			ns.debugPeer("freshen " .. Util.nameForGuid(subject)
+				.. " (defer serve -> " .. tostring(target) .. ")")
 		end
 	else
 		self:serveData({
@@ -1025,6 +994,7 @@ function Broadcast:onControl(msg, context)
 					freshenN = freshenN + 1
 				end
 				if freshenN < C.REQ_FRESHEN_MAX
+					and not serveFreshEnough(adapter, unitID, reqAt)
 					and adapter:refreshQuery(unitID)
 				then
 					local key = serveKey(target, arg)
@@ -1061,8 +1031,7 @@ function Broadcast:onControl(msg, context)
 		end
 		-- Misses stay silent.
 	elseif verb == "ACK" then
-		-- Unicast: the contact answered, open the data window. Channel:
-		-- holders race, and a claim at or below our floor is denied.
+		-- The contact answered; open the data window.
 		local req = self.requests[arg]
 		if req and req.state == "contact"
 			and req.target == target
@@ -1075,33 +1044,9 @@ function Broadcast:onControl(msg, context)
 				leg("ok", 1)
 			end
 			if peer then
-				peer("ack " .. arg .. " <- " .. tostring(target))
+				peer("ack " .. (req.unitID or Util.nameForGuid(arg))
+					.. " <- " .. tostring(target))
 			end
-			return
-		end
-		local ackAt = tonumber(arg2) or 0
-		local stale = req ~= nil
-			and ackAt + C.FRESHNESS_SKEW
-				< ns.cache:freshnessFloor(arg, req.unitID)
-		local won = req
-			and not stale
-			and req.state == "channel"
-			and target
-			and self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
-		if won then
-			req.winner = { medium = context.medium, target = target }
-			req.state = "awaiting-data"
-			req.at = now
-			if leg then
-				leg("ok", 1)
-			end
-			if peer then
-				peer("ack " .. arg .. " <- " .. tostring(target) .. " (granted)")
-			end
-		elseif peer and req then
-			-- Denied ACKs get no reply.
-			peer("ack " .. arg .. " <- " .. tostring(target)
-				.. (stale and " (denied: stale)" or " (denied)"))
 		end
 	elseif verb == "OK" then
 		local key = serveKey(target, arg)
@@ -1230,23 +1175,15 @@ function Broadcast:onMessage(raw, context)
 		ns.statsOriginAge(time() - msg.originTime)
 	end
 
-	-- Data for a pending subject completes the exchange. Channel arbitration
-	-- only: if it came from a non-winner, NOK the winner so it stops.
+	-- Data for a pending subject completes the exchange.
 	local req = self.requests[msg.subject]
 	if req then
 		local src = context.gameAccountID or context.senderName
-		if req.winner
-			and (req.winner.medium ~= context.medium or req.winner.target ~= src)
-		then
-			self:sendToPeer(
-				self:buildCtl("NOK", msg.subject),
-				req.winner.medium, req.winner.target
-			)
-		end
 		self.requests[msg.subject] = nil
 		self.recentReqs[msg.subject] = GetTime()
 		if ns.debugPeer then
-			ns.debugPeer("data " .. msg.subject .. " <- " .. tostring(src))
+			ns.debugPeer("data " .. Util.nameForGuid(msg.subject)
+				.. " <- " .. tostring(src))
 		end
 		self:pumpRequests()
 	end

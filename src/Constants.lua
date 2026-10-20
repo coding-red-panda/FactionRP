@@ -88,11 +88,10 @@ C.REJECTED_SENDER_TTL = 300
 
 -- Pull exchange. Requests are serial: one subject at a time, REQ'd to a
 -- single contact (round-robin over confirmed BNet peers, then guild and
--- community relays). A silent contact drops the subject to the faction
--- channel, where REQ -> ACK -> OK -> data arbitration still applies.
-C.REQ_CONTACT_TIMEOUT = 4  -- silent contact drops to the faction channel
-C.REQ_ACK_TIMEOUT = 15     -- channel request expires without an ACK
+-- community relays). A silent contact drops the subject outright.
+C.REQ_CONTACT_TIMEOUT = 4  -- silent contact drops the request
 C.REQ_DATA_TIMEOUT = 120   -- accepted request expires without data
+C.SERVE_REFRESH_TTL = 3600 -- held copies this fresh serve without a refresh query
 C.REQ_COOLDOWN = 60        -- min gap between requests for the same subject
 C.REQ_BACKLOG_CAP = 8      -- queued subjects awaiting their turn
 C.REQ_SENDER_INTERVAL = 2  -- min gap between inbound unicast REQs per sender

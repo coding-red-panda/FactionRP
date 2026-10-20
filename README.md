@@ -89,10 +89,10 @@ serves at most one request per cycle, then the cursor wraps.
    query, then sends the normal data envelope directly to the requester.
    The requester waits up to `REQ_DATA_TIMEOUT` (120s) for it; other
    subjects queue meanwhile.
-4. **Channel fallback** — no reply within `REQ_CONTACT_TIMEOUT` (4s), or
-   no contacts at all: the `REQ` is rebroadcast once on the same-faction
-   comm channel (`frp5comms`). There many holders can answer, so the old
-   arbitration applies: the first non-stale `ACK` gets an `OK` and serves.
+4. **No channel fallback** — no reply within `REQ_CONTACT_TIMEOUT` (4s), or
+   no contacts at all: the request is dropped. A channel answer could only
+   ever be a faction-mate's cached copy; fresh data lives at the end of a
+   contact chain. Broadcast `REQ`s from older builds are still answered.
 
 A pull is also skipped entirely for subjects sharing one of our clubs
 (community or guild): TRP3 already sends its own vernum query on
@@ -213,10 +213,9 @@ previously pulled the same subject is a holder. A `REQ` therefore goes to:
 Every leg is a single hop: the requester sends each `REQ` itself, and a
 server's `ACK` and profile reply travel directly back to the requester.
 "Relay" means a reachable cross-faction *endpoint* — no client forwards
-messages for anyone else. That also means a requester with **no**
-cross-faction clubs or friends still gets served: the channel fallback
-always fires, and answering faction-mates whisper back, which needs no
-shared membership.
+messages for anyone else. A requester with **no** reachable contact gets
+nothing: the faction channel is never asked, since its answers are caches
+by construction.
 
 Requests also share an in-flight budget with `HELLO` probes
 (`FANOUT_INFLIGHT_MAX` sends still queued on the wire), so nothing new
@@ -363,8 +362,8 @@ The categories:
 * `receive` — a message is received, including sender GUID
 * `cache` — a profile is stored or refreshed in the cache
 * `queue` — a received RP-AddOn profile is queued for re-publication, or skipped
-* `fanout` — the REQ contact pick (medium + target, or channel fallback;
-  see also `/frp relays`)
+* `fanout` — the REQ contact pick (medium + target; see also
+  `/frp relays`)
 * `chunks` — every wire chunk sent or received (very noisy)
 * `targets` — allows pinned whisper targets (`/frp debug target`) to send
 * `peers` — Battle.net handshake and pull-exchange events (probes,

@@ -507,6 +507,20 @@ function Util.unitForGuidFromClient(guid)
 	return fullUnitName((realm and realm ~= "") and (name .. "-" .. realm) or name)
 end
 
+--- Debug display for a GUID: best known "Name-Realm" or a short tail.
+-- @param guid string
+-- @return string Never nil; falls back to the guid's last 6 chars.
+function Util.nameForGuid(guid)
+	if not guid then
+		return "?"
+	end
+	local entry = ns.cache and ns.cache:get(guid)
+	return (entry and entry.unitID)
+		or Util.unitForGuid(guid)
+		or Util.unitForGuidFromClient(guid)
+		or (".." .. guid:sub(-6))
+end
+
 local function guidFromUnits(unitID)
 	for _, token in ipairs(GUID_UNIT_TOKENS) do
 		-- Unit APIs may yield secret values during lockdown; skip those.
