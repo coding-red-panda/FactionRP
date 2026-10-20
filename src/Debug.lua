@@ -238,21 +238,29 @@ ns.RegisterCommand("relays", function()
 			math.floor(GetTime() - (r.at or 0))))
 	end
 	local lists = ns.comms and ns.comms:bnetPeerLists() or { confirmed = {}, probing = {}, ignored = {} }
-	-- Resolve confirmed BNet accounts to character names where the API allows.
-	local bnetConf = {}
-	for _, id in ipairs(lists.confirmed) do
-		local name
+	-- Resolve BNet account ids to character names where the API allows.
+	local function bnetName(id)
 		local ok, info = pcall(C_BattleNet.GetGameAccountInfoByID, id)
 		local char = ok and ns.Util.fieldsUsable(info, "characterName", "realmName")
 			and info.characterName
 		if char and char ~= "" then
 			local realm = info.realmName
-			name = (realm and realm ~= "") and (char .. "-" .. realm) or char
+			return (realm and realm ~= "") and (char .. "-" .. realm) or char
 		end
-		bnetConf[#bnetConf + 1] = name or tostring(id)
+		return tostring(id)
 	end
-	ns.Print(("bnet peers | confirmed: %s | probing: %s | ignored: %d"):format(
-		joined(bnetConf), joined(lists.probing), #lists.ignored))
+	local bnetConf, bnetProb, bnetIgn = {}, {}, {}
+	for _, id in ipairs(lists.confirmed) do
+		bnetConf[#bnetConf + 1] = bnetName(id)
+	end
+	for _, id in ipairs(lists.probing) do
+		bnetProb[#bnetProb + 1] = bnetName(id)
+	end
+	for _, id in ipairs(lists.ignored) do
+		bnetIgn[#bnetIgn + 1] = bnetName(id)
+	end
+	ns.Print(("bnet peers | confirmed: %s | probing: %s | ignored: %s"):format(
+		joined(bnetConf), joined(bnetProb), joined(bnetIgn)))
 	local mute = ""
 	if b.serveMuteUntil and GetTime() < b.serveMuteUntil then
 		mute = (" | serve muted %ds"):format(math.ceil(b.serveMuteUntil - GetTime()))

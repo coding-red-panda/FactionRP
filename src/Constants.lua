@@ -76,10 +76,10 @@ C.BNET_MEMO = 15
 -- BNET_PROBE_MAX unanswered probes ignore the account for BNET_IGNORE_TTL;
 -- confirmations expire BNET_CONFIRM_TTL after the peer's last proof.
 C.BNET_CONFIRM_TTL = 600
-C.BNET_PROBE_INTERVAL = 10  -- probe ticker cadence (>=1 probe per tick)
-C.BNET_PROBE_COOLDOWN = 45  -- per-account gap between probes
-C.BNET_PROBE_MAX = 3        -- unanswered probes before ignoring
-C.BNET_IGNORE_TTL = 1800    -- ignore-list decay
+C.BNET_PROBE_INTERVAL = 5   -- probe ticker cadence (>=1 probe per tick)
+C.BNET_PROBE_COOLDOWN = 15  -- per-account gap between probes
+C.BNET_PROBE_MAX = 8        -- unanswered probes before ignoring
+C.BNET_IGNORE_TTL = 600     -- ignore-list decay
 C.BNET_HI_COOLDOWN = 30     -- min gap between HI replies to the same account
 
 -- Seconds a sender failing the protocol/malformed gates is blocked at
