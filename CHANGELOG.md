@@ -1,8 +1,10 @@
 ﻿# FactionRP Changelog
 
-## UNRELEASED
+## 0.4.1
 
 ### Changed
+- New protocol (again).
+- FRP now uses TRP's own functions to pull updated profiles. (and yes it's throttled)
 - Profile requests are now serial: one subject at a time, asked of a single
   contact (BNet first, then guild, then community relays, round-robin).
   A silent contact drops the request to the faction channel as last resort.
