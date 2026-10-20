@@ -297,6 +297,32 @@ function Broadcast:broadcastVersion()
 	end
 end
 
+--- REQ argument: subject guid plus our unitID and held freshness
+-- (as-of stamp, profileID, content-version hash) so stale holders can
+-- suppress themselves.
+local function reqArg(guid, unitID)
+	local wire = unitID and Util.fullUnitName(unitID)
+	if not wire then
+		return guid
+	end
+	local floor = ns.cache:freshnessFloor(guid, unitID)
+	local pid, cvh = "-", "-"
+	local adapter = ns.getAvailableAdapter()
+	local meta = adapter and adapter.profileMeta
+		and adapter:profileMeta(unitID)
+	if meta then
+		pid = meta.pid or "-"
+		cvh = meta.cv and Util.hashStr(meta.cv) or "-"
+	else
+		local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+		if rec then
+			pid = rec.pid or "-"
+			cvh = rec.cv and Util.hashStr(rec.cv) or "-"
+		end
+	end
+	return string.format("%s %s %d %s %s", guid, wire, floor, pid, cvh)
+end
+
 -- Pull exchange --------------------------------------------------------------
 
 --- BNet and whisper probe rotations plus exchange expiry, one ticker.
@@ -518,32 +544,6 @@ function Broadcast:pumpRequests()
 	if o.head > o.tail then
 		o.head, o.tail = 1, 0
 	end
-end
-
---- REQ argument: subject guid plus our unitID and held freshness
--- (as-of stamp, profileID, content-version hash) so stale holders can
--- suppress themselves.
-local function reqArg(guid, unitID)
-	local wire = unitID and Util.fullUnitName(unitID)
-	if not wire then
-		return guid
-	end
-	local floor = ns.cache:freshnessFloor(guid, unitID)
-	local pid, cvh = "-", "-"
-	local adapter = ns.getAvailableAdapter()
-	local meta = adapter and adapter.profileMeta
-		and adapter:profileMeta(unitID)
-	if meta then
-		pid = meta.pid or "-"
-		cvh = meta.cv and Util.hashStr(meta.cv) or "-"
-	else
-		local rec = ns.db and ns.db.seen and ns.db.seen[guid]
-		if rec then
-			pid = rec.pid or "-"
-			cvh = rec.cv and Util.hashStr(rec.cv) or "-"
-		end
-	end
-	return string.format("%s %s %d %s %s", guid, wire, floor, pid, cvh)
 end
 
 --- Pick the contact for a unicast REQ. A BNet-reachable subject wins
