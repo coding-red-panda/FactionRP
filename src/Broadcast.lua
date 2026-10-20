@@ -244,6 +244,10 @@ end
 -- while the channel join pends; gives up after C.VER_BROADCAST_ATTEMPTS.
 function Broadcast:broadcastVersion()
 	local version = ownVersion()
+	-- Dev or prerelease suffixed versions stay quiet.
+	if version:find("[^%d%.]") then
+		return
+	end
 	local comms = ns.comms
 
 	-- Old-generation peers sit on a disjoint channel; join the previous
