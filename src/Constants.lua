@@ -56,7 +56,10 @@ C.SEND_QUEUE_CAP = 384
 --      pull-exchange request: "who has this profile?" unitID lets a server
 --      answer straight from the register; seenAt/profileID/cvHash advertise
 --      what the requester already holds so stale holders skip their ACK.
---   ACK <subjectGuid> <seenAt>   "I can serve it, as of <seenAt>"
+--   ACK <subjectGuid> <seenAt> [dirSeenAt]
+--      "I can serve it, as of <seenAt>"; dirSeenAt is the server's TRP3
+--      directory last-seen stamp (profile.time), a second freshness signal
+--      for requesters collecting multiple offers.
 --   OK  <subjectGuid>   grant: "you may send it"
 --   NOK <subjectGuid>   cancel: winner mid-send, data landed elsewhere
 -- Control messages are never cached, injected, or relayed.
@@ -88,9 +91,13 @@ C.REJECTED_SENDER_TTL = 300
 
 -- Pull exchange. Requests are serial: one subject at a time, REQ'd to a
 -- single contact (round-robin over confirmed BNet peers, then guild and
--- community relays). A silent contact drops the subject outright.
+-- community relays). A silent contact drops the subject outright unless it
+-- is a total stranger (no shared club/guild, no group, no BNet friend):
+-- strangers fall back to a single channel REQ, collecting whispered ACKs
+-- for REQ_CHANNEL_WINDOW and granting the freshest offer.
 C.REQ_CONTACT_TIMEOUT = 4  -- silent contact drops the request
 C.REQ_DATA_TIMEOUT = 120   -- accepted request expires without data
+C.REQ_DATA_STALL = 25      -- granted serve dies if no chunk lands this long
 C.SERVE_REFRESH_TTL = 3600 -- held copies this fresh serve without a refresh query
 C.REQ_COOLDOWN = 60        -- min gap between requests for the same subject
 C.REQ_BACKLOG_CAP = 8      -- queued subjects awaiting their turn
@@ -99,17 +106,40 @@ C.FANOUT_INFLIGHT_MAX = 3 -- initiated sends (HELLO probes) allowed queued
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
 
+-- Channel fallback. One broadcast REQ per request, only for stranger
+-- subjects. REQs park in "chan-wait" while REQ_CHANNEL_INTERVAL has not
+-- elapsed since our last broadcast, giving up after REQ_CHANNEL_WAIT_MAX.
+-- Inbound channel REQs are throttled per requester at
+-- REQ_CHANNEL_SENDER_INTERVAL; we self-rate at the same pace, so only
+-- old-version or abusive clients trip it.
+C.REQ_CHANNEL_WINDOW = 3          -- collect ACKs this long, then grant best
+C.REQ_CHANNEL_INTERVAL = 10       -- min gap between our channel REQs
+C.REQ_CHANNEL_WAIT_MAX = 30       -- chan-wait gives up after this
+C.REQ_CHANNEL_SENDER_INTERVAL = 10 -- per-requester inbound channel REQ throttle
+C.REQ_CHANNEL_ACK_CAP = 8         -- offers recorded per broadcast
+
+-- Held-copy suppression: after we accept a profile, local requests for the
+-- subject are suppressed for REQ_HELD_TTL while the RP AddOn's register
+-- still holds it (db.seen[guid].holdUntil). A register purge releases the
+-- suppression early.
+C.REQ_HELD_TTL = 1800
+
 -- A servable server refreshes its held copy before ACKing; the reply
 -- defers until data lands or the delay elapses.
 C.REQ_FRESHEN_DELAY = 2 -- seconds a serve waits for a refresh
 C.REQ_FRESHEN_MAX = 16  -- bound on deferred replies
 
--- Channel serve breaker: past SERVE_RATE_LIMIT granted serves inside
--- SERVE_RATE_WINDOW we stop answering broadcast REQs for SERVE_RATE_MUTE.
--- REQs for our own GUID bypass it; we are authoritative for ourselves.
-C.SERVE_RATE_WINDOW = 30
-C.SERVE_RATE_LIMIT = 10
-C.SERVE_RATE_MUTE = 60
+-- Channel serve cooldown: while a granted serve's chunks sit in the send
+-- queue we ACK no broadcast REQs at all, and once a mesh serve's last
+-- chunk leaves the queue we stay muted for a window scaled by mesh size —
+-- SERVE_CHANNEL_COOLDOWN_MIN on a thin mesh, growing linearly to the MAX
+-- at SERVE_MESH_DENSE channel members (CHANNEL_COUNT_UPDATE count). The
+-- mesh spreads each profile, so on a dense mesh back-to-back serves are
+-- redundant load; on a thin one availability beats dedup. REQs for our
+-- own GUID bypass it; we are authoritative for ourselves.
+C.SERVE_CHANNEL_COOLDOWN_MIN = 10
+C.SERVE_CHANNEL_COOLDOWN_MAX = 60
+C.SERVE_MESH_DENSE = 10
 
 -- Freshness floor ------------------------------------------------------------
 --

@@ -31,6 +31,11 @@ function Comms:init()
 	-- [senderKey] = GetTime() expiry; chunks from senders whose messages
 	-- failed the version/malformed gates are dropped before reassembly.
 	self.rejectedSenders = {}
+	-- [senderKey] = GetTime() of the last accepted chunk; Broadcast uses it
+	-- to stall-detect granted serves.
+	self.lastChunkFrom = {}
+	-- Member count of the comms channel, pushed by CHANNEL_COUNT_UPDATE.
+	self.meshCount = 0
 	self.restricted = false -- edge flag: partials pruned once per restriction
 	-- Scratch transport contexts, mutated per inbound event. Valid only
 	-- for the duration of the synchronous handler call; do not retain.
@@ -63,6 +68,14 @@ function Comms:start()
 	end)
 	self:joinChannel()
 
+	-- The server pushes member counts for every joined channel; ours is
+	-- the mesh size Broadcast scales the serve cooldown on.
+	ns.RegisterEvent("CHANNEL_COUNT_UPDATE", function(_, displayIndex, count)
+		if displayIndex == self:channelIndex() then
+			self.meshCount = count or 0
+		end
+	end)
+
 	-- Every presence event refreshes the account memo, but only an account
 	-- coming online re-opens probing; INFO_CHANGED/FRIENDLIST_UPDATE fire
 	-- on zone churn and would resurrect ignored accounts before their TTL.
@@ -93,6 +106,12 @@ function Comms:start()
 		local dropped = self.assembler:prune(C.REASSEMBLY_TIMEOUT)
 		if dropped > 0 and ns.statsPruned then
 			ns.statsPruned(dropped)
+		end
+		local cutoff = GetTime() - C.REASSEMBLY_TIMEOUT
+		for key, at in pairs(self.lastChunkFrom) do
+			if at < cutoff then
+				self.lastChunkFrom[key] = nil
+			end
 		end
 	end)
 end
@@ -148,6 +167,15 @@ function Comms:channelIndex()
 		return nil
 	end
 	return id
+end
+
+--- Live member count of the comms channel: 0 while not joined, and until
+-- the first CHANNEL_COUNT_UPDATE arrives after a join.
+function Comms:meshCount()
+	if not self:channelIndex() then
+		return 0
+	end
+	return self.meshCount
 end
 
 -- Register an event so we can update our channel on reorder over the pipe.
@@ -627,6 +655,9 @@ function Comms:handleIncoming(chunkString, context)
 			return -- old-protocol/garbage stream: never reassembled
 		end
 		self.rejectedSenders[senderKey] = nil -- block decayed
+	end
+	if senderKey then
+		self.lastChunkFrom[senderKey] = GetTime()
 	end
 	if ns.debugChunk then
 		ns.debugChunk("in", context.medium, senderKey, #chunkString)

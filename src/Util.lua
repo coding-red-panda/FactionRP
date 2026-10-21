@@ -485,6 +485,28 @@ function Util.isCommunityClubMember(unitID)
 	return key ~= nil and clubRoster().communityByName[key] == true
 end
 
+--- Whether `guid` belongs to a member of our current group. Party and raid
+-- unit tokens cover home and instance groups alike; cross-faction groupmates
+-- have their own native profile exchange, so the mesh never pulls for them.
+function Util.isGroupGuid(guid)
+	if not Util.canWeUse(guid) or not guid then
+		return false
+	end
+	for i = 1, MAX_PARTY_MEMBERS or 4 do
+		local ok, g = pcall(UnitGUID, "party" .. i)
+		if ok and Util.canWeUse(g) and g == guid then
+			return true
+		end
+	end
+	for i = 1, MAX_RAID_MEMBERS or 40 do
+		local ok, g = pcall(UnitGUID, "raid" .. i)
+		if ok and Util.canWeUse(g) and g == guid then
+			return true
+		end
+	end
+	return false
+end
+
 --- Reverse lookup: display "Name-Realm" of a club member by GUID.
 function Util.unitForGuid(guid)
 	return guid and clubRoster().nameByGuid[guid] or nil

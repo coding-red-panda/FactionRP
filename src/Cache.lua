@@ -88,6 +88,9 @@ function Cache:noteSeen(candidate)
 	end
 	rec.cv = candidate.contentVersion or rec.cv
 	rec.addon = candidate.addon or rec.addon
+	-- Every accepted sighting re-arms local request suppression while the
+	-- register still holds the profile (Broadcast:heldSuppressed).
+	rec.holdUntil = time() + C.REQ_HELD_TTL
 	local adapter = candidate.addon and ns.getAdapter(candidate.addon)
 	local pid = adapter and candidate.data and adapter:dataProfileID(candidate.data)
 	if pid then

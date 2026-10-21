@@ -42,8 +42,17 @@ function Broadcast:init()
 	self.forcedTargets = {}
 
 	-- Pull-exchange state (session-only). At most one subject is in flight.
-	--   requests[guid]  = { state = "contact"|"awaiting-data",
-	--                       at, unitID, medium, target }
+	--   requests[guid]  = { state, at, unitID,
+	--     medium, target  -- unicast contact leg
+	--     winner          -- granted server { medium, target }
+	--     channeled       -- the one channel attempt was spent
+	--     deadTarget      -- winner whose serve failed (excluded on rebroadcast)
+	--     acks, waitAt    -- collected offers / chan-wait start
+	--   }
+	--   states: "contact" (unicast REQ awaiting ACK),
+	--     "chan-wait" (channel REQ parked on REQ_CHANNEL_INTERVAL),
+	--     "broadcast" (channel REQ collecting whispered ACKs),
+	--     "awaiting-data" (grant issued, data expected)
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   reqQueued[guid] + reqQueueOrder: deduped FIFO of waiting subjects
 	--   contactIdx: round-robin contact cursor
@@ -54,6 +63,7 @@ function Broadcast:init()
 	--     mode "ack": channel REQ whose ACK waits on an RP-AddOn refresh
 	--     mode "serve": unicast REQ whose data leg waits on the refresh
 	--   reqSenderAt[senderKey] = last inbound unicast REQ time (throttle)
+	--   chanReqSenderAt[senderName] = last inbound channel REQ time
 	self.requests = {}
 	self.recentReqs = {}
 	self.pendingServes = {}
@@ -62,15 +72,18 @@ function Broadcast:init()
 	self.reqQueueOrder = { head = 1, tail = 0 }
 	self.contactIdx = 0
 	self.reqSenderAt = {}
+	self.chanReqSenderAt = {}
+	self.lastChannelReqAt = 0 -- last broadcast REQ we sent (self-rate)
 	self.fanoutInFlight = {} -- queue tail positions of issued probes
 	self.relayProbeAt = 0 -- last whisper probe burst
 	self.probeCursor = 0 -- rotating index into the flattened probe rosters
 
-	-- Channel serve breaker: mute broadcast REQs after SERVE_RATE_LIMIT
-	-- granted serves inside SERVE_RATE_WINDOW.
-	self.serveWindowAt = 0
-	self.serveCount = 0
+	-- Channel serve cooldown: while serveDrainPos tracks queued serve
+	-- chunks we ACK no broadcast REQs; once a mesh serve's last chunk
+	-- leaves the queue, broadcast REQs stay muted for a mesh-scaled window.
 	self.serveMuteUntil = 0
+	self.serveDrainPos = nil -- queue tail of the draining serve's last chunk
+	self.serveDrainMesh = false -- a draining serve came from a mesh grant
 
 	-- Version announcement: newest peer version heard this session, and the
 	-- version we last printed an update notice for.
@@ -349,37 +362,73 @@ function Broadcast:tick()
 	local comms = ns.comms
 	local restricted = Util.commsRestricted()
 
-	-- Silence is rejection: an unanswered contact REQ drops outright and
-	-- the queue advances.
+	-- Request lifecycle: silence is rejection at every stage. Contact and
+	-- data failures fall back to the same-faction channel once per request
+	-- for stranger subjects; everything else drops to the subject cooldown.
 	local pump = false
+	local function dropReq(guid, req, why)
+		self.requests[guid] = nil
+		self.recentReqs[guid] = now
+		pump = true
+		-- Dead pull with a held register copy: publish it so the subject
+		-- still renders (honest stale stamp; the mesh beats it when it can).
+		self:publishHeld(guid, req.unitID)
+		if ns.debugPeer then
+			ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+				.. " " .. why)
+		end
+	end
 	for guid, req in pairs(self.requests) do
 		if req.state == "contact"
 			and (now - req.at) > C.REQ_CONTACT_TIMEOUT
 		then
-			self.requests[guid] = nil
-			self.recentReqs[guid] = now
-			pump = true
-			if ns.debugPeer then
-				ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
-					.. " dropped (contact silent)")
+			if not self:tryChannelFallback(guid, req, now) then
+				dropReq(guid, req, "dropped (contact silent)")
 			end
-		elseif req.state == "awaiting-data"
-			and (now - req.at) > C.REQ_DATA_TIMEOUT
+		elseif req.state == "chan-wait" then
+			if (now - req.waitAt) > C.REQ_CHANNEL_WAIT_MAX then
+				dropReq(guid, req, "dropped (channel wait)")
+			elseif not restricted then
+				-- Restricted: replies would be dropped inbound anyway;
+				-- stay parked.
+				self:pumpChannelReq(guid, req, now)
+			end
+		elseif req.state == "broadcast"
+			and (now - req.at) > C.REQ_CHANNEL_WINDOW
 		then
-			-- The serve stalled or died; drop the sender's partial chunks
-			-- so a resumed send cannot complete a ghost message.
-			if req.medium and req.target then
-				local key = comms:senderKeyFor(req.medium, req.target)
-				if comms.assembler:drop(key) > 0 and ns.debugPeer then
-					ns.debugPeer("dropped partial data from " .. tostring(key))
-				end
+			-- Window closed: grant the freshest offer, else a silent miss.
+			if not self:grantBestOffer(guid, req, now) then
+				dropReq(guid, req, "dropped (channel silent)")
 			end
-			self.requests[guid] = nil
-			self.recentReqs[guid] = now
-			pump = true
-			if ns.debugPeer then
-				ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
-					.. " expired (awaiting-data)")
+		elseif req.state == "awaiting-data" then
+			local srcMedium = (req.winner and req.winner.medium) or req.medium
+			local srcTarget = (req.winner and req.winner.target) or req.target
+			local srcKey = srcMedium and srcTarget
+				and comms:senderKeyFor(srcMedium, srcTarget)
+			-- Stall detection: no chunk from the server since the grant
+			-- (or since its last chunk) for REQ_DATA_STALL. Chunks predating
+			-- the grant do not count toward liveness.
+			local lastChunk = srcKey and comms.lastChunkFrom[srcKey]
+			local activity = (lastChunk and lastChunk > req.at)
+				and lastChunk or req.at
+			local stalled = (now - activity) > C.REQ_DATA_STALL
+			if stalled or (now - req.at) > C.REQ_DATA_TIMEOUT then
+				-- The serve stalled or died; drop the sender's partial
+				-- chunks so a resumed send cannot complete a ghost message.
+				if srcKey
+					and comms.assembler:drop(srcKey) > 0
+					and ns.debugPeer
+				then
+					ns.debugPeer("dropped partial data from " .. tostring(srcKey))
+				end
+				if req.winner then
+					req.deadTarget = req.winner.target
+				end
+				if not self:tryChannelFallback(guid, req, now) then
+					dropReq(guid, req, stalled
+						and "dropped (serve stalled)"
+						or "expired (awaiting-data)")
+				end
 			end
 		end
 	end
@@ -441,10 +490,19 @@ function Broadcast:tick()
 		end
 	end
 
+	-- Arm the post-serve cooldown as soon as a serve's last chunk drains,
+	-- even if no REQ arrives to trip the lazy check in serveThrottled.
+	self:serveDraining(now)
+
 	-- Prune the unicast REQ throttle; entries only matter within the window.
 	for sender, at in pairs(self.reqSenderAt) do
 		if (now - at) > C.REQ_SENDER_INTERVAL then
 			self.reqSenderAt[sender] = nil
+		end
+	end
+	for sender, at in pairs(self.chanReqSenderAt) do
+		if (now - at) > C.REQ_CHANNEL_SENDER_INTERVAL then
+			self.chanReqSenderAt[sender] = nil
 		end
 	end
 
@@ -457,6 +515,7 @@ function Broadcast:requestProfile(guid, unitID)
 		return
 	end
 	if ns.cache:fresh(guid)
+		or self:heldSuppressed(guid)
 		or self.requests[guid]
 		or self.reqQueued[guid]
 	then
@@ -521,6 +580,7 @@ function Broadcast:pumpRequests()
 		self.reqQueued[entry.guid] = nil
 		local last = self.recentReqs[entry.guid]
 		if not ns.cache:fresh(entry.guid)
+			and not self:heldSuppressed(entry.guid)
 			and not (last and (now - last) < C.REQ_COOLDOWN)
 		then
 			self:issueRequest(entry.guid, entry.unitID, now)
@@ -585,7 +645,16 @@ function Broadcast:issueRequest(guid, unitID, now)
 	if not contact
 		or not self:sendToPeer(chunks, contact.medium, contact.target)
 	then
-		return -- nobody reachable
+		-- Nobody reachable: stranger subjects still get the channel leg.
+		local req = {
+			state = "chan-wait", at = now, waitAt = now, unitID = unitID,
+		}
+		self.requests[guid] = req
+		if not self:tryChannelFallback(guid, req, now) then
+			self.requests[guid] = nil
+			self:publishHeld(guid, unitID) -- held copy still beats nothing
+		end
+		return
 	end
 	self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
 	if ns.debugEnabled("targets") then
@@ -607,6 +676,143 @@ function Broadcast:issueRequest(guid, unitID, now)
 		ns.debugPeer("req " .. (unitID or Util.nameForGuid(guid)) .. " -> "
 			.. contact.medium .. " " .. tostring(contact.target))
 	end
+end
+
+--- Whether `guid` may be asked over the same-faction channel. Stranger
+-- subjects only: a shared club, group membership, or BNet friendship
+-- already provides a direct or native pull path, so broadcasting would
+-- duplicate work the rest of the system already does.
+function Broadcast:channelEligible(guid, unitID)
+	if not unitID then
+		return false -- cannot prove non-membership without a name
+	end
+	if Util.isGuildClubMember(unitID) or Util.isCommunityClubMember(unitID) then
+		return false
+	end
+	local info = C_BattleNet.GetGameAccountInfoByGUID(guid)
+	if info and info.gameAccountID then
+		return false -- BNet friend: the unicast leg covers them
+	end
+	if Util.isGroupGuid(guid) then
+		return false -- group members exchange natively
+	end
+	return true
+end
+
+--- Local request suppression while the register still holds a copy we
+-- accepted recently. noteSeen re-arms holdUntil on every accepted store;
+-- a register purge (profileMeta nil) releases the suppression early.
+function Broadcast:heldSuppressed(guid)
+	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+	if not rec or not rec.holdUntil or not rec.unitID
+		or time() >= rec.holdUntil
+	then
+		return false
+	end
+	local adapter = (rec.addon and ns.getAdapter(rec.addon))
+		or ns.getAvailableAdapter()
+	local meta = adapter and adapter.profileMeta
+		and adapter:profileMeta(rec.unitID)
+	return meta ~= nil
+end
+
+--- Publish our own held register copy, when servable. Zero wire cost: the
+-- honest (possibly stale) originTime stamps it as a floor, fresher mesh
+-- data still wins on landing, and it gives the requester content even
+-- when the mesh misses entirely.
+function Broadcast:publishHeld(guid, unitID)
+	local adapter = ns.getAvailableAdapter()
+	if not (unitID and adapter and adapter.canServe
+		and adapter:canServe(unitID))
+	then
+		return
+	end
+	if adapter.isDefaultUnit and adapter:isDefaultUnit(unitID) then
+		return -- default stub: not content
+	end
+	local profile = adapter:extract(unitID)
+	if profile then
+		self:publish(guid, unitID, profile)
+	end
+end
+
+--- Send the REQ on the faction channel when the self-rate gate is open;
+-- promotes `req` from chan-wait to broadcast. A missing channel index
+-- (join still pending) or queue-full leg just stays parked.
+function Broadcast:pumpChannelReq(guid, req, now)
+	if (now - self.lastChannelReqAt) < C.REQ_CHANNEL_INTERVAL then
+		return
+	end
+	local comms = ns.comms
+	local idx = comms:channelIndex()
+	if not idx
+		or not comms:sendChunksAddon(
+			self:buildCtl("REQ", reqArg(guid, req.unitID)), "CHANNEL", idx)
+	then
+		return
+	end
+	self.lastChannelReqAt = now
+	req.state = "broadcast"
+	req.at = now
+	req.acks = {}
+	self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
+	if ns.statsLeg then
+		ns.statsLeg("req_chan", 1)
+	end
+	if ns.debugPeer then
+		ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+			.. " -> channel")
+	end
+end
+
+--- Move a failed request onto the channel leg, once per request and for
+-- eligible stranger subjects only. Our own held copy publishes first —
+-- free content while the offers collect.
+-- @return boolean Whether the request lives on (false = drop it).
+function Broadcast:tryChannelFallback(guid, req, now)
+	if req.channeled or not self:channelEligible(guid, req.unitID) then
+		return false
+	end
+	req.channeled = true
+	self:publishHeld(guid, req.unitID)
+	req.state = "chan-wait"
+	req.waitAt = now
+	self:pumpChannelReq(guid, req, now)
+	return true
+end
+
+--- Collect window closed: grant the freshest offer by
+-- max(content claim, directory last-seen), ties to the earliest arrival.
+-- Denied offerers are never told; their pendingServes expire on their own.
+-- @return boolean Whether a grant went out.
+function Broadcast:grantBestOffer(guid, req, now)
+	local best
+	for _, offer in ipairs(req.acks) do
+		offer.score = math.max(offer.offerAt, offer.dirAt)
+		if not best or offer.score > best.score then
+			best = offer
+		end
+	end
+	if not best then
+		return false
+	end
+	if not self:sendToPeer(
+		self:buildCtl("OK", guid), best.medium, best.target)
+	then
+		return false
+	end
+	req.winner = { medium = best.medium, target = best.target }
+	req.state = "awaiting-data"
+	req.at = now
+	req.acks = nil
+	if ns.statsLeg then
+		ns.statsLeg("ok", 1)
+	end
+	if ns.debugPeer then
+		ns.debugPeer("ack " .. (req.unitID or Util.nameForGuid(guid))
+			.. " <- " .. tostring(best.target) .. " (granted, best offer)")
+	end
+	return true
 end
 
 --- The freshness claim we can honestly make for a subject: our persisted
@@ -656,7 +862,18 @@ function Broadcast:serveData(serve)
 		data = encoded,
 	})
 	local chunks = Serializer.chunk(message)
-	self:sendToPeer(chunks, serve.medium, serve.target)
+	if not self:sendToPeer(chunks, serve.medium, serve.target) then
+		return -- leg dropped for capacity: nothing queued, nothing to mute
+	end
+	-- Track the drain: a serve's chunks enqueue contiguously, so the tail
+	-- position is in flight until the head passes it. Mesh (channel-path)
+	-- serves arm the post-serve cooldown on drain; self-serves are exempt.
+	self.serveDrainPos = ns.comms.queue.tail
+	if serve.medium ~= "WHISPER" and serve.medium ~= "BNET"
+		and serve.subject ~= self:senderGUID()
+	then
+		self.serveDrainMesh = true
+	end
 	if ns.statsOutMessage then
 		ns.statsOutMessage(#message, #chunks, serve.subject, "serve")
 	end
@@ -710,33 +927,58 @@ function Broadcast:resolveSubject(guid, wireUnitID)
 	return unitID
 end
 
---- True while the channel serve breaker is engaged.
-function Broadcast:serveThrottled(now)
-	if now < self.serveMuteUntil then
-		return true
+--- Post-serve broadcast mute, scaled to mesh size: a thin mesh gets
+-- SERVE_CHANNEL_COOLDOWN_MIN (availability beats dedup when we may be the
+-- only holder), a dense one ramps linearly to the MAX at
+-- SERVE_MESH_DENSE members. Unknown size counts as thin.
+function Broadcast:serveCooldown()
+	local n = ns.comms and ns.comms:meshCount() or 0
+	if n >= C.SERVE_MESH_DENSE then
+		return C.SERVE_CHANNEL_COOLDOWN_MAX
 	end
-	if (now - self.serveWindowAt) >= C.SERVE_RATE_WINDOW then
-		self.serveWindowAt = now
-		self.serveCount = 0
+	local t = (n - 1) / (C.SERVE_MESH_DENSE - 1)
+	if t < 0 then
+		t = 0
+	end
+	return C.SERVE_CHANNEL_COOLDOWN_MIN
+		+ (C.SERVE_CHANNEL_COOLDOWN_MAX - C.SERVE_CHANNEL_COOLDOWN_MIN) * t
+end
+
+--- Whether tracked serve chunks are still queued. When the last chunk
+-- leaves the send queue the marker clears; a drained *mesh* serve then
+-- arms the post-serve cooldown. Runs lazily wherever the mute is checked,
+-- so the cooldown engages even if no REQ ever arrives.
+function Broadcast:serveDraining(now)
+	local drain = self.serveDrainPos
+	if not drain then
+		return false
+	end
+	-- In flight while the marker sits inside the live queue window. The
+	-- queue resets head/tail on full drain, so a marker past the current
+	-- tail is stale rather than pending.
+	local q = ns.comms.queue
+	if drain >= q.head and drain <= q.tail then
+		return true -- chunks still in flight
+	end
+	self.serveDrainPos = nil
+	if self.serveDrainMesh then
+		self.serveDrainMesh = false
+		local cd = self:serveCooldown()
+		self.serveMuteUntil = now + cd
+		if ns.statsLeg then
+			ns.statsLeg("serve_mute", 1)
+		end
+		if ns.debugPeer then
+			ns.debugPeer(("mesh serve drained: broadcast REQs muted %ds (mesh %d)")
+				:format(math.floor(cd), ns.comms:meshCount()))
+		end
 	end
 	return false
 end
 
---- Count a granted channel serve. On hitting the window limit, mute for
--- SERVE_RATE_MUTE; muted grants still complete but do not count.
-function Broadcast:bumpServe(now)
-	if now < self.serveMuteUntil then
-		return
-	end
-	self.serveCount = self.serveCount + 1
-	if self.serveCount >= C.SERVE_RATE_LIMIT then
-		self.serveMuteUntil = now + C.SERVE_RATE_MUTE
-		self.serveWindowAt = now
-		if ns.statsError then
-			ns.statsError("serve_throttled")
-		end
-		ns.debugPeer("serve throttled: " .. C.SERVE_RATE_LIMIT .. " serves/" .. C.SERVE_RATE_WINDOW .. "s reached")
-	end
+--- True while a serve's chunks drain or the post-serve cooldown holds.
+function Broadcast:serveThrottled(now)
+	return self:serveDraining(now) or now < self.serveMuteUntil
 end
 
 --- Address key for pendingServes/freshenPending and OK/NOK lookups.
@@ -792,8 +1034,13 @@ function Broadcast:tryAck(subject, unitID, adapter, medium, target,
 	if pending >= C.SERVE_PENDING_CAP then
 		return false
 	end
+	-- arg3 advertises our TRP3 directory last-seen stamp: requesters
+	-- collecting channel offers weigh it against the content claim.
+	local meta = adapter.profileMeta and adapter:profileMeta(unitID)
+	local dirAt = (meta and meta.at) or 0
 	if not self:sendToPeer(
-		self:buildCtl("ACK", subject .. " " .. offerAt), medium, target
+		self:buildCtl("ACK", subject .. " " .. offerAt .. " " .. dirAt),
+		medium, target
 	) then
 		return false
 	end
@@ -821,8 +1068,11 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 	if suppressed then
 		return
 	end
+	local meta = adapter.profileMeta and adapter:profileMeta(unitID)
+	local dirAt = (meta and meta.at) or 0
 	if not self:sendToPeer(
-		self:buildCtl("ACK", subject .. " " .. offerAt), medium, target
+		self:buildCtl("ACK", subject .. " " .. offerAt .. " " .. dirAt),
+		medium, target
 	) then
 		return
 	end
@@ -864,7 +1114,7 @@ end
 
 --- Resolve a deferred REQ on timer expiry or landed data. Re-checks the
 -- serve gate, which can change during the wait; channel entries also
--- re-check the breaker.
+-- re-check the cooldown.
 function Broadcast:flushFreshen(key)
 	local entry = self.freshenPending[key]
 	if not entry then
@@ -963,6 +1213,16 @@ function Broadcast:onControl(msg, context)
 			end
 		end
 	elseif verb == "REQ" then
+		if context.medium ~= "WHISPER" and context.medium ~= "BNET" then
+			-- Channel REQs are throttled per requester before any work;
+			-- legit clients self-rate at the same interval, so this only
+			-- bounds spam (and old fanout-era builds).
+			local lastChan = self.chanReqSenderAt[target]
+			if lastChan and (now - lastChan) < C.REQ_CHANNEL_SENDER_INTERVAL then
+				return
+			end
+			self.chanReqSenderAt[target] = now
+		end
 		-- "Who can serve subject `arg`?" Ourselves answer directly; anyone
 		-- else resolves by identity consensus. canServe reads the register
 		-- live, so cache-absent subjects are still servable.
@@ -977,7 +1237,7 @@ function Broadcast:onControl(msg, context)
 		local reqAt = tonumber(arg3) or 0
 		if context.medium ~= "WHISPER" and context.medium ~= "BNET" then
 			-- Broadcast path: many holders may hear it, so ACK/OK
-			-- arbitration and the serve breaker still apply.
+			-- arbitration and the serve cooldown still apply.
 			if not selfReq and self:serveThrottled(now) then
 				return
 			end
@@ -1031,13 +1291,23 @@ function Broadcast:onControl(msg, context)
 		end
 		-- Misses stay silent.
 	elseif verb == "ACK" then
-		-- The contact answered; open the data window.
+		-- offerAt is the holder's content claim; arg3 is its TRP3
+		-- directory last-seen stamp. A claim at or under our persisted
+		-- floor cannot carry anything newer — silence is rejection.
 		local req = self.requests[arg]
-		if req and req.state == "contact"
-			and req.target == target
+		local offerAt = tonumber(arg2) or 0
+		if req and (offerAt + C.FRESHNESS_SKEW)
+			< ns.cache:freshnessFloor(arg, req.unitID)
 		then
+			if peer then
+				peer("ack " .. arg .. " <- " .. tostring(target)
+					.. " denied (stale claim)")
+			end
+		elseif req and req.state == "contact" and req.target == target then
+			-- The contact answered; open the data window.
 			req.state = "awaiting-data"
 			req.at = now
+			req.winner = { medium = context.medium, target = target }
 			-- Compat: earlier proto-5 servers gate the serve on OK.
 			self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
 			if leg then
@@ -1047,16 +1317,43 @@ function Broadcast:onControl(msg, context)
 				peer("ack " .. (req.unitID or Util.nameForGuid(arg))
 					.. " <- " .. tostring(target))
 			end
+		elseif req and req.state == "chan-wait"
+			and req.target == target
+		then
+			-- The "dead" contact was merely slow; take it and skip the
+			-- channel leg entirely.
+			req.state = "awaiting-data"
+			req.at = now
+			req.winner = { medium = context.medium, target = target }
+			req.acks = nil
+			self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
+			if leg then
+				leg("ok", 1)
+			end
+			if peer then
+				peer("ack " .. (req.unitID or Util.nameForGuid(arg))
+					.. " <- " .. tostring(target) .. " (late contact)")
+			end
+		elseif req and req.state == "broadcast"
+			and target ~= req.deadTarget
+		then
+			-- Collect the offer; the window end grants the freshest.
+			if req.acks and #req.acks < C.REQ_CHANNEL_ACK_CAP then
+				req.acks[#req.acks + 1] = {
+					medium = context.medium, target = target,
+					offerAt = offerAt, dirAt = tonumber(arg3) or 0,
+				}
+				if peer then
+					peer("ack " .. arg .. " <- " .. tostring(target)
+						.. " (offer " .. #req.acks .. ")")
+				end
+			end
 		end
 	elseif verb == "OK" then
 		local key = serveKey(target, arg)
 		local serve = self.pendingServes[key]
 		if serve then
 			self.pendingServes[key] = nil
-			-- Only granted serves count toward the breaker.
-			if serve.subject ~= self:senderGUID() then
-				self:bumpServe(now)
-			end
 			self:serveData(serve)
 		end
 	elseif verb == "NOK" then

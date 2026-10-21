@@ -102,11 +102,13 @@ pull (which fills our cache anyway once it lands, via the received listener).
 
 Requests deduplicate per subject (active + queued + a 60s cooldown) and
 wait in a small bounded FIFO. On the serving side, unicast REQs are
-throttled per sender (`REQ_SENDER_INTERVAL`), while channel REQs keep the
-serve breaker (`SERVE_RATE_LIMIT` granted serves per `SERVE_RATE_WINDOW`,
-then a `SERVE_RATE_MUTE` bow-out): a saturated server simply stops
-answering broadcasts — requesters' timeouts pace their retries, no "busy"
-wire traffic is spent. Requests for our *own* profile bypass the breaker.
+throttled per sender (`REQ_SENDER_INTERVAL`), while channel REQs are
+gated by a per-requester throttle and a drain-aware serve cooldown: we
+answer no broadcasts while a serve's chunks are queued, and stay muted
+for 10–60s after a mesh serve's last chunk leaves — scaled by the channel
+member count so a thin mesh keeps serving while a dense one shares the
+load. Requesters' timeouts pace their retries; no "busy" wire traffic is
+spent. Requests for our *own* profile bypass the cooldown.
 
 ### Message Structure
 

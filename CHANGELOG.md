@@ -1,5 +1,13 @@
 ﻿# FactionRP Changelog
 
+## 0.4.1-alpha-2
+
+### Changed
+- Re-implemented local mesh cache requests with new bounds.
+- Scaling cooldown system for local mesh to spread load across users.
+- More intelligent throttling across the board.
+- FRP cache received profile metadata so to not clobber servers with pointless REQs.
+
 ## 0.4.1
 
 ### Changed
@@ -7,7 +15,15 @@
 - FRP now uses TRP's own functions to pull updated profiles. (and yes it's throttled)
 - Profile requests are now serial: one subject at a time, asked of a single
   contact (BNet first, then guild, then community relays, round-robin).
-  A silent contact drops the request to the faction channel as last resort.
+  On contact failure or a stalled serve, total strangers (no shared club,
+  group, or BNet link) get one channel REQ on the faction mesh: ACK offers
+  collect for a short window and the freshest — judged by content claim
+  and TRP3 directory last-seen — wins the grant.
+- Received profiles suppress local re-requests for a while (REQ_HELD_TTL)
+  while the profile still exists in the register; a purge releases it.
+- Granted serves now expire on stall (no chunks for REQ_DATA_STALL) rather
+  than only at the absolute data timeout, so dead serves free the request
+  slot sooner.
 - Now requests fresh TRP profiles from subjects being served, but only if server has already seen them before.
 - Default profiles are now ignored and not served.
 

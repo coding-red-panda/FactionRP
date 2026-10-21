@@ -262,7 +262,9 @@ ns.RegisterCommand("relays", function()
 	ns.Print(("bnet peers | confirmed: %s | probing: %s | ignored: %s"):format(
 		joined(bnetConf), joined(bnetProb), joined(bnetIgn)))
 	local mute = ""
-	if b.serveMuteUntil and GetTime() < b.serveMuteUntil then
+	if b.serveDrainPos and b:serveDraining(GetTime()) then
+		mute = " | serving"
+	elseif b.serveMuteUntil and GetTime() < b.serveMuteUntil then
 		mute = (" | serve muted %ds"):format(math.ceil(b.serveMuteUntil - GetTime()))
 	end
 	ns.Print(("exchange | pending requests: %d | queued: %d | pending serves: %d | sends in flight: %d%s"):format(
