@@ -7,6 +7,7 @@
 - Scaling cooldown system for local mesh to spread load across users.
 - More intelligent throttling across the board.
 - FRP cache received profile metadata so to not clobber servers with pointless REQs.
+- Progress indicator
 
 ## 0.4.1
 

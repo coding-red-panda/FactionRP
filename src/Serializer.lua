@@ -222,6 +222,25 @@ function ChunkReassembler:add(sender, chunkString)
 	return nil
 end
 
+--- Progress of the newest in-flight message from `sender`, for UI.
+-- @return number|nil received chunk count, number|nil total chunk count
+function ChunkReassembler:progress(sender)
+	local perSender = self.buffers[sender]
+	if not perSender then
+		return nil
+	end
+	local newest
+	for _, buf in pairs(perSender) do
+		if not newest or buf.time > newest.time then
+			newest = buf
+		end
+	end
+	if newest then
+		return newest.count, newest.total
+	end
+	return nil
+end
+
 --- Drop every partial buffer for one sender (e.g. a serve that stalled).
 -- @return number How many buffers were dropped.
 function ChunkReassembler:drop(sender)

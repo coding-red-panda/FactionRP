@@ -54,6 +54,7 @@ function Broadcast:init()
 	--     "broadcast" (channel REQ collecting whispered ACKs),
 	--     "awaiting-data" (grant issued, data expected)
 	--   recentReqs[guid] = last request time (per-subject cooldown)
+	--   reqMissed[guid] = last failed-pull time (tooltip "no response")
 	--   reqQueued[guid] + reqQueueOrder: deduped FIFO of waiting subjects
 	--   contactIdx: round-robin contact cursor
 	--   pendingServes[key] = { subject, unitID, medium, target, at }
@@ -66,6 +67,7 @@ function Broadcast:init()
 	--   chanReqSenderAt[senderName] = last inbound channel REQ time
 	self.requests = {}
 	self.recentReqs = {}
+	self.reqMissed = {}
 	self.pendingServes = {}
 	self.freshenPending = {}
 	self.reqQueued = {}
@@ -356,6 +358,22 @@ end
 
 -- Pull exchange --------------------------------------------------------------
 
+---- Drop an in-flight request to the subject cooldown, stamp the miss for
+-- the tooltip, and publish a held register copy so the subject still
+-- renders (honest stale stamp; the mesh beats it when it can).
+-- @return boolean Always true: the pump should advance.
+local function dropReq(bcast, guid, req, now, why)
+	bcast.requests[guid] = nil
+	bcast.recentReqs[guid] = now
+	bcast.reqMissed[guid] = now
+	bcast:publishHeld(guid, req.unitID)
+	if ns.debugPeer then
+		ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+			.. " " .. why)
+	end
+	return true
+end
+
 --- BNet and whisper probe rotations plus exchange expiry, one ticker.
 function Broadcast:tick()
 	local now = GetTime()
@@ -366,28 +384,16 @@ function Broadcast:tick()
 	-- data failures fall back to the same-faction channel once per request
 	-- for stranger subjects; everything else drops to the subject cooldown.
 	local pump = false
-	local function dropReq(guid, req, why)
-		self.requests[guid] = nil
-		self.recentReqs[guid] = now
-		pump = true
-		-- Dead pull with a held register copy: publish it so the subject
-		-- still renders (honest stale stamp; the mesh beats it when it can).
-		self:publishHeld(guid, req.unitID)
-		if ns.debugPeer then
-			ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
-				.. " " .. why)
-		end
-	end
 	for guid, req in pairs(self.requests) do
 		if req.state == "contact"
 			and (now - req.at) > C.REQ_CONTACT_TIMEOUT
 		then
 			if not self:tryChannelFallback(guid, req, now) then
-				dropReq(guid, req, "dropped (contact silent)")
+				pump = dropReq(self, guid, req, now, "dropped (contact silent)")
 			end
 		elseif req.state == "chan-wait" then
 			if (now - req.waitAt) > C.REQ_CHANNEL_WAIT_MAX then
-				dropReq(guid, req, "dropped (channel wait)")
+				pump = dropReq(self, guid, req, now, "dropped (channel wait)")
 			elseif not restricted then
 				-- Restricted: replies would be dropped inbound anyway;
 				-- stay parked.
@@ -398,7 +404,7 @@ function Broadcast:tick()
 		then
 			-- Window closed: grant the freshest offer, else a silent miss.
 			if not self:grantBestOffer(guid, req, now) then
-				dropReq(guid, req, "dropped (channel silent)")
+				pump = dropReq(self, guid, req, now, "dropped (channel silent)")
 			end
 		elseif req.state == "awaiting-data" then
 			local srcMedium = (req.winner and req.winner.medium) or req.medium
@@ -425,7 +431,7 @@ function Broadcast:tick()
 					req.deadTarget = req.winner.target
 				end
 				if not self:tryChannelFallback(guid, req, now) then
-					dropReq(guid, req, stalled
+					pump = dropReq(self, guid, req, now, stalled
 						and "dropped (serve stalled)"
 						or "expired (awaiting-data)")
 				end
@@ -505,7 +511,41 @@ function Broadcast:tick()
 			self.chanReqSenderAt[sender] = nil
 		end
 	end
+	-- Miss markers only matter to the tooltip inside the cooldown window.
+	for guid, at in pairs(self.reqMissed) do
+		if (now - at) > C.REQ_COOLDOWN then
+			self.reqMissed[guid] = nil
+		end
+	end
 
+end
+
+--- Pull status for one subject, for the tooltip indicator: "asking" while
+-- queued or any pre-grant state is in flight, "receiving" plus chunk
+-- progress once a serve is granted, "miss" inside the cooldown window
+-- after a failed pull. nil means nothing worth showing.
+function Broadcast:reqStatus(guid)
+	local req = self.requests[guid]
+	if req then
+		if req.state == "awaiting-data" then
+			local medium = (req.winner and req.winner.medium) or req.medium
+			local target = (req.winner and req.winner.target) or req.target
+			local got, total
+			if medium and target then
+				got, total = ns.comms.assembler:progress(
+					ns.comms:senderKeyFor(medium, target))
+			end
+			return "receiving", got, total
+		end
+		return "asking"
+	end
+	if self.reqQueued[guid] then
+		return "asking"
+	end
+	if self.reqMissed[guid] then
+		return "miss"
+	end
+	return nil
 end
 
 --- Queue a request for `guid`'s profile. No-op when the cache is fresh,
@@ -1478,6 +1518,7 @@ function Broadcast:onMessage(raw, context)
 		local src = context.gameAccountID or context.senderName
 		self.requests[msg.subject] = nil
 		self.recentReqs[msg.subject] = GetTime()
+		self.reqMissed[msg.subject] = nil
 		if ns.debugPeer then
 			ns.debugPeer("data " .. Util.nameForGuid(msg.subject)
 				.. " <- " .. tostring(src))
