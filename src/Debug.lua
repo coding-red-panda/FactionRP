@@ -47,10 +47,6 @@ local function logSkip(unitID, reason)
 	ns.Print(("|cffffd200[skip]|r %s (%s)"):format(tostring(unitID), tostring(reason)))
 end
 
-local function pickText(t)
-	return #t > 0 and (tostring(#t) .. " (" .. table.concat(t, ", ") .. ")") or "0"
-end
-
 local function logFanout(pick)
 	ns.Print("|cffffd200[fanout]|r req -> " .. tostring(pick))
 end
@@ -216,7 +212,7 @@ ns.RegisterCommand("relays", function()
 		else
 			tag = " [?]" -- in neither club's current roster (left / stale)
 		end
-		if p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL then
+		if p.ign ~= 0 then
 			ignored = ignored + 1
 		elseif p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL then
 			conf[#conf + 1] = p.name .. tag

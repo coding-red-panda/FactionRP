@@ -8,3 +8,4 @@ ignore:
     - README.md
     - doc/
     - .gitignore
+    - tools/

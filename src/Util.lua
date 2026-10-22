@@ -376,6 +376,12 @@ stepCurrentBuild = function()
 end
 
 local function startRosterBuild()
+	-- Never overlap builds. Callers guard too, but the check belongs here:
+	-- a second start would wipe the back buffer out from under the
+	-- in-flight build. Returns true only when a build actually started.
+	if rosterBuild then
+		return
+	end
 	-- GetSubscribedClubs returns nothing until clubs initialize; a nil or
 	-- unusable result skips the build and retries next memo window.
 	-- factionFromRace is the sole faction source; fail once per build
@@ -435,6 +441,7 @@ local function startRosterBuild()
 		deferred = {},
 	}
 	stepRosterBuild(rosterBuild)
+	return true
 end
 
 local function clubRoster()
@@ -445,6 +452,23 @@ local function clubRoster()
 		startRosterBuild()
 	end
 	return rosterFront
+end
+
+local lastUiRosterRefresh = 0
+
+--- Kick a roster rebuild immediately, ignoring the memo window (unless a
+-- build is already in flight). Used when the Communities UI opens —
+-- member data streams in for the UI anyway, so the scan is cheap then.
+-- Roster builds still cost real lookups, so UI opens are rate-gated at
+-- ROSTER_UI_REFRESH; an in-flight or unserviceable build consumes nothing.
+function Util.refreshClubRoster()
+	local now = GetTime()
+	if (now - lastUiRosterRefresh) < C.ROSTER_UI_REFRESH then
+		return
+	end
+	if startRosterBuild() then
+		lastUiRosterRefresh = now
+	end
 end
 
 --- Online opposite-faction club members we can reach by addon whisper.

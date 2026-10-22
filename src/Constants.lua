@@ -10,7 +10,7 @@ ns.Const = C
 -- Identity -----------------------------------------------------------------
 
 C.ADDON_NAME = "FactionRP"
-C.VERSION = "0.3.4"
+C.VERSION = "0.4.0"
 
 -- Wire-protocol generation, stamped into every envelope and the channel
 -- name. Peers on a lower PROTO_MAJOR are rejected; bump on breaking changes.
@@ -76,12 +76,13 @@ C.BNET_MEMO = 15
 
 -- BNet peer confirmation (FRP1 HELLO/HI handshake). Data goes only to
 -- confirmed accounts; unconfirmed ones get rotating HELLO probes.
--- BNET_PROBE_MAX unanswered probes ignore the account for BNET_IGNORE_TTL;
--- confirmations expire BNET_CONFIRM_TTL after the peer's last proof.
+-- One HELLO per eligibility window: an unanswered probe ignores the
+-- account after BNET_PROBE_DEADLINE until BNET_IGNORE_TTL decays it or
+-- the account comes online. Confirmations expire BNET_CONFIRM_TTL after
+-- the peer's last proof.
 C.BNET_CONFIRM_TTL = 600
-C.BNET_PROBE_INTERVAL = 5   -- probe ticker cadence (>=1 probe per tick)
-C.BNET_PROBE_COOLDOWN = 15  -- per-account gap between probes
-C.BNET_PROBE_MAX = 8        -- unanswered probes before ignoring
+C.BNET_PROBE_INTERVAL = 5   -- probe ticker cadence (burst + sweep tick)
+C.BNET_PROBE_DEADLINE = 60  -- an awaiting probe older than this is ignored
 C.BNET_IGNORE_TTL = 600     -- ignore-list decay
 C.BNET_HI_COOLDOWN = 30     -- min gap between HI replies to the same account
 
@@ -189,22 +190,32 @@ C.GUID_RESOLVE_MEMO = 60
 
 -- Whisper relay confirmation (HELLO/HI over addon whispers, same lifecycle
 -- as the BNet handshake). Any parseable inbound whisper confirms the sender.
-C.RELAY_PROBE_INTERVAL = 120 -- gap between whisper probe bursts
-C.RELAY_PROBE_BURST = 5      -- probe targets per burst
-C.RELAY_CONFIRM_TTL = 600    -- relay confirmation expires without fresh proof
-C.RELAY_PROBE_COOLDOWN = 45  -- per-target probe gap AND the answer window
-C.RELAY_PROBE_MAX = 1        -- unanswered probes before ignoring
-C.RELAY_IGNORE_TTL = 7200    -- ignore-list decay (2h)
-C.RELAY_HI_COOLDOWN = 30     -- min gap between HI replies to the same target
+-- Ignore is offline-aware, not time-driven: a member stays ignored while
+-- continuously online (their silence is the answer) and is un-ignored only
+-- after being observed offline by the roster scan — silence during an
+-- absence explains itself, so they earn a retry when they return.
+C.RELAY_PROBE_INTERVAL = 30 -- gap between whisper probe bursts
+C.RELAY_PROBE_BURST = 5     -- probe targets per burst
+C.RELAY_CONFIRM_TTL = 600   -- relay confirmation expires without fresh proof
+C.RELAY_PROBE_COOLDOWN = 45 -- per-target probe gap AND the answer window
+C.RELAY_PROBE_MAX = 1       -- unanswered probes before ignoring
+C.RELAY_HI_COOLDOWN = 30    -- min gap between HI replies to the same target
 
 -- Seconds the scanned club roster is memoized. Stale rosters rebuild
--- incrementally, ROSTER_SLICE member lookups per frame.
-C.COMM_ROSTER_MEMO = 45
+-- incrementally, ROSTER_SLICE member lookups per frame. Opening the
+-- Communities UI triggers an early rebuild — member data streams in for
+-- the UI anyway, so the scan is cheap then. The longer memo funds faster
+-- probe bursts below.
+C.COMM_ROSTER_MEMO = 90
 C.ROSTER_SLICE = 20
 
 -- Club member data streams in lazily; a build that raced it retries this
 -- many seconds out instead of waiting a full memo window.
 C.ROSTER_RETRY = 5
+
+-- Min gap between UI-triggered roster rebuilds (Communities UI opens), so
+-- frame spam cannot restart builds.
+C.ROSTER_UI_REFRESH = 30
 
 -- Injection into the RP AddOn's register is queued: register writes fire
 -- the AddOn's own events, so bursts amortize at INJECT_BURST per interval.

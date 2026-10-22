@@ -1,18 +1,18 @@
 ﻿# FactionRP Changelog
 
-## 0.4.1-alpha-2
+## 0.4.0
 
 ### Changed
-- Re-implemented local mesh cache requests with new bounds.
+- New protocol (again).
+- Probe for relays faster.
+- Only probe BNet friends if their current character is xfac.
+- Re-scan Communities members when opening Communities Panel.
+- Ignored members may now be reprobed if offline on re-scan.
+- BNet friends confirm and recover faster.
 - Scaling cooldown system for local mesh to spread load across users.
 - More intelligent throttling across the board.
 - FRP cache received profile metadata so to not clobber servers with pointless REQs.
 - Progress indicator
-
-## 0.4.1
-
-### Changed
-- New protocol (again).
 - FRP now uses TRP's own functions to pull updated profiles. (and yes it's throttled)
 - Profile requests are now serial: one subject at a time, asked of a single
   contact (BNet first, then guild, then community relays, round-robin).

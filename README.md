@@ -151,14 +151,17 @@ numbered chunks and re-assembled by the receiver before processing.
 We never assume a Battle.net friend runs FactionRP. The `HELLO`/`HI`
 handshake confirms peers session-locally:
 
-* Every `BNET_PROBE_INTERVAL` (10s) we probe the next online, unconfirmed,
-  non-ignored friend with a `HELLO`; the reply is `HI`.
+* Only a friend's *opposite-faction* WoW characters enter the peer pool —
+  a friend playing our faction is reachable on the comm channel anyway.
+* Every `BNET_PROBE_INTERVAL` (5s) we burst `HELLO`s to every eligible
+  friend — unconfirmed, non-ignored, none awaiting — bounded by the shared
+  send budget; the reply is `HI`.
 * Any complete, parseable FactionRP message from an account — handshake or
   otherwise — confirms it for `BNET_CONFIRM_TTL` (10 min).
-* `BNET_PROBE_MAX` (3) unanswered probes ignore the account for
-  `BNET_IGNORE_TTL` (30 min); only a friend *coming online*
-  (`BN_FRIEND_ACCOUNT_ONLINE`) re-opens probing early — mere presence churn
-  (zone changes, status updates) does not.
+* A probe unanswered past `BNET_PROBE_DEADLINE` (60s) ignores the account
+  for `BNET_IGNORE_TTL` (10 min); the ignored account *coming online*
+  (`BN_FRIEND_ACCOUNT_ONLINE`) re-opens probing early with a fresh slate —
+  mere presence churn (zone changes, status updates) does not.
 * Data and `REQ` legs on Battle.net go to confirmed accounts only.
 
 Whisper relays use the same handshake lifecycle: `HELLO` probes walk the
@@ -197,8 +200,9 @@ opposite-faction, but its *servers* need not be — every faction-mate who
 previously pulled the same subject is a holder. A `REQ` therefore goes to:
 
 * **One contact at a time**, picked by the round-robin cursor:
-  confirmed Battle.net friends first (account-to-account, ignores
-  faction), then confirmed guild-club relays, then confirmed
+  confirmed Battle.net friends first (account-to-account; only
+  opposite-faction characters qualify), then confirmed guild-club
+  relays, then confirmed
   community-club relays — each reachable by addon whisper (see
   "Community relays"). There is no "community" medium — clubs can't carry
   addon messages; shared membership is what makes a `WHISPER` send
@@ -250,15 +254,17 @@ single-chunk control messages, and every client maintains its own relay lists �
 coverage is distributed across requesters.
 
 Rather than waiting for requests, we **actively probe** the roster: every
-`RELAY_PROBE_INTERVAL` (2min) a burst of up to `RELAY_PROBE_BURST` (5)
+`RELAY_PROBE_INTERVAL` (30s) a burst of up to `RELAY_PROBE_BURST` (5)
 candidates gets a whispered `HELLO`, walked in order through the guild list
 then the community list so everyone gets a turn. Each candidate gets exactly
 one probe: a whispered `HELLO` earns a `HI` reply and any parseable inbound
 whisper confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min);
 a probe with no answer inside `RELAY_PROBE_COOLDOWN` (45s) kicks the target
-to the ignore list for `RELAY_IGNORE_TTL` (2h — expired ignores re-enter
-rotation for one more shot). Confirmed relays are never probed — real
-inbound traffic is the only thing keeping them warm. Members without
+to the ignore list. Ignore is offline-aware rather than time-driven —
+someone who stays online stays ignored (their silence is the answer), while
+a member observed *offline* by the roster scan is un-ignored and earns a
+retry when they return. Confirmed relays are never probed — real inbound
+traffic is the only thing keeping them warm. Members without
 FactionRP simply cannot parse or answer.
 
 Whisper legs now reach only proven targets — the unconfirmed roster is the

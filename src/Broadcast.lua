@@ -128,6 +128,26 @@ function Broadcast:start()
 	C_Timer.After(C.VER_BROADCAST_DELAY, function()
 		self:broadcastVersion()
 	end)
+
+	-- Opening the Communities UI streams member data in anyway; kick an
+	-- early roster rebuild then. The frame lives in LoadOnDemand
+	-- Blizzard_Communities, so hook it whenever it materialises.
+	local hooked = false
+	local function hookCommunitiesFrame()
+		if hooked or not CommunitiesFrame then
+			return
+		end
+		hooked = true
+		CommunitiesFrame:HookScript("OnShow", function()
+			Util.refreshClubRoster()
+		end)
+	end
+	ns.RegisterEvent("ADDON_LOADED", function(_, name)
+		if name == "Blizzard_Communities" then
+			hookCommunitiesFrame()
+		end
+	end)
+	hookCommunitiesFrame() -- may already be loaded (opened before login)
 end
 
 -- Helpers -------------------------------------------------------------------
@@ -143,12 +163,6 @@ function Broadcast:relay(key, name)
 		p.name = name
 	end
 	return p
-end
-
---- Is `key` currently on the whisper ignore list?
-function Broadcast:relayIgnored(key, now)
-	local p = self.relays[key]
-	return p ~= nil and p.ign ~= 0 and (now - p.ign) < C.RELAY_IGNORE_TTL
 end
 
 --- Next probe target via a rotating cursor over both rosters. One probe
@@ -167,9 +181,6 @@ function Broadcast:whisperProbeTarget(now)
 		local key = Util.normalizeUnitName(name)
 		if key then
 			local p = self.relays[key]
-			if p and p.ign ~= 0 and (now - p.ign) >= C.RELAY_IGNORE_TTL then
-				p.ign, p.pr = 0, 0 -- served their time: fresh slate
-			end
 			if p and p.ign == 0 then
 				local fresh = p.conf ~= 0
 					and (now - p.conf) < C.RELAY_CONFIRM_TTL
@@ -446,26 +457,48 @@ function Broadcast:tick()
 		return -- no probes, sends, or further transitions while restricted
 	end
 
-	-- Probe the next unconfirmed BNet account. Probes consume the
-	-- in-flight budget, so none go out while the queue holds the cap.
-	if self:fanoutsInFlight() < C.FANOUT_INFLIGHT_MAX then
+	-- Burst HELLOs to every eligible BNet account: the paced send queue
+	-- does the wire throttling, the shared in-flight budget bounds each
+	-- tick's wave, and unanswered probes bench their account at the
+	-- deadline inside probeTarget.
+	local hello = self:ctlHello()
+	while self:fanoutsInFlight() < C.FANOUT_INFLIGHT_MAX do
 		local id = comms:probeTarget(now)
-		if id and comms:sendChunksBNet(self:ctlHello(), id) then
-			comms:markProbed(id, now)
-			self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
-			if ns.statsLeg then
-				ns.statsLeg("bnet_probe", 1)
-			end
-			if ns.debugPeer then
-				ns.debugPeer("probe -> bnet " .. id)
-			end
+		if not id or not comms:sendChunksBNet(hello, id) then
+			break
+		end
+		comms:markAwaiting(id, now)
+		self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
+		if ns.statsLeg then
+			ns.statsLeg("bnet_probe", 1)
+		end
+		if ns.debugPeer then
+			ns.debugPeer("probe -> bnet " .. id)
 		end
 	end
 
 	-- Whisper relay probes in bursts. The rotation returns unconfirmed
-	-- candidates only; a saturated queue ends the burst early.
-	if (now - self.relayProbeAt) >= C.RELAY_PROBE_INTERVAL then
+	-- candidates only; a saturated queue ends the burst early. The gate
+	-- also needs budget headroom or a BNet wave would consume the window
+	-- without a whisper going out.
+	if (now - self.relayProbeAt) >= C.RELAY_PROBE_INTERVAL
+		and self:fanoutsInFlight() < C.FANOUT_INFLIGHT_MAX
+	then
 		self.relayProbeAt = now
+		-- An ignored member observed offline gets a fresh slate: silence
+		-- while online reads as "doesn't run FRP", while silence during an
+		-- absence explains itself. Online-but-silent stays ignored
+		-- regardless of age — the probe budget goes to plausible FRP users
+		-- only.
+		for key, p in pairs(self.relays) do
+			if p.ign ~= 0 and not Util.isClubMemberOnline(p.name or key) then
+				p.ign, p.pr = 0, 0
+				if ns.debugPeer then
+					ns.debugPeer("whisper " .. tostring(p.name or key)
+						.. " unignored (offline)")
+				end
+			end
+		end
 		for _ = 1, C.RELAY_PROBE_BURST do
 			if self:fanoutsInFlight() >= C.FANOUT_INFLIGHT_MAX then
 				break

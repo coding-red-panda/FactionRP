@@ -165,33 +165,41 @@ We never assume a silent BNet friend runs FactionRP. Per-account state
 (session-only):
 
 ```
-unconfirmed → probing → (3 unanswered probes) → ignored
-                 ↑               │                    │
-                 └───────────────┴── TTL / presence ──┘
+unconfirmed → awaiting → (unanswered past deadline) → ignored
+                 ↑              │                         │
+                 └──────────────┴── TTL / presence ───────┘
 any parseable inbound message → confirmed (10 min TTL)
 ```
 
-- **Probing**: every `BNET_PROBE_INTERVAL` (10s) we send `HELLO <ver>` to the
-  next online, unconfirmed, non-ignored account (round-robin, ≥45s between
-  probes per account).
+- **Probing**: every `BNET_PROBE_INTERVAL` (5s) tick we burst `HELLO <ver>`
+  to every eligible account — unconfirmed, non-ignored, and not already
+  awaiting — bounded only by the shared in-flight send budget; the paced
+  queue does the wire throttling. Each queued probe marks the account
+  awaiting. The account pool is filtered at enumeration:
+  same-faction WoW characters (`factionName` matching ours) are excluded —
+  the faction channel reaches them already, so they are never a valid
+  cross-faction relay. Unknown/unreadable factions stay in the pool.
 - **Confirming**: any complete, parseable FRP message from an account —
   `HELLO`, `HI`, `REQ`, or data — confirms it for `BNET_CONFIRM_TTL` (10min).
 - **Replying**: `HELLO` is answered with `HI <ver>` (rate-limited to one
   per `BNET_HI_COOLDOWN`=30s per account). `HI` is never answered — the
   exchange terminates after one round-trip.
-- **Ignoring**: after `BNET_PROBE_MAX` (3) unanswered probes an account is
-  ignored for `BNET_IGNORE_TTL` (30min). Only `BN_FRIEND_ACCOUNT_ONLINE`
-  clears ignore flags — `BN_FRIEND_INFO_CHANGED`/`FRIENDLIST_UPDATE` merely
-  invalidate the online-account memo (they fire on zone/status churn and
-  would otherwise resurrect ignored accounts before their TTL).
-  `BN_DISCONNECTED` wipes the map.
+- **Ignoring**: a probe unanswered past `BNET_PROBE_DEADLINE` (60s — covers
+  a busy peer's queue drain) benches the account for `BNET_IGNORE_TTL`
+  (10min). `BN_FRIEND_ACCOUNT_ONLINE` clears
+  the ignore *of the account that logged in* (resolved friendId →
+  gameAccountInfo) with a fresh probe slate — other accounts' ignores stay
+  put. `BN_FRIEND_INFO_CHANGED`/`FRIENDLIST_UPDATE` merely invalidate the
+  online-account memo (they fire on zone/status churn and would otherwise
+  resurrect ignored accounts before their TTL). `BN_DISCONNECTED` wipes
+  the map.
 - **Data and REQ legs on BNet go to confirmed accounts only.**
 
 Whisper peers (cross-faction club members) use the same probe/confirm/ignore
 lifecycle as BNet accounts:
 
 - **Probing**: bursts of up to `RELAY_PROBE_BURST` (5) whispered
-  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (120s), walked in order by a
+  `HELLO <ver>`s every `RELAY_PROBE_INTERVAL` (30s), walked in order by a
   rotating cursor — guild members before community members, so every
   candidate gets a turn and unanswered probes never repeat on the same
   people. Each candidate gets exactly `RELAY_PROBE_MAX` (1) probe; a
@@ -204,10 +212,18 @@ lifecycle as BNet accounts:
   is the only thing keeping them warm, so a relay that goes silent decays
   back to unconfirmed on its own.
 - **Ignoring**: an unanswered probe past its answer window
-  (`RELAY_PROBE_COOLDOWN`=45s) kicks the target to the ignore list for
-  `RELAY_IGNORE_TTL` (2h) at the next rotation pass; expired ignores
-  re-enter rotation with a fresh slate — the slow recovery path. Ignored
-  targets are skipped by `REQ` fanouts too.
+  (`RELAY_PROBE_COOLDOWN`=45s) kicks the target to the ignore list at the
+  next rotation pass. Ignore is *offline-aware*, not time-driven: a
+  member stays ignored while continuously online — their silence is the
+  answer — and is un-ignored only after being observed *offline* by the
+  roster scan, since silence during an absence explains itself. They earn
+  a retry when they return. Ignored targets are skipped by `REQ` fanouts
+  too. The underlying club roster is memoized `COMM_ROSTER_MEMO` (90s)
+  and rebuilt incrementally; opening the Communities UI forces an early
+  rebuild (rate-gated `ROSTER_UI_REFRESH`=30s) because member data streams
+  in for the UI anyway. `startRosterBuild` itself no-ops while a build is
+  in flight, so neither entry point can start or queue an overlapping
+  scan.
 
 `REQ` whisper legs reach only proven targets — confirmed BNet peers and
 confirmed whisper relays; the unconfirmed roster is the probe rotation's

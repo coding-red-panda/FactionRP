@@ -25,7 +25,7 @@ function Comms:init()
 	-- Memoized online WoW BNet account ids (see bnetAccounts).
 	self.bnetAcctMemo = { ids = {}, at = 0 }
 	-- FRP1 BNet peer confirmation state, session-only, reset in place:
-	--   [gameAccountID] = { confirmedAt, lastProbe, probes, ignoredAt, lastHi, version }
+	--   [gameAccountID] = { confirmedAt, probeSentAt, ignoredAt, lastHi, version }
 	self.bnetPeers = {}
 	self.probeCursor = 0
 	-- [senderKey] = GetTime() expiry; chunks from senders whose messages
@@ -82,10 +82,22 @@ function Comms:start()
 	local function onFriendPresence()
 		self.bnetAcctMemo.at = 0
 	end
-	local function onFriendOnline()
+	-- A friend coming online earns a fresh probe slate on just their WoW
+	-- game account — one login must not un-ignore everyone else. The event
+	-- carries friendId (a bnet account id); resolve it to the online
+	-- gameAccountID. Unresolvable lookups leave ignores alone — the TTL
+	-- decay path still applies.
+	local function onFriendOnline(_, friendId)
 		self.bnetAcctMemo.at = 0
-		for _, p in pairs(self.bnetPeers) do
+		local ok, info = pcall(C_BattleNet.GetAccountInfoByID, friendId)
+		local acct = ok and ns.Util.fieldsUsable(info, "gameAccountInfo")
+			and info.gameAccountInfo or nil
+		local gid = ns.Util.fieldsUsable(acct, "gameAccountID")
+			and acct.gameAccountID or nil
+		local p = gid and self.bnetPeers[gid]
+		if p then
 			p.ignoredAt = 0
+			p.probeSentAt = 0
 		end
 	end
 	ns.RegisterEvent("BN_FRIEND_ACCOUNT_ONLINE", onFriendOnline)
@@ -405,20 +417,25 @@ end
 
 -- Peer enumeration ----------------------------------------------------------
 
---- The addon channel kind for the current group, or nil if solo.
-function Comms:groupChannel()
-	if IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
-		return "INSTANCE_CHAT"
-	elseif IsInRaid() then
-		return "RAID"
-	elseif IsInGroup() then
-		return "PARTY"
+--- Whether a BNet game account's character is our own faction. A
+-- same-faction friend is reachable on the comm channel already — the BNet
+-- leg exists to bridge factions, so they are not a valid relay. Unknown
+-- or unreadable factions stay candidates.
+local function sameFactionAccount(acct)
+	local fname = acct.factionName
+	if not ns.Util.canWeUse(fname) or not fname then
+		return false
 	end
-	return nil
+	local en, loc = UnitFactionGroup("player")
+	if not ns.Util.canWeUse(en, loc) then
+		return false
+	end
+	return fname == en or fname == loc
 end
 
 --- Invoke callback(gameAccountID) for every online WoW Battle.net friend in
--- the current region. These are our cross-faction relays.
+-- the current region whose character is opposite-faction. These are our
+-- cross-faction relays.
 function Comms:eachBNetGameAccount(callback)
 	if not BNFeaturesEnabledAndConnected() then
 		return
@@ -438,6 +455,7 @@ function Comms:eachBNetGameAccount(callback)
 					and acct.isOnline
 					and acct.clientProgram == BNET_CLIENT_WOW
 					and acct.isInCurrentRegion
+					and not sameFactionAccount(acct)
 				then
 					callback(acct.gameAccountID)
 				end
@@ -473,7 +491,7 @@ end
 local function peerEntry(peers, id)
 	local p = peers[id]
 	if not p then
-		p = { confirmedAt = 0, lastProbe = 0, probes = 0, ignoredAt = 0, lastHi = 0, version = nil }
+		p = { confirmedAt = 0, probeSentAt = 0, ignoredAt = 0, lastHi = 0, version = nil }
 		peers[id] = p
 	end
 	return p
@@ -488,7 +506,7 @@ function Comms:bnetPeerSeen(id, version)
 	local p = peerEntry(self.bnetPeers, id)
 	local was = p.confirmedAt
 	p.confirmedAt = GetTime()
-	p.probes = 0
+	p.probeSentAt = 0
 	p.ignoredAt = 0
 	if version and version ~= "" then
 		p.version = version
@@ -524,12 +542,25 @@ function Comms:probeTarget(now)
 		then
 			-- Ignore decayed: let the account re-enter probe rotation.
 			p.ignoredAt = 0
-			p.probes = 0
+			p.probeSentAt = 0
 		end
+		if p
+			and p.probeSentAt ~= 0
+			and p.ignoredAt == 0
+			and (now - p.probeSentAt) >= C.BNET_PROBE_DEADLINE
+		then
+			-- One shot missed its window: bench the account.
+			p.ignoredAt = now
+			p.probeSentAt = 0
+			if ns.debugPeer then
+				ns.debugPeer("bnet " .. id .. " ignored (unanswered probe)")
+			end
+		end
+		local awaiting = p and p.probeSentAt ~= 0
 		local ignored = p and p.ignoredAt ~= 0
-		if not ignored
+		if not awaiting
+			and not ignored
 			and not self:isBNetConfirmed(id, now)
-			and (not p or (now - p.lastProbe) >= C.BNET_PROBE_COOLDOWN)
 		then
 			return id
 		end
@@ -537,18 +568,10 @@ function Comms:probeTarget(now)
 	return nil
 end
 
---- Record that a HELLO probe was queued to `id`. Past BNET_PROBE_MAX
--- unanswered probes the account is ignored until BNET_IGNORE_TTL.
-function Comms:markProbed(id, now)
-	local p = peerEntry(self.bnetPeers, id)
-	p.lastProbe = now
-	p.probes = p.probes + 1
-	if p.probes > C.BNET_PROBE_MAX and p.ignoredAt == 0 then
-		p.ignoredAt = now
-		if ns.debugPeer then
-			ns.debugPeer("bnet " .. id .. " ignored (" .. p.probes .. " unanswered probes)")
-		end
-	end
+--- Record that a HELLO probe was queued to `id`; the account is awaiting
+-- an answer until BNET_PROBE_DEADLINE benches it.
+function Comms:markAwaiting(id, now)
+	peerEntry(self.bnetPeers, id).probeSentAt = now
 end
 
 --- Whether we may send another HI reply to `id` (rate-limit vs spam).
@@ -570,7 +593,7 @@ function Comms:bnetPeerLists()
 			lists.ignored[#lists.ignored + 1] = id
 		elseif (now - p.confirmedAt) < C.BNET_CONFIRM_TTL then
 			lists.confirmed[#lists.confirmed + 1] = id
-		elseif p.lastProbe ~= 0 then
+		elseif p.probeSentAt ~= 0 then
 			lists.probing[#lists.probing + 1] = id
 		end
 	end
