@@ -1,5 +1,10 @@
 ﻿# FactionRP Changelog
 
+## 0.4.1
+
+### Fixes
+- No longer read your own message to mesh channel.
+
 ## 0.4.0
 
 ### Changed
