@@ -53,6 +53,13 @@ function Comms:start()
 	end
 	self.started = true
 
+	-- Channel/group addon traffic echoes back to the sender; remember our
+	-- normalized name so the echo can be dropped at intake.
+	local ownName = GetUnitName("player", true)
+	if ns.Util.canWeUse(ownName) then
+		self.ownName = ns.Util.normalizeUnitName(ownName)
+	end
+
 	C_ChatInfo.RegisterAddonMessagePrefix(self.prefix)
 
 	ns.RegisterEvent("CHAT_MSG_ADDON", function(_, prefix, text, channel, sender)
@@ -610,6 +617,13 @@ end
 
 function Comms:onChatMsgAddon(prefix, text, channel, sender)
 	if prefix ~= self.prefix then
+		return
+	end
+	-- Our own channel/group echo does not need to be read.
+	if self.ownName and ns.Util.normalizeUnitName(sender) == self.ownName then
+		if ns.statsError then
+			ns.statsError("self_echo")
+		end
 		return
 	end
 	local ctx = self.chatCtx
