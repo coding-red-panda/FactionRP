@@ -78,32 +78,42 @@ end
 
 -- Pull-status indicator -------------------------------------------------------
 --
--- A small overlay hung off the tooltip's edge, never a line inside it: it
+-- A small plate hung off the tooltip's edge, never a line inside it: it
 -- cannot resize or reorder anyone else's content, and TRP3's tooltip
 -- rebuilds pass over it untouched. It only exists for an opposite-faction
--- subject with a pull in flight or a recent miss.
+-- subject with a pull in flight or a recent miss. During "receiving" the
+-- translucent fill sweeps the plate left-to-right as chunks land.
 
-local IND_WIDTH = 110
-local IND_BAR_H = 4
+local IND_HEIGHT = 18
+local IND_MIN_WIDTH = 180
+local IND_MAX_WIDTH = 400
 
 function Tooltip:startIndicator()
-	local ind = CreateFrame("Frame", "FactionRPTooltipStatus", UIParent)
+	local ind = CreateFrame("Frame", "FactionRPTooltipStatus", UIParent,
+		"BackdropTemplate")
 	ind:SetFrameStrata("TOOLTIP")
-	ind:SetSize(IND_WIDTH, 14)
+	ind:SetSize(IND_MIN_WIDTH, IND_HEIGHT)
 	ind:Hide()
+	ind:SetBackdrop({
+		bgFile = "Interface\\Buttons\\WHITE8x8",
+		edgeFile = "Interface\\Buttons\\WHITE8x8",
+		edgeSize = 1,
+	})
+	ind:SetBackdropColor(0.04, 0.04, 0.04, 0.85)
+	ind:SetBackdropBorderColor(1, 1, 1, 0.2)
+
+	local fill = ind:CreateTexture(nil, "ARTWORK")
+	fill:SetPoint("TOPLEFT", 1, -1)
+	fill:SetPoint("BOTTOMLEFT", 1, 1)
+	fill:SetColorTexture(1, 1, 1, 1)
+	fill:SetWidth(1)
+	fill:Hide()
+	ind.fill = fill
 
 	local text = ind:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	text:SetPoint("BOTTOMLEFT", 0, IND_BAR_H + 2)
+	text:SetPoint("CENTER")
+	text:SetJustifyH("CENTER")
 	ind.text = text
-
-	local bar = CreateFrame("StatusBar", nil, ind)
-	bar:SetPoint("BOTTOMLEFT", 0, 0)
-	bar:SetSize(IND_WIDTH, IND_BAR_H)
-	bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8x8")
-	bar:SetStatusBarColor(0.35, 0.75, 0.85)
-	bar:SetMinMaxValues(0, 1)
-	bar:Hide()
-	ind.bar = bar
 	self.ind = ind
 
 	GameTooltip:HookScript("OnHide", function()
@@ -139,39 +149,54 @@ function Tooltip:updateIndicator()
 		end
 		return
 	end
-	local pct = 0
+	local pct, retry = 0, 0
 	if status == "receiving" and got and total and total > 0 then
 		pct = math.floor(got / total * 100 + 0.5)
+	elseif status == "miss" and got then
+		retry = got
+	end
+	-- Width follows the tooltip; clamp for unreadable or degenerate sizes.
+	local width = GameTooltip:GetWidth()
+	if not ns.Util.canWeUse(width) or not width or width < IND_MIN_WIDTH then
+		width = IND_MIN_WIDTH
+	elseif width > IND_MAX_WIDTH then
+		width = IND_MAX_WIDTH
 	end
 	-- Above the tooltip only when there is no room below.
 	local bottom = GameTooltip:GetBottom()
-	local above = bottom ~= nil and bottom < 40
+	local above = bottom ~= nil and bottom < IND_HEIGHT + 20
 	-- Steady state allocates and touches nothing.
 	if ind:IsShown() and ind.status == status and ind.pct == pct
-		and ind.above == above
+		and ind.retry == retry and ind.above == above
+		and ind.width == width
 	then
 		return
 	end
-	ind.status, ind.pct, ind.above = status, pct, above
+	ind.status, ind.pct, ind.retry = status, pct, retry
+	ind.above, ind.width = above, width
 	ind:ClearAllPoints()
 	if above then
-		ind:SetPoint("BOTTOMLEFT", GameTooltip, "TOPLEFT", 4, 2)
+		ind:SetPoint("BOTTOMLEFT", GameTooltip, "TOPLEFT", 0, 2)
 	else
-		ind:SetPoint("TOPLEFT", GameTooltip, "BOTTOMLEFT", 4, -2)
+		ind:SetPoint("TOPLEFT", GameTooltip, "BOTTOMLEFT", 0, -2)
 	end
+	ind:SetWidth(width)
 	if status == "receiving" then
-		ind.bar:SetValue(pct / 100)
-		ind.bar:Show()
-		ind.text:SetText("FRP receiving " .. pct .. "%")
-		ind.text:SetTextColor(0.45, 0.8, 0.9)
+		ind.fill:SetWidth(math.max(1, (width - 2) * pct / 100))
+		ind.fill:SetVertexColor(0.35, 0.75, 0.85, 0.3)
+		ind.fill:Show()
+		ind.text:SetText("Please wait... " .. pct .. "%")
+		ind.text:SetTextColor(0.9, 0.95, 1.0)
 	elseif status == "miss" then
-		ind.bar:Hide()
-		ind.text:SetText("FRP no response")
-		ind.text:SetTextColor(0.7, 0.45, 0.45)
+		ind.fill:SetWidth(math.max(1, (width - 2) * retry / ns.Const.REQ_COOLDOWN))
+		ind.fill:SetVertexColor(0.7, 0.45, 0.45, 0.3)
+		ind.fill:Show()
+		ind.text:SetText("No response. Try again in " .. retry .. "s")
+		ind.text:SetTextColor(0.85, 0.7, 0.7)
 	else
-		ind.bar:Hide()
-		ind.text:SetText("FRP requesting profile...")
-		ind.text:SetTextColor(0.55, 0.55, 0.55)
+		ind.fill:Hide()
+		ind.text:SetText("Please wait...")
+		ind.text:SetTextColor(0.75, 0.75, 0.75)
 	end
 	ind:Show()
 end

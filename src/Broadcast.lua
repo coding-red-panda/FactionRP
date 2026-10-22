@@ -555,8 +555,9 @@ end
 
 --- Pull status for one subject, for the tooltip indicator: "asking" while
 -- queued or any pre-grant state is in flight, "receiving" plus chunk
--- progress once a serve is granted, "miss" inside the cooldown window
--- after a failed pull. nil means nothing worth showing.
+-- progress once a serve is granted, "miss" plus seconds until the subject
+-- may be requested again inside the cooldown window after a failed pull.
+-- nil means nothing worth showing.
 function Broadcast:reqStatus(guid)
 	local req = self.requests[guid]
 	if req then
@@ -575,8 +576,10 @@ function Broadcast:reqStatus(guid)
 	if self.reqQueued[guid] then
 		return "asking"
 	end
-	if self.reqMissed[guid] then
-		return "miss"
+	local missedAt = self.reqMissed[guid]
+	if missedAt then
+		return "miss", math.max(0, math.ceil(
+			C.REQ_COOLDOWN - (GetTime() - missedAt)))
 	end
 	return nil
 end
