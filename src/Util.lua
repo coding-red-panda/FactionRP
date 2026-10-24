@@ -513,10 +513,7 @@ local lastUiRosterRefresh = 0
 
 --- Kick a roster rebuild immediately, ignoring the memo window (unless a
 -- build is already in flight). Used when the Communities UI opens and on
--- CLUB_MEMBERS_UPDATED — member data is fresh or freshly streaming then,
--- so the scan is cheap.
--- Roster builds still cost real lookups, so UI opens are rate-gated at
--- ROSTER_UI_REFRESH; an in-flight or unserviceable build consumes nothing.
+-- CLUB_MEMBERS_UPDATED.
 function Util.refreshClubRoster()
 	local now = GetTime()
 	if (now - lastUiRosterRefresh) < C.ROSTER_UI_REFRESH then
