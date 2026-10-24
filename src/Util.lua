@@ -300,15 +300,8 @@ local function stepRosterBuild(build)
 			end
 		end
 		if not build.members then
-			-- Members stream on demand per club, not automatically:
-			-- nothing pumps member data until someone calls FocusMembers
-			-- (the Communities UI does so when a club is selected). An
-			-- unready club gets the stream request, then parks for the
-			-- end-of-build revisit instead of scrapping the whole build —
-			-- one laggy club must not veto the rest. A club still unready
-			-- on the revisit is skipped until the next build. The empty
-			-- member list completes the advance through the normal
-			-- member-nil transition below.
+			-- Call FocusMembers so we can get roster lists without
+			-- having to wait for someone to open their Communities panel.
 			local okReady, ready = pcall(C_Club.AreMembersReady, club.id)
 			if okReady and not ready then
 				pcall(C_Club.FocusMembers, club.id)
