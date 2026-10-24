@@ -151,6 +151,7 @@ function Scanner:hoverRequest(guid, unitID)
 	self.hoverGuid = guid
 	self.hoverAt = GetTime()
 	-- NewTimer, not After: only the former documents a cancellable handle.
+	-- A nil handle would silently stack one uncancellable timer per hover.
 	self.hoverTimer = C_Timer.NewTimer(C.MOUSEOVER_REQ_DELAY, function()
 		self.hoverTimer = nil
 		self.hoverGuid = nil
@@ -159,6 +160,9 @@ function Scanner:hoverRequest(guid, unitID)
 			self:xfacRequest(guid, unitID)
 		end
 	end)
+	if not self.hoverTimer then
+		error("FactionRP: C_Timer.NewTimer returned no handle in Scanner:hoverRequest")
+	end
 end
 
 --- Cancel a pending hover REQ, if any.
