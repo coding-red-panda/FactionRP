@@ -300,13 +300,19 @@ local function stepRosterBuild(build)
 			end
 		end
 		if not build.members then
-			-- Members stream in lazily per club; park an unready or secret
-			-- club for the end-of-build revisit instead of scrapping the
-			-- whole build — one laggy club must not veto the rest. A club
-			-- still unready on the revisit is skipped until the next build.
-			-- The empty member list completes the advance through the
-			-- normal member-nil transition below.
+			-- Members stream on demand per club, not automatically:
+			-- nothing pumps member data until someone calls FocusMembers
+			-- (the Communities UI does so when a club is selected). An
+			-- unready club gets the stream request, then parks for the
+			-- end-of-build revisit instead of scrapping the whole build —
+			-- one laggy club must not veto the rest. A club still unready
+			-- on the revisit is skipped until the next build. The empty
+			-- member list completes the advance through the normal
+			-- member-nil transition below.
 			local okReady, ready = pcall(C_Club.AreMembersReady, club.id)
+			if okReady and not ready then
+				pcall(C_Club.FocusMembers, club.id)
+			end
 			local ok, members
 			if okReady and ready then
 				ok, members = pcall(C_Club.GetClubMembers, club.id)
@@ -513,8 +519,9 @@ end
 local lastUiRosterRefresh = 0
 
 --- Kick a roster rebuild immediately, ignoring the memo window (unless a
--- build is already in flight). Used when the Communities UI opens —
--- member data streams in for the UI anyway, so the scan is cheap then.
+-- build is already in flight). Used when the Communities UI opens and on
+-- CLUB_MEMBERS_UPDATED — member data is fresh or freshly streaming then,
+-- so the scan is cheap.
 -- Roster builds still cost real lookups, so UI opens are rate-gated at
 -- ROSTER_UI_REFRESH; an in-flight or unserviceable build consumes nothing.
 function Util.refreshClubRoster()

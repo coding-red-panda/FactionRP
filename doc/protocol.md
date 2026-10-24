@@ -223,9 +223,12 @@ lifecycle as BNet accounts:
   rebuild (rate-gated `ROSTER_UI_REFRESH`=30s) because member data streams
   in for the UI anyway. `startRosterBuild` itself no-ops while a build is
   in flight, so neither entry point can start or queue an overlapping
-  scan. Clubs whose member data has not streamed are parked for one
-  end-of-build revisit and skipped if still unready — a laggy club never
-  vetoes the rest of the roster.
+  scan. Member data streams only on demand: each unready club gets a
+  `C_Club.FocusMembers` request (the same call the Communities UI makes
+  when a club is selected) and is parked for one end-of-build revisit,
+  then skipped if still unready — a laggy club never vetoes the rest of
+  the roster. `CLUB_MEMBERS_UPDATED` kicks an early rebuild through the
+  same rate gate when a requested stream lands.
 
 `REQ` whisper legs reach only proven targets — confirmed BNet peers and
 confirmed whisper relays; the unconfirmed roster is the probe rotation's

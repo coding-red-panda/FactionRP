@@ -148,6 +148,13 @@ function Broadcast:start()
 		end
 	end)
 	hookCommunitiesFrame() -- may already be loaded (opened before login)
+
+	-- The roster build requests member data per club via FocusMembers;
+	-- the stream landing fires CLUB_MEMBERS_UPDATED. Rebuild then rather
+	-- than wait out the defer retry (same ROSTER_UI_REFRESH rate gate).
+	ns.RegisterEvent("CLUB_MEMBERS_UPDATED", function()
+		Util.refreshClubRoster()
+	end)
 end
 
 -- Helpers -------------------------------------------------------------------

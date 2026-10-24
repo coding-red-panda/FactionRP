@@ -1,5 +1,13 @@
 ﻿# FactionRP Changelog
 
+## Unreleased
+
+### Fixes
+- Club roster never built unless the Communities panel had been opened:
+  member data only streams on `C_Club.FocusMembers`, which nothing called.
+  Builds now request the stream per unready club and `CLUB_MEMBERS_UPDATED`
+  triggers an early rebuild when it lands.
+
 ## 0.4.3
 
 - Fixed TRP3 version display
