@@ -102,6 +102,7 @@ C.REQ_DATA_STALL = 25      -- granted serve dies if no chunk lands this long
 C.SERVE_REFRESH_TTL = 3600 -- held copies this fresh serve without a refresh query
 C.REQ_COOLDOWN = 60        -- min gap between requests for the same subject
 C.REQ_BACKLOG_CAP = 8      -- queued subjects awaiting their turn
+C.MOUSEOVER_REQ_DELAY = 3  -- hover this long on an xfac unit before a REQ
 C.REQ_SENDER_INTERVAL = 2  -- min gap between inbound unicast REQs per sender
 C.FANOUT_INFLIGHT_MAX = 3 -- initiated sends (HELLO probes) allowed queued
 C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
