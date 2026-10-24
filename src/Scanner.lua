@@ -31,6 +31,9 @@ function Scanner:init()
 	-- update-event feedback (see header comment) to a no-op.
 	-- [unitID] = contentVersion.
 	self.lastSharedVersion = {}
+
+	-- Pending delayed xfac mouseover REQ, or nil.
+	self.hoverTimer = nil
 end
 
 function Scanner:start()
@@ -78,6 +81,11 @@ end
 
 --- Handle a mouseover/target change.
 function Scanner:onSelect(unit)
+	-- Any mouseover change kills a pending hover REQ, even one we can't
+	-- resolve below.
+	if unit == "mouseover" then
+		self:cancelHover()
+	end
 	if not ns.Util.canWeUse(unit) then
 		return
 	end
@@ -89,24 +97,17 @@ function Scanner:onSelect(unit)
 		return -- non-players and ourselves are handled elsewhere
 	end
 	-- Opposite-faction selection is the pull trigger; requestProfile
-	-- dedupes and rate-limits.
+	-- dedupes and rate-limits. Mouseover delays so a passing cursor
+	-- costs nothing.
 	if ns.Util.isOppositeFaction(unit) then
 		local adapter = ns.getAvailableAdapter()
 		local unitID = adapter and adapter:getUnitID(unit)
 		local guid = UnitGUID(unit)
 		if ns.Util.canWeUse(unitID, guid) and guid then
-			-- Shared-club subjects are whisper-reachable and TRP3 already
-			-- sends its own vernum query on mouseover/target.
-			if adapter and adapter.name == C.SOURCE.TRP3
-				and (ns.Util.isCommunityClubMember(unitID)
-					or ns.Util.isGuildClubMember(unitID))
-			then
-				if ns.debugPeer then
-					ns.debugPeer("req " .. (unitID or tostring(guid))
-					.. " skipped (shared club, native pull)")
-				end
+			if unit == "mouseover" then
+				self:hoverRequest(guid, unitID)
 			else
-				ns.broadcast:requestProfile(guid, unitID)
+				self:xfacRequest(guid, unitID)
 			end
 		end
 		return
@@ -122,6 +123,60 @@ function Scanner:onSelect(unit)
 	end
 	self.selected[unitID] = guid
 	self:share(adapter, unitID, guid)
+end
+
+--- Pull an xfac profile now. Shared-club subjects are whisper-reachable
+-- and TRP3 already sends its own vernum query on selection, so we skip
+-- our pull for them.
+function Scanner:xfacRequest(guid, unitID)
+	local adapter = ns.getAvailableAdapter()
+	if adapter and adapter.name == C.SOURCE.TRP3
+		and (ns.Util.isCommunityClubMember(unitID)
+			or ns.Util.isGuildClubMember(unitID))
+	then
+		if ns.debugPeer then
+			ns.debugPeer("req " .. (unitID or tostring(guid))
+				.. " skipped (shared club, native pull)")
+		end
+		return
+	end
+	ns.broadcast:requestProfile(guid, unitID)
+end
+
+--- REQ an xfac mouseover only if the cursor is still on them after
+-- MOUSEOVER_REQ_DELAY. The GUID check backs up cancelHover for cases
+-- where no mouseover-change event fires.
+function Scanner:hoverRequest(guid, unitID)
+	self:cancelHover()
+	self.hoverGuid = guid
+	self.hoverAt = GetTime()
+	-- NewTimer, not After: only the former documents a cancellable handle.
+	self.hoverTimer = C_Timer.NewTimer(C.MOUSEOVER_REQ_DELAY, function()
+		self.hoverTimer = nil
+		self.hoverGuid = nil
+		local cur = UnitGUID("mouseover")
+		if ns.Util.canWeUse(cur) and cur == guid then
+			self:xfacRequest(guid, unitID)
+		end
+	end)
+end
+
+--- Cancel a pending hover REQ, if any.
+function Scanner:cancelHover()
+	if self.hoverTimer then
+		self.hoverTimer:Cancel()
+		self.hoverTimer = nil
+	end
+	self.hoverGuid = nil
+end
+
+--- Fraction (0..1) of MOUSEOVER_REQ_DELAY elapsed while hovering `guid`,
+-- or nil when no hover REQ is pending for them. Drives the tooltip
+-- indicator's countdown fill.
+function Scanner:hoverProgress(guid)
+	if guid and self.hoverTimer and self.hoverGuid == guid then
+		return (GetTime() - self.hoverAt) / C.MOUSEOVER_REQ_DELAY
+	end
 end
 
 --- Handle an asynchronous profile update from an adapter.
