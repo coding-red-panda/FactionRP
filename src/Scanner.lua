@@ -86,6 +86,9 @@ function Scanner:onSelect(unit)
 	if unit == "mouseover" then
 		self:cancelHover()
 	end
+	if ns.Util.commsRestricted() then
+		return -- no unit reads at all under lockdown
+	end
 	if not ns.Util.canWeUse(unit) then
 		return
 	end

@@ -30,6 +30,9 @@ end
 
 --- If `unit` is an opposite-faction player we have cached, inject the profile.
 function Tooltip:tryInject(unit)
+	if ns.Util.commsRestricted() then
+		return -- no unit reads at all under lockdown
+	end
 	-- During combat (e.g. in dungeons) the unit token can be a "secret"
 	-- value. Passing it to UnitIsPlayer and friends during our (tainted)
 	-- execution errors, so bail out immediately.
@@ -130,7 +133,8 @@ function Tooltip:updateIndicator()
 		return
 	end
 	local status, got, total
-	local unit = select(2, GameTooltip:GetUnit())
+	local unit = not ns.Util.commsRestricted()
+		and select(2, GameTooltip:GetUnit())
 	if unit and ns.Util.canWeUse(unit) then
 		local isPlayer = UnitIsPlayer(unit)
 		if ns.Util.canWeUse(isPlayer) and isPlayer
