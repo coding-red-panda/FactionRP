@@ -1,12 +1,9 @@
 ﻿# FactionRP Changelog
 
-## Unreleased
+## 0.4.4
 
 ### Fixes
-- Club roster never built unless the Communities panel had been opened:
-  member data only streams on `C_Club.FocusMembers`, which nothing called.
-  Builds now request the stream per unready club and `CLUB_MEMBERS_UPDATED`
-  triggers an early rebuild when it lands.
+- Club roster was never built unless the Communities panel had been opened. It is now fixed.
 
 ## 0.4.3
 
