@@ -139,6 +139,17 @@ local function printFlags()
 end
 
 local function setFlag(key, on)
+	-- write every flag when toggling `all`.
+	if key == "all" then
+		for _, cat in ipairs(C.DEBUG_CATEGORIES) do
+			ns.db.debug[cat.key] = on
+		end
+	elseif ns.db.debug.all then
+		for _, cat in ipairs(C.DEBUG_CATEGORIES) do
+			ns.db.debug[cat.key] = true
+		end
+		ns.db.debug.all = false
+	end
 	ns.db.debug[key] = on
 	ns.refreshDebugHooks()
 	ns.Print(("debug |cff66ccff%s|r %s"):format(key, flagText(ns.db.debug[key])))
