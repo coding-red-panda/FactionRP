@@ -4,6 +4,7 @@
 
 ### Fixes
 - Club roster was never built unless the Communities panel had been opened. It is now fixed.
+- FRP now has a visible delay before it requests profiles. Targeting a person will still issue a request immediately.
 
 ## 0.4.3
 
