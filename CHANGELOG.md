@@ -2,6 +2,10 @@
 
 ## 0.4.5
 
+### Changed
+- On a dense mesh (more than 10 channel members), the fallback profile REQ is whispered to 3 random channel members instead of broadcast to everyone. Holders keep the ACK/OK arbitration, so only the best offer serves.
+- Unicast serves now wait for the requester's OK grant like channel serves do. Denied or obsolete offers expire instead of costing a data leg.
+
 ### Fixes
 - Sometimes a transition would cause realmnames to disappear from character data. If realmname is missing or unresolvable, drop relay probe.
 
