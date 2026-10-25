@@ -36,6 +36,9 @@ function Comms:init()
 	self.lastChunkFrom = {}
 	-- Member count of the comms channel, pushed by CHANNEL_COUNT_UPDATE.
 	self.meshSize = 0
+	-- Loading-screen flag: realm names resolve unreliably mid-transition
+	-- (issue #26), so roster/name work pauses while it is up.
+	self.loading = false
 	self.restricted = false -- edge flag: partials pruned once per restriction
 	-- Scratch transport contexts, mutated per inbound event. Valid only
 	-- for the duration of the synchronous handler call; do not retain.
@@ -75,12 +78,22 @@ function Comms:start()
 	end)
 	self:joinChannel()
 
-	-- The server pushes member counts for every joined channel; ours is
-	-- the mesh size Broadcast scales the serve cooldown on.
-	ns.RegisterEvent("CHANNEL_COUNT_UPDATE", function(_, displayIndex, count)
+	-- Member counts feed meshSize, which scales the serve cooldown and
+	-- gates REQ sampling. Roster updates carry the same count and signal
+	-- that member data (sampled-REQ targets) has streamed in.
+	local function onChannelCount(_, displayIndex, count)
 		if displayIndex == self:channelIndex() then
-			self.meshSize = count or 0
+			self.meshSize = count or self.meshSize
 		end
+	end
+	ns.RegisterEvent("CHANNEL_COUNT_UPDATE", onChannelCount)
+	ns.RegisterEvent("CHANNEL_ROSTER_UPDATE", onChannelCount)
+
+	ns.RegisterEvent("LOADING_SCREEN_ENABLED", function()
+		self.loading = true
+	end)
+	ns.RegisterEvent("LOADING_SCREEN_DISABLED", function()
+		self.loading = false
 	end)
 
 	-- Every presence event refreshes the account memo, but only an account
@@ -195,6 +208,27 @@ function Comms:meshCount()
 		return 0
 	end
 	return self.meshSize
+end
+
+--- Member names of the comms channel for REQ sampling, or nil while not
+-- joined. May be partial while the roster streams.
+function Comms:meshRoster()
+	if self.loading then
+		return nil -- member names are unreliable mid-transition
+	end
+	local idx = self:channelIndex()
+	if not idx then
+		return nil
+	end
+	local names, n = {}, 0
+	for i = 1, self.meshSize do
+		local name = C_ChatInfo.GetChannelRosterInfo(idx, i)
+		if name then
+			n = n + 1
+			names[n] = name
+		end
+	end
+	return names
 end
 
 -- Register an event so we can update our channel on reorder over the pipe.

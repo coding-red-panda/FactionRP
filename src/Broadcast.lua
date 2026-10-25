@@ -2,8 +2,8 @@
 --
 -- The pull-exchange engine. Requests are serial: one subject at a time,
 -- REQ'd to a single contact, falling back to the faction channel on
--- silence. The channel path keeps REQ -> ACK -> OK -> data arbitration
--- since many holders can hear a broadcast.
+-- silence. Every leg keeps REQ -> ACK -> OK -> data arbitration: only a
+-- granted server serves, so denied or obsolete offers cost no data leg.
 --
 -- SENDER vs SUBJECT: SENDER is the immediate sender, used for loop
 -- avoidance. SUBJECT is the profile owner.
@@ -57,12 +57,13 @@ function Broadcast:init()
 	--   reqMissed[guid] = last failed-pull time (tooltip "no response")
 	--   reqQueued[guid] + reqQueueOrder: deduped FIFO of waiting subjects
 	--   contactIdx: round-robin contact cursor
-	--   pendingServes[key] = { subject, unitID, medium, target, at }
-	--     key = "<peer>:<guid>"; channel-path grants awaiting OK
+	--   pendingServes[key] = { subject, unitID, medium, target, at, mesh, ok }
+	--     key = "<peer>:<guid>"; ACK'd serves awaiting the requester's OK
+	--     ok = grant already received while a serve-side refresh pends
 	--   freshenPending[key] = { mode, subject, unitID, medium, target,
 	--                           reqAt, reqPid, reqCvh }
 	--     mode "ack": channel REQ whose ACK waits on an RP-AddOn refresh
-	--     mode "serve": unicast REQ whose data leg waits on the refresh
+	--     mode "serve": unicast REQ whose serve waits on refresh and OK
 	--   reqSenderAt[senderKey] = last inbound unicast REQ time (throttle)
 	--   chanReqSenderAt[senderName] = last inbound channel REQ time
 	self.requests = {}
@@ -337,8 +338,8 @@ end
 
 --- REQ argument: subject guid plus our unitID and held freshness
 -- (as-of stamp, profileID, content-version hash) so stale holders can
--- suppress themselves.
-local function reqArg(guid, unitID)
+-- suppress themselves. `mesh` appends the sampled-mesh marker.
+local function reqArg(guid, unitID, mesh)
 	local wire = unitID and Util.fullUnitName(unitID)
 	if not wire then
 		return guid
@@ -358,7 +359,8 @@ local function reqArg(guid, unitID)
 			cvh = rec.cv and Util.hashStr(rec.cv) or "-"
 		end
 	end
-	return string.format("%s %s %d %s %s", guid, wire, floor, pid, cvh)
+	return string.format("%s %s %d %s %s%s", guid, wire, floor, pid, cvh,
+		mesh and (" " .. C.REQ_MESH_FLAG) or "")
 end
 
 --- Whether the register's held copy is fresh enough to serve without a
@@ -829,33 +831,102 @@ function Broadcast:publishHeld(guid, unitID)
 	end
 end
 
---- Send the REQ on the faction channel when the self-rate gate is open;
--- promotes `req` from chan-wait to broadcast. A missing channel index
--- (join still pending) or queue-full leg just stays parked.
+--- Up to REQ_MESH_SAMPLE_SIZE random channel members for a sampled mesh
+-- REQ, or nil while the roster has no usable names.
+function Broadcast:meshSample()
+	local comms = ns.comms
+	local roster = comms:meshRoster()
+	if not roster then
+		return nil
+	end
+	local own = comms.ownName
+	local names, n = {}, 0
+	for i = 1, #roster do
+		local full = Util.fullUnitName(roster[i])
+		-- A realm that fails to resolve can never be whispered to.
+		if full and full:sub(-1) ~= "-" then
+			local key = Util.normalizeUnitName(full)
+			if key and key ~= own then
+				n = n + 1
+				names[n] = full
+			end
+		end
+	end
+	if n == 0 then
+		return nil
+	end
+	-- Partial Fisher-Yates: the first picks land in order.
+	local targets = {}
+	for k = 1, math.min(C.REQ_MESH_SAMPLE_SIZE, n) do
+		local j = math.random(k, n)
+		names[k], names[j] = names[j], names[k]
+		targets[k] = names[k]
+	end
+	return targets
+end
+
+--- Whisper a flagged mesh REQ to a random member sample.
+-- @return number Legs actually queued (0 = stay parked).
+function Broadcast:sendSampledReq(guid, req)
+	local targets = self:meshSample()
+	if not targets then
+		return 0
+	end
+	local comms = ns.comms
+	local chunks = self:buildCtl("REQ", reqArg(guid, req.unitID, true))
+	local legs = 0
+	for _, name in ipairs(targets) do
+		if comms:sendChunksAddon(chunks, "WHISPER", name) then
+			legs = legs + 1
+			self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
+		end
+	end
+	if legs > 0 then
+		if ns.statsLeg then
+			ns.statsLeg("req_mesh", legs)
+		end
+		if ns.debugPeer then
+			ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+				.. " -> mesh sample x" .. legs)
+		end
+	end
+	return legs
+end
+
+--- Promote `req` from chan-wait to broadcast when the self-rate gate is
+-- open: a channel REQ on thin meshes, a flagged whisper sample on dense
+-- ones. Missing channel/roster or a full queue stays parked.
 function Broadcast:pumpChannelReq(guid, req, now)
 	if (now - self.lastChannelReqAt) < C.REQ_CHANNEL_INTERVAL then
 		return
 	end
 	local comms = ns.comms
-	local idx = comms:channelIndex()
-	if not idx
-		or not comms:sendChunksAddon(
-			self:buildCtl("REQ", reqArg(guid, req.unitID)), "CHANNEL", idx)
-	then
+	local legs = 0
+	if comms:meshCount() > C.REQ_MESH_SAMPLE_AT then
+		legs = self:sendSampledReq(guid, req)
+	else
+		local idx = comms:channelIndex()
+		if idx and comms:sendChunksAddon(
+				self:buildCtl("REQ", reqArg(guid, req.unitID)), "CHANNEL", idx)
+		then
+			legs = 1
+			self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
+			if ns.statsLeg then
+				ns.statsLeg("req_chan", 1)
+			end
+			if ns.debugPeer then
+				ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
+					.. " -> channel")
+			end
+		end
+	end
+	if legs == 0 then
 		return
 	end
 	self.lastChannelReqAt = now
 	req.state = "broadcast"
 	req.at = now
 	req.acks = {}
-	self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
-	if ns.statsLeg then
-		ns.statsLeg("req_chan", 1)
-	end
-	if ns.debugPeer then
-		ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
-			.. " -> channel")
-	end
 end
 
 --- Move a failed request onto the channel leg, once per request and for
@@ -959,10 +1030,12 @@ function Broadcast:serveData(serve)
 		return -- leg dropped for capacity: nothing queued, nothing to mute
 	end
 	-- Track the drain: a serve's chunks enqueue contiguously, so the tail
-	-- position is in flight until the head passes it. Mesh (channel-path)
-	-- serves arm the post-serve cooldown on drain; self-serves are exempt.
+	-- position is in flight until the head passes it. Mesh (channel-path
+	-- and sampled-flagged) serves arm the post-serve cooldown on drain.
+	-- Self-serves are exempt.
 	self.serveDrainPos = ns.comms.queue.tail
-	if serve.medium ~= "WHISPER" and serve.medium ~= "BNET"
+	if (serve.mesh
+			or (serve.medium ~= "WHISPER" and serve.medium ~= "BNET"))
 		and serve.subject ~= self:senderGUID()
 	then
 		self.serveDrainMesh = true
@@ -1106,7 +1179,7 @@ end
 -- deferred flush so the advertised claim is evaluated at decision time.
 -- @return boolean Whether an ACK was sent.
 function Broadcast:tryAck(subject, unitID, adapter, medium, target,
-						  reqAt, reqPid, reqCvh, selfReq)
+						  reqAt, reqPid, reqCvh, selfReq, mesh)
 	local now = GetTime()
 	local peer = ns.debugPeer
 	local leg = ns.statsLeg
@@ -1139,7 +1212,7 @@ function Broadcast:tryAck(subject, unitID, adapter, medium, target,
 	end
 	self.pendingServes[serveKey(target, subject)] = {
 		subject = subject, unitID = unitID,
-		medium = medium, target = target, at = now,
+		medium = medium, target = target, at = now, mesh = mesh,
 	}
 	if leg then
 		leg("ack", 1)
@@ -1150,15 +1223,23 @@ function Broadcast:tryAck(subject, unitID, adapter, medium, target,
 	return true
 end
 
---- Answer a unicast REQ. One peer asked, so there is no race to arbitrate:
--- ACK marks the requester's data window, then we serve as soon as the
--- RP-AddOn refresh lands or the deferral lapses. Suppressed serves and
--- unreachable sends stay silent; the requester advances on its timeout.
+--- Answer a unicast REQ. The ACK goes out immediately (it marks the
+-- requester's data window), then a pending serve waits for the OK grant
+-- like the channel path: denied offers and serves obsoleted mid-flight
+-- expire instead of costing a data leg.
 function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 								reqAt, reqPid, reqCvh, selfReq)
 	local suppressed, offerAt = self:suppressable(
 		subject, unitID, adapter, reqAt, reqPid, reqCvh, selfReq)
 	if suppressed then
+		return
+	end
+	-- Over the cap we do not ACK; the requester times out like a miss.
+	local pending = 0
+	for _ in pairs(self.pendingServes) do
+		pending = pending + 1
+	end
+	if pending >= C.SERVE_PENDING_CAP then
 		return
 	end
 	local meta = adapter.profileMeta and adapter:profileMeta(unitID)
@@ -1169,6 +1250,11 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 	) then
 		return
 	end
+	local key = serveKey(target, subject)
+	self.pendingServes[key] = {
+		subject = subject, unitID = unitID,
+		medium = medium, target = target, at = GetTime(),
+	}
 	if ns.statsLeg then
 		ns.statsLeg("ack", 1)
 	end
@@ -1185,7 +1271,6 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 		and not serveFreshEnough(adapter, unitID, reqAt)
 		and adapter:refreshQuery(unitID)
 	then
-		local key = serveKey(target, subject)
 		self.freshenPending[key] = {
 			mode = "serve", subject = subject, unitID = unitID,
 			medium = medium, target = target,
@@ -1197,11 +1282,6 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 			ns.debugPeer("freshen " .. Util.nameForGuid(subject)
 				.. " (defer serve -> " .. tostring(target) .. ")")
 		end
-	else
-		self:serveData({
-			subject = subject, unitID = unitID,
-			medium = medium, target = target,
-		})
 	end
 end
 
@@ -1227,10 +1307,17 @@ function Broadcast:flushFreshen(key)
 		if adapter.isDefaultUnit and adapter:isDefaultUnit(entry.unitID) then
 			return
 		end
-		self:serveData(entry)
+		-- Refresh done; serve only when the grant already landed. Without
+		-- an OK the pendingServe keeps waiting for one.
+		local serve = self.pendingServes[key]
+		if serve and serve.ok then
+			self.pendingServes[key] = nil
+			self:serveData(serve)
+		end
 	else
 		self:tryAck(entry.subject, entry.unitID, adapter, entry.medium,
-			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false)
+			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false,
+			entry.mesh)
 	end
 end
 
@@ -1249,8 +1336,8 @@ end
 function Broadcast:onControl(msg, context)
 	local comms = ns.comms
 	local now = GetTime()
-	local verb, arg, arg2, arg3, arg4, arg5 =
-		msg.data:match("^FRP1 (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
+	local verb, arg, arg2, arg3, arg4, arg5, arg6 =
+		msg.data:match("^FRP1 (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
 	if not verb then
 		return
 	end
@@ -1306,7 +1393,12 @@ function Broadcast:onControl(msg, context)
 			end
 		end
 	elseif verb == "REQ" then
-		if context.medium ~= "WHISPER" and context.medium ~= "BNET" then
+		-- A REQ flagged with the mesh marker is a broadcast delivered by
+		-- whisper, so it takes the channel path on any medium.
+		local meshReq = arg6 == C.REQ_MESH_FLAG
+		local wideReq = meshReq
+			or (context.medium ~= "WHISPER" and context.medium ~= "BNET")
+		if wideReq then
 			-- Channel REQs are throttled per requester before any work;
 			-- legit clients self-rate at the same interval, so this only
 			-- bounds spam (and old fanout-era builds).
@@ -1328,7 +1420,7 @@ function Broadcast:onControl(msg, context)
 		end
 		local adapter = ns.getAvailableAdapter()
 		local reqAt = tonumber(arg3) or 0
-		if context.medium ~= "WHISPER" and context.medium ~= "BNET" then
+		if wideReq then
 			-- Broadcast path: many holders may hear it, so ACK/OK
 			-- arbitration and the serve cooldown still apply.
 			if not selfReq and self:serveThrottled(now) then
@@ -1355,6 +1447,7 @@ function Broadcast:onControl(msg, context)
 						subject = arg, unitID = unitID,
 						medium = context.medium, target = target,
 						reqAt = reqAt, reqPid = arg4, reqCvh = arg5,
+						mesh = meshReq,
 					}
 					C_Timer.After(C.REQ_FRESHEN_DELAY, function()
 						self:flushFreshen(key)
@@ -1367,7 +1460,7 @@ function Broadcast:onControl(msg, context)
 				end
 			end
 			self:tryAck(arg, unitID, adapter, context.medium, target,
-				reqAt, arg4, arg5, selfReq)
+				reqAt, arg4, arg5, selfReq, meshReq)
 			return
 		end
 		-- Unicast path: per-sender throttle, then serve or silence.
@@ -1401,7 +1494,7 @@ function Broadcast:onControl(msg, context)
 			req.state = "awaiting-data"
 			req.at = now
 			req.winner = { medium = context.medium, target = target }
-			-- Compat: earlier proto-5 servers gate the serve on OK.
+			-- The grant the server's pendingServe waits on.
 			self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
 			if leg then
 				leg("ok", 1)
@@ -1446,8 +1539,14 @@ function Broadcast:onControl(msg, context)
 		local key = serveKey(target, arg)
 		local serve = self.pendingServes[key]
 		if serve then
-			self.pendingServes[key] = nil
-			self:serveData(serve)
+			local fp = self.freshenPending[key]
+			if fp and fp.mode == "serve" then
+				-- Serve-side refresh still pending; the flush serves it.
+				serve.ok = true
+			else
+				self.pendingServes[key] = nil
+				self:serveData(serve)
+			end
 		end
 	elseif verb == "NOK" then
 		self.pendingServes[serveKey(target, arg)] = nil

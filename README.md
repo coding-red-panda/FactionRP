@@ -85,14 +85,18 @@ serves at most one request per cycle, then the cursor wraps.
    held for the guid (local cache, client player-info, club roster, and
    the wire-asserted unitID) must agree — conflicting or absent claims
    stay silent. Silence is the only rejection; there is no `NOK` here.
-3. The contact refreshes its held copy through the RP AddOn's own headless
-   query, then sends the normal data envelope directly to the requester.
-   The requester waits up to `REQ_DATA_TIMEOUT` (120s) for it; other
-   subjects queue meanwhile.
-4. **No channel fallback** — no reply within `REQ_CONTACT_TIMEOUT` (4s), or
-   no contacts at all: the request is dropped. A channel answer could only
-   ever be a faction-mate's cached copy; fresh data lives at the end of a
-   contact chain. Broadcast `REQ`s from older builds are still answered.
+3. **OK \<guid\>** — the requester grants the offer. The server refreshes
+   its held copy through the RP AddOn's own headless query when stale,
+   then sends the normal data envelope directly to the requester, who
+   waits up to `REQ_DATA_TIMEOUT` (120s) for it; other subjects queue
+   meanwhile. Ungranted offers just expire — denied or obsolete offers
+   never cost a data leg.
+4. **Channel fallback** — no reply within `REQ_CONTACT_TIMEOUT` (4s), or
+   no contacts at all: a *stranger* subject gets one channel attempt,
+   skipped when it shares a club or group with us or is a BNet friend —
+   those relations already provide a pull path. The mesh `REQ` collects
+   whispered `ACK` offers for `REQ_CHANNEL_WINDOW` (3s), then `OK`s the
+   best freshness claim; every other offer just expires.
 
 A pull is also skipped entirely for subjects sharing one of our clubs
 (community or guild): TRP3 already sends its own vernum query on
@@ -107,8 +111,12 @@ gated by a per-requester throttle and a drain-aware serve cooldown: we
 answer no broadcasts while a serve's chunks are queued, and stay muted
 for 10–60s after a mesh serve's last chunk leaves — scaled by the channel
 member count so a thin mesh keeps serving while a dense one shares the
-load. Requesters' timeouts pace their retries; no "busy" wire traffic is
-spent. Requests for our *own* profile bypass the cooldown.
+load. On a dense mesh (more than `REQ_MESH_SAMPLE_AT` members) the
+fallback also whispers its REQ to `REQ_MESH_SAMPLE_SIZE` random channel
+members instead of broadcasting, so every holder does not answer at
+once — the flagged REQ keeps the ACK/OK arbitration and only the best
+offer serves. Requesters' timeouts pace their retries; no "busy" wire
+traffic is spent. Requests for our *own* profile bypass the cooldown.
 
 ### Message Structure
 

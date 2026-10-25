@@ -33,8 +33,8 @@ those whisper-reachable targets. BNet works between any friends and ignores
 faction entirely.
 
 **Every leg is a single hop.** The requester unicasts `REQ` to one contact
-at a time; a recipient that can serve replies `ACK` and sends the profile
-*directly* to the requester. "Relay" in this document means a reachable
+at a time; a recipient that can serve replies `ACK` and, once granted
+with `OK`, sends the profile *directly* to the requester. "Relay" in this document means a reachable
 cross-faction *endpoint* — never a forwarder: no client relays or re-sends
 anything on behalf of another. `REQ`s are broadcast only as a fallback,
 once per request and only for stranger subjects (see "The pull exchange");
@@ -131,7 +131,7 @@ decode `data` as a profile, and drop it harmlessly.
 | `HELLO` | addonVer            | BNet probe — "I run FactionRP"              |
 | `HI`    | addonVer            | handshake reply                             |
 | `VER`   | addonVer            | one-time version broadcast on login (see below) |
-| `REQ`   | subjectGuid [unitID] [seenAt] [pid] [cvHash] | pull request — "who can serve this profile?" |
+| `REQ`   | subjectGuid [unitID] [seenAt] [pid] [cvHash] [m] | pull request — "who can serve this profile?" |
 | `ACK`   | subjectGuid [seenAt]| "I can serve it, as of `seenAt`"            |
 | `OK`    | subjectGuid         | grant — "you may send it"                   |
 | `NOK`   | subjectGuid         | cancel — winner mid-send, data landed elsewhere |
@@ -146,6 +146,11 @@ decode `data` as a profile, and drop it harmlessly.
   accepted for the subject (see *Freshness floor* below).
 - `pid` — the profileID the requester's copy is bound to, or `-`.
 - `cvHash` — an 8-hex-char hash of the requester's contentVersion, or `-`.
+- `m` — the sampled-mesh marker: the `REQ` was whispered to a random
+  channel member in place of a broadcast (see *mesh sampling* below). The
+  recipient answers with channel arbitration — `ACK`, then serve only on
+  `OK` — instead of serving a whispered `REQ` at once. Servers too old
+  to parse the field just serve immediately, which still works.
 
 `seenAt`/`pid`/`cvHash` are only sent when `unitID` is present. A server
 whose own claim (`seenAt`) is no newer than `seenAt` *and* whose held
@@ -272,14 +277,17 @@ first.
 ```
 requester                                one contact
     │  REQ <guid> [unitID] [seenAt] [pid] [cvHash] ─► (direct whisper/BNet)
-    │                                          └ can serve? → ACK + data
+    │                                          └ can serve? → ACK
     │                                            cannot?  → silence
     │  ◄── ACK <guid> <seenAt> [dirSeenAt] ── opens the data window
+    │  ── OK <guid> ──► grants the pendingServe
     │  ◄── data envelope ── holder serves direct
 ```
 
 Silence is the only rejection — there is no `NOK` on the unicast path.
-After the ACK the requester waits for the profile; the window is bounded
+After the ACK the requester grants the offer with `OK` and waits for the
+profile; an ungranted pendingServe expires via `SERVE_TIMEOUT`. The window
+is bounded
 by `REQ_DATA_TIMEOUT` (120s, covering TRP3's own 60s query lifetime plus
 margin) and by a stall watch — no chunk from the grantee for
 `REQ_DATA_STALL` (25s) ends it early.
@@ -289,8 +297,16 @@ a silent contact, or a serve that stalled or expired — the subject gets
 one channel attempt *if it is a stranger*: the fallback is skipped when
 the subject shares a guild or community club with us, is a BNet friend,
 or sits in our group, because those relations already provide a native
-or direct pull path. The fallback broadcasts a single `REQ` on
-`frp<N>comms`, collects whispered `ACK` offers for
+or direct pull path. On a thin mesh the fallback broadcasts a single
+`REQ` on `frp<N>comms`; on a mesh larger than `REQ_MESH_SAMPLE_AT` (10)
+members it instead whispers the `REQ` — flagged with the `m` marker —
+to `REQ_MESH_SAMPLE_SIZE` (3) random channel members, because a dense
+mesh would have every holder `ACK` at once. The sample is drawn from
+`C_ChatInfo.GetChannelRosterInfo` (kept current by
+`CHANNEL_COUNT_UPDATE`/`CHANNEL_ROSTER_UPDATE`); if the roster has not
+streamed yet the request simply stays parked in `chan-wait` rather than
+spending a full broadcast. Either way the requester collects whispered
+`ACK` offers for
 `REQ_CHANNEL_WINDOW` (3s), then `OK`s the offer with the best score —
 `max(seenAt claim, dirSeenAt)` where `dirSeenAt` is the server's TRP3
 directory last-seen stamp (`profile.time`), a second freshness signal
@@ -367,9 +383,9 @@ rules (they just hit the per-requester channel throttle harder).
   seen within `SERVE_REFRESH_TTL` (1h), or newer than the requester's
   `seenAt` claim by more than `FRESHNESS_SKEW`. On the unicast
   path the `ACK` goes out immediately (it only marks the requester's data
-  window); the serve itself waits for updated profile data
-  (`REGISTER_DATA_UPDATED`) or `REQ_FRESHEN_DELAY` (2s), so the payload
-  carries post-refresh content. On the channel path the whole `ACK`
+  window); the serve waits for the `OK` grant and, while a freshen is in
+  flight, for updated profile data (`REGISTER_DATA_UPDATED`) or
+  `REQ_FRESHEN_DELAY` (2s), so the payload carries post-refresh content. On the channel path the whole `ACK`
   decision defers the same way, since the claim it advertises must reflect
   the refreshed copy. Deferred replies are bounded (`REQ_FRESHEN_MAX`=16,
   overflow answers immediately) and are never self-requests — we are the
@@ -378,7 +394,8 @@ rules (they just hit the per-requester channel throttle harder).
   know of but hold no profile for is never queried — `canServe` gates the
   whole branch.
 - Unicast REQs are throttled per sender (`REQ_SENDER_INTERVAL`=2s).
-  Channel REQs are throttled per requester at
+  Channel REQs — including `m`-flagged REQs that arrive by whisper —
+  are throttled per requester at
   `REQ_CHANNEL_SENDER_INTERVAL` (10s) — the same pace clients self-rate
   their own broadcasts at — and bounded by the serve cooldown below, since
   a broadcast can reach many holders at once.
@@ -398,7 +415,7 @@ rules (they just hit the per-requester channel throttle harder).
   we are the authority on ourselves.
 - Misses stay silent — a reply per non-holder costs more than the
   requester's timeout.
-- On the channel path an `ACK <guid> <seenAt> <dirSeenAt>` records a
+- Every `ACK <guid> <seenAt> <dirSeenAt>` records a
   *pending serve* (`SERVE_PENDING_CAP`=16, expires at `SERVE_TIMEOUT`=30s).
   `dirSeenAt` is our TRP3 directory last-seen stamp (`profile.time`) for
   the subject — a second freshness signal the requester weighs alongside

@@ -52,10 +52,14 @@ C.SEND_QUEUE_CAP = 384
 -- carries "FRP1 <verb> <arg>". Verbs:
 --   HELLO <version>  BNet peer probe ("I run FactionRP")
 --   HI <version>     handshake reply
---   REQ <subjectGuid> [unitID] [seenAt] [profileID] [cvHash]
+--   REQ <subjectGuid> [unitID] [seenAt] [profileID] [cvHash] [m]
 --      pull-exchange request: "who has this profile?" unitID lets a server
 --      answer straight from the register; seenAt/profileID/cvHash advertise
 --      what the requester already holds so stale holders skip their ACK.
+--      A trailing "m" marks a sampled mesh REQ (see mesh sampling below):
+--      the recipient runs channel REQ arbitration (ACK, then serve only
+--      on OK) instead of serving a whispered REQ at once. Servers too
+--      old to parse arg6 just serve immediately, which still works.
 --   ACK <subjectGuid> <seenAt> [dirSeenAt]
 --      "I can serve it, as of <seenAt>"; dirSeenAt is the server's TRP3
 --      directory last-seen stamp (profile.time), a second freshness signal
@@ -119,6 +123,13 @@ C.REQ_CHANNEL_INTERVAL = 10       -- min gap between our channel REQs
 C.REQ_CHANNEL_WAIT_MAX = 30       -- chan-wait gives up after this
 C.REQ_CHANNEL_SENDER_INTERVAL = 10 -- per-requester inbound channel REQ throttle
 C.REQ_CHANNEL_ACK_CAP = 8         -- offers recorded per broadcast
+
+-- Mesh sampling. Above REQ_MESH_SAMPLE_AT members the channel leg
+-- whispers its REQ (flagged REQ_MESH_FLAG) to REQ_MESH_SAMPLE_SIZE
+-- random members instead of broadcasting, bounding the ACK barrage.
+C.REQ_MESH_SAMPLE_AT = 10   -- mesh size above which channel REQs sample
+C.REQ_MESH_SAMPLE_SIZE = 3  -- random members whispered per sampled REQ
+C.REQ_MESH_FLAG = "m"       -- REQ arg6 marker: sampled mesh request
 
 -- Held-copy suppression: after we accept a profile, local requests for the
 -- subject are suppressed for REQ_HELD_TTL while the RP AddOn's register

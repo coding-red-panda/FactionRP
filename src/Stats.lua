@@ -61,7 +61,7 @@ local function resetStore()
 	-- Per-medium counters keyed by channel kind ("CHANNEL", "BNET", ...).
 	stats.mediumsIn = {}  -- [medium] = { msgs, bytes, chunks }
 	stats.mediumsOut = {}
-	stats.legs = {}       -- [leg] = sends ("channel","group","bnet","community","guild","pinned","req","ack","ok","nok","hi","serve","bnet_probe")
+	stats.legs = {}       -- [leg] = sends ("channel","group","bnet","community","guild","pinned","req","req_chan","req_mesh","ack","ok","nok","hi","serve","serve_mute","bnet_probe","wprobe","ver")
 
 	stats.cache = { new = 0, updated = 0, refreshed = 0, rejected = 0 }
 	stats.errors = {} -- [kind] = count
