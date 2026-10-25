@@ -263,16 +263,23 @@ the goal, awareness is.
 Profiles move on demand. A pull is triggered when the user mouseovers or
 targets an opposite-faction player whose profile we do not hold fresh.
 Requests are **serial**: at most one subject is in flight, and each subject
-is tried against exactly one contact. A round-robin cursor walks the
-contact roster so every contact serves at most one request per cycle:
+is tried against exactly one contact. Picks come from per-tier shuffled
+decks so every contact serves at most one request per cycle:
 
 1. confirmed BNet peers (subject-first when the subject themselves is a
    BNet-reachable FRP peer — a self-serve is authoritative),
 2. confirmed guild-club relays,
 3. confirmed community-club relays.
 
-The cursor wraps after the last contact; new requests resume from the
-first.
+Each tier holds a *draw* and a *spent* pile: newly eligible contacts
+insert at a random draw position, and picks pop the draw head into
+spent. Tier order is cycle ordering, not exhaustion — picks take BNet
+draws until drained, then guild, then community, and only once *every*
+tier's draw is empty do all spent piles reshuffle back for the next
+cycle. The decks decorrelate pick order across clients — a fixed roster
+order would have every holder's first picks land on the same member —
+while contacts that go stale mid-cycle (offline, decayed confirmation)
+drop out at pop time.
 
 ```
 requester                                one contact
@@ -393,9 +400,12 @@ rules (they just hit the per-requester channel throttle harder).
   the refreshed copy. Deferred replies are bounded (`REQ_FRESHEN_MAX`=16,
   overflow answers immediately) and are never self-requests — we are the
   authority on ourselves. If the adapter cannot or will not refresh, the
-  REQ answers exactly as it would without the feature. A subject we merely
-  know of but hold no profile for is never queried — `canServe` gates the
-  whole branch.
+  REQ answers exactly as it would without the feature. An unserved unit
+  IS pulled on demand (unicast path): the REQ defers as a fetch, queries
+  the author, and serves when data lands or `REQ_FETCH_DELAY` (20s)
+  lapses. Pull parity with `/trp3 open` — the queries are directed at a
+  name-realm string, so any resolved unitID qualifies (`canPull`); the
+  throttle and pending caps bound the abuse surface.
 - Unicast REQs are throttled per sender (`REQ_SENDER_INTERVAL`=2s).
   Channel REQs — including `m`-flagged REQs that arrive by whisper —
   are throttled per requester at
@@ -468,8 +478,8 @@ fallback. The fallback itself fires at most once per request and only for
 strangers, and our own channel REQs are spaced by REQ_CHANNEL_INTERVAL —
 so a crowded scene produces a trickle of single-chunk broadcasts, not the
 per-sighting fanout that made broadcasts delay real requests. Repeated
-cycles only repeat the single-contact pattern — the cursor wraps rather
-than fanning out.
+cycles only repeat the single-contact pattern — the decks reshuffle
+rather than fanning out.
 
 ### Freshness floor
 

@@ -56,14 +56,20 @@ function Broadcast:init()
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   reqMissed[guid] = last failed-pull time (tooltip "no response")
 	--   reqQueued[guid] + reqQueueOrder: deduped FIFO of waiting subjects
-	--   contactIdx: round-robin contact cursor
+	--   contactDecks: 3-tier draw/spent piles for unicast picks (BNet,
+	--     guild, community). Entries { medium, target, key }. Pops move a
+	--     served contact to spent and once every tier's draw is drained
+	--     all spent piles reshuffle back, so order decorrelates across
+	--     clients and each contact serves at most once per cycle.
 	--   pendingServes[key] = { subject, unitID, medium, target, at, mesh, ok }
-	--     key = "<peer>:<guid>"; ACK'd serves awaiting the requester's OK
+	--     key = "<peer>:<guid>". ACK'd serves awaiting the requester's OK
 	--     ok = grant already received while a serve-side refresh pends
 	--   freshenPending[key] = { mode, subject, unitID, medium, target,
 	--                           reqAt, reqPid, reqCvh }
 	--     mode "ack": channel REQ whose ACK waits on an RP-AddOn refresh
 	--     mode "serve": unicast REQ whose serve waits on refresh and OK
+	--     mode "fetch": unicast REQ for an unserved-but-pullable unit;
+	--       the serve waits on the query landing real data
 	--   reqSenderAt[senderKey] = last inbound unicast REQ time (throttle)
 	--   chanReqSenderAt[senderName] = last inbound channel REQ time
 	self.requests = {}
@@ -72,8 +78,15 @@ function Broadcast:init()
 	self.pendingServes = {}
 	self.freshenPending = {}
 	self.reqQueued = {}
+	--   fetchCache[guid] = { at, unitID } -- last on-demand pull we fired;
+	--     fresh entries serve straight from the register, no re-query
+	self.fetchCache = {}
 	self.reqQueueOrder = { head = 1, tail = 0 }
-	self.contactIdx = 0
+	self.contactDecks = {
+		{ draw = {}, spent = {}, have = {} },
+		{ draw = {}, spent = {}, have = {} },
+		{ draw = {}, spent = {}, have = {} },
+	}
 	self.reqSenderAt = {}
 	self.chanReqSenderAt = {}
 	self.lastChannelReqAt = 0 -- last broadcast REQ we sent (self-rate)
@@ -569,6 +582,11 @@ function Broadcast:tick()
 			self.reqMissed[guid] = nil
 		end
 	end
+	for guid, rec in pairs(self.fetchCache) do
+		if (now - rec.at) > C.REQ_FETCH_TTL then
+			self.fetchCache[guid] = nil
+		end
+	end
 
 end
 
@@ -687,9 +705,104 @@ function Broadcast:pumpRequests()
 	end
 end
 
+-- Contact decks --------------------------------------------------------------
+-- A cursor over a list rebuilt per pick orders identically on every client
+-- holding the same relays, so identical first picks converge on the same
+-- members. Per-tier draw/spent piles scramble that order instead: pops
+-- move a served contact to spent and an emptied draw pile recycles spent
+-- after a reshuffle, so every contact serves at most once per cycle.
+
+local function deckShuffle(list)
+	for i = #list, 2, -1 do
+		local j = math.random(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
+end
+
+--- Register an eligible contact in its tier deck. New faces insert at a
+-- random draw position. `have` dedupes so a contact never double-books.
+function Broadcast:deckAdd(tier, medium, target, key)
+	local deck = self.contactDecks[tier]
+	if deck.have[key] then
+		return
+	end
+	deck.have[key] = true
+	table.insert(deck.draw, math.random(1, #deck.draw + 1), {
+		medium = medium, target = target, key = key,
+	})
+end
+
+--- Whether a queued contact could still be served right now. Entries go
+-- stale as confirmations decay, members go offline, or rosters shift.
+function Broadcast:deckLive(entry, now)
+	if entry.medium == "BNET" then
+		return ns.comms:isBNetConfirmed(entry.target, now)
+	end
+	local p = self.relays[entry.key]
+	return p ~= nil and p.conf ~= 0
+		and (now - p.conf) < C.RELAY_CONFIRM_TTL
+		and Util.isClubMemberOnline(p.name)
+		and (Util.isGuildClubMember(p.name)
+			or Util.isCommunityClubMember(p.name))
+end
+
+--- Fold newly-eligible contacts into the tier decks: confirmed BNet peers
+-- in tier 1, online guild relays in 2, community relays in 3.
+function Broadcast:deckRefresh(now)
+	local comms = ns.comms
+	for _, id in ipairs(comms:bnetAccounts()) do
+		if comms:isBNetConfirmed(id, now) then
+			self:deckAdd(1, "BNET", id, "bn:" .. id)
+		end
+	end
+	for key, p in pairs(self.relays) do
+		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
+			and Util.isClubMemberOnline(p.name)
+		then
+			if Util.isGuildClubMember(p.name) then
+				self:deckAdd(2, "WHISPER", p.name, key)
+			elseif Util.isCommunityClubMember(p.name) then
+				self:deckAdd(3, "WHISPER", p.name, key)
+			end
+		end
+	end
+end
+
+--- Pop the next live contact across the tier decks into spent. Tier
+-- order is cycle ordering, not exhaustion: once every tier's draw pile
+-- is drained all spent piles reshuffle back for the next cycle.
+function Broadcast:contactNext(now)
+	for _ = 1, 2 do
+		for tier = 1, 3 do
+			local deck = self.contactDecks[tier]
+			while #deck.draw > 0 do
+				local entry = table.remove(deck.draw, 1)
+				if self:deckLive(entry, now) then
+					deck.spent[#deck.spent + 1] = entry
+					return entry
+				end
+				deck.have[entry.key] = nil
+			end
+		end
+		local any = false
+		for tier = 1, 3 do
+			local deck = self.contactDecks[tier]
+			if #deck.spent > 0 then
+				deck.draw, deck.spent = deck.spent, deck.draw
+				deckShuffle(deck.draw)
+				any = true
+			end
+		end
+		if not any then
+			return nil
+		end
+	end
+	return nil
+end
+
 --- Pick the contact for a unicast REQ. A BNet-reachable subject wins
--- outright; otherwise a round-robin cursor walks confirmed BNet peers,
--- then guild relays, then community relays.
+-- outright. Otherwise the tier decks hand out BNet peers, then guild
+-- relays, then community relays.
 function Broadcast:reqContact(guid, now)
 	local comms = ns.comms
 	if guid then
@@ -699,35 +812,12 @@ function Broadcast:reqContact(guid, now)
 			return { medium = "BNET", target = id }
 		end
 	end
-	local list = {}
-	for _, id in ipairs(comms:bnetAccounts()) do
-		if comms:isBNetConfirmed(id, now) then
-			list[#list + 1] = { medium = "BNET", target = id }
-		end
+	self:deckRefresh(now)
+	local entry = self:contactNext(now)
+	if entry then
+		return { medium = entry.medium, target = entry.target }
 	end
-	for _, p in pairs(self.relays) do
-		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
-			and Util.isClubMemberOnline(p.name)
-		then
-			if Util.isGuildClubMember(p.name) then
-				list[#list + 1] = { medium = "WHISPER", target = p.name }
-			end
-		end
-	end
-	for _, p in pairs(self.relays) do
-		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
-			and Util.isClubMemberOnline(p.name)
-			and not Util.isGuildClubMember(p.name)
-			and Util.isCommunityClubMember(p.name)
-		then
-			list[#list + 1] = { medium = "WHISPER", target = p.name }
-		end
-	end
-	if #list == 0 then
-		return nil
-	end
-	self.contactIdx = (self.contactIdx % #list) + 1
-	return list[self.contactIdx]
+	return nil
 end
 
 --- Issue one request as a unicast REQ to the next contact.
@@ -1264,9 +1354,13 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 	local suppressed, offerAt = self:suppressable(
 		subject, unitID, adapter, reqAt, reqPid, reqCvh, selfReq)
 	if suppressed then
+		if ns.debugPeer then
+			ns.debugPeer("ack " .. Util.nameForGuid(subject) .. " -> "
+				.. tostring(target) .. " skipped (stale copy)")
+		end
 		return
 	end
-	-- Over the cap we do not ACK; the requester times out like a miss.
+	-- Over the cap we do not ACK. The requester times out like a miss.
 	local pending = 0
 	for _ in pairs(self.pendingServes) do
 		pending = pending + 1
@@ -1326,20 +1420,25 @@ function Broadcast:flushFreshen(key)
 		return
 	end
 	self.freshenPending[key] = nil
-	if entry.mode ~= "serve" and self:serveThrottled(GetTime()) then
+	if entry.mode == "ack" and self:serveThrottled(GetTime()) then
 		return
 	end
 	local adapter = ns.getAvailableAdapter()
-	-- The profile could have been purged during the deferral.
+	-- The profile could have been purged during the deferral. A fetch
+	-- lapsing with nothing landed fails canServe the same way.
 	if not (adapter and adapter.canServe and adapter:canServe(entry.unitID)) then
 		return
 	end
-	if entry.mode == "serve" then
+	if entry.mode == "fetch" then
+		-- Data landed: evaluate like a fresh unicast REQ.
+		self:serveUnicast(entry.subject, entry.unitID, adapter, entry.medium,
+			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false)
+	elseif entry.mode == "serve" then
 		-- A `*` stub may have refreshed into a real profile mid-wait.
 		if adapter.isDefaultUnit and adapter:isDefaultUnit(entry.unitID) then
 			return
 		end
-		-- Refresh done; serve only when the grant already landed. Without
+		-- Refresh done. Serve only when the grant already landed. Without
 		-- an OK the pendingServe keeps waiting for one.
 		local serve = self.pendingServes[key]
 		if serve and serve.ok then
@@ -1501,11 +1600,52 @@ function Broadcast:onControl(msg, context)
 			return
 		end
 		self.reqSenderAt[target] = now
-		if unitID and adapter and adapter.canServe
-			and adapter:canServe(unitID)
-		then
-			self:serveUnicast(arg, unitID, adapter, context.medium, target,
-				reqAt, arg4, arg5, selfReq)
+		if unitID and adapter then
+			if adapter.canServe and adapter:canServe(unitID) then
+				self:serveUnicast(arg, unitID, adapter, context.medium, target,
+					reqAt, arg4, arg5, selfReq)
+			elseif not selfReq
+				and adapter.canPull and adapter:canPull(unitID)
+				and adapter.refreshQuery
+			then
+				-- Known but unserved: pull the profile on demand. A fresh
+				-- fetch record means the register owns this subject until
+				-- the TTL lapses. Never re-query it back-to-back.
+				local rec = self.fetchCache[arg]
+				if rec and (now - rec.at) < C.REQ_FETCH_TTL then
+					return
+				end
+				-- Register already holds something recent: TRP3 pulled or
+				-- merged it just now, so another query gains nothing.
+				local meta = adapter.profileMeta and adapter:profileMeta(unitID)
+				if meta and meta.at
+					and (time() - meta.at) < C.SERVE_REFRESH_TTL
+				then
+					return
+				end
+				local freshenN = 0
+				for _ in pairs(self.freshenPending) do
+					freshenN = freshenN + 1
+				end
+				if freshenN < C.REQ_FRESHEN_MAX
+					and adapter:refreshQuery(unitID)
+				then
+					self.fetchCache[arg] = { at = now, unitID = unitID }
+					local key = serveKey(target, arg)
+					self.freshenPending[key] = {
+						mode = "fetch", subject = arg, unitID = unitID,
+						medium = context.medium, target = target,
+						reqAt = reqAt, reqPid = arg4, reqCvh = arg5,
+					}
+					C_Timer.After(C.REQ_FETCH_DELAY, function()
+						self:flushFreshen(key)
+					end)
+					if peer then
+						peer("fetch " .. arg .. " (pull on demand -> "
+							.. tostring(target) .. ")")
+					end
+				end
+			end
 		end
 		-- Misses stay silent.
 	elseif verb == "ACK" then
@@ -1573,7 +1713,7 @@ function Broadcast:onControl(msg, context)
 		if serve then
 			local fp = self.freshenPending[key]
 			if fp and fp.mode == "serve" then
-				-- Serve-side refresh still pending; the flush serves it.
+				-- Serve-side refresh still pending. The flush serves it.
 				serve.ok = true
 			else
 				self.pendingServes[key] = nil

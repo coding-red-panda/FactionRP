@@ -73,9 +73,11 @@ Profile data never floods. It travels exactly once — server to requester —
 after a granted request, using single-chunk FRP1 control messages
 (`subject = "_frp"`, `data = "FRP1 <verb> <arg>"`; see `doc/protocol.md`).
 Requests are **serial**: one subject at a time, each tried against exactly
-one contact picked by a round-robin cursor that walks confirmed Battle.net
+one contact picked from per-tier shuffled decks — confirmed Battle.net
 peers first, then guild relays, then community relays. Every contact
-serves at most one request per cycle, then the cursor wraps.
+serves at most one request per cycle, then the spent pile reshuffles back
+into the deck. The scrambled order also decorrelates picks across clients,
+so the same members do not absorb everyone's first requests.
 
 1. **REQ \<guid\> [unitID]** — unicast to the picked contact (whisper or
    Battle.net). The unitID is the subject's register key ("Name-Realm"),
@@ -209,7 +211,7 @@ profile data moves once per exchange. A pull's *subject* is always
 opposite-faction, but its *servers* need not be — every faction-mate who
 previously pulled the same subject is a holder. A `REQ` therefore goes to:
 
-* **One contact at a time**, picked by the round-robin cursor:
+* **One contact at a time**, picked from the shuffled tier decks:
   confirmed Battle.net friends first (account-to-account; only
   opposite-faction characters qualify), then confirmed guild-club
   relays, then confirmed
@@ -286,13 +288,10 @@ probe rotation's job, so a `REQ` never whispers strangers:
    through the community): proven reachable, almost certainly RP-AddOn users.
    (Ignored targets are skipped either way.)
 
-No single member should act as a relay server, so fairness is enforced two ways:
-a **round-robin cursor** spreads picks across the candidate list rather than always
-starting from the front, and each contact may be used at most `COMM_USAGE_LIMIT`
-times per `COMM_USAGE_WINDOW` seconds — shared across both legs, so a person who is
-both guildmate and community member still has one budget. Exhausted contacts are
-only re-used when too few fresh candidates remain — coverage is never dropped for
-lack of fresh targets.
+No single member should act as a relay server, so the contact decks
+spread picks evenly: each contact serves at most once per cycle, then
+the spent pile reshuffles and the cycle restarts. Random insert order
+also keeps every client's pick order different.
 
 Club member lists, member factions (`ClubMemberInfo.faction` is `NeverSecret`), and
 presence come from `C_Club`. The roster is rebuilt incrementally (`ROSTER_SLICE`
@@ -357,7 +356,7 @@ Running the base command with no (or an unrecognised) sub-command prints the usa
 * `/factionrp relays` — Show learned relay state: confirmed FRP whisper
   relays, proven cross-faction contacts, online roster candidates per leg,
   Battle.net peers by bucket (confirmed / probing / ignored), the pending
-  request/serve counts, the contact cursor position, and pinned targets.
+  request/serve counts, contact deck state, and pinned targets.
 * `/factionrp debug target [Name-Realm]` — Pin a whisper target that bypasses
   the community/guild selection and caps (testing). `clear` resets; no argument
   lists pins. Only sends while the `targets` category (or `all`) is on.

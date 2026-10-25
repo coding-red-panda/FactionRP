@@ -97,6 +97,12 @@ end
 -- asynchronous). Only called for units we can serve.
 -- @param unitID string "Name-Realm".
 -- @return boolean Whether a refresh was actually requested.
+--- Whether the adapter could pull a profile for `unitID` it does not yet
+-- serve (e.g. a known register entry with no bound profile).
+function ProfileAdapter:canPull(unitID) -- luacheck: ignore
+	return false
+end
+
 function ProfileAdapter:refreshQuery(unitID) -- luacheck: ignore
 	return false
 end

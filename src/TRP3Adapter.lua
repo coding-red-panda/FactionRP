@@ -332,6 +332,15 @@ function TRP3Adapter:dataIsDefault(data)
 	return self:isAvailable() and isDefaultPid(data and data.profileID)
 end
 
+--- Whether the subject's profile is pullable from its author. Matches
+-- /trp3 open: sendQuery/sendMSPQuery are directed queries on a name-realm
+-- string, TRP3 creates the register entry when the author responds, so
+-- any resolved unitID is fair game. Only self is pointless.
+function TRP3Adapter:canPull(unitID)
+	return unitID ~= nil and self:isAvailable()
+		and unitID ~= TRP3_API.globals.player_id
+end
+
 --- Ask TRP3 to refresh our held copy via the same headless vernum and MSP
 -- queries /trp3 open makes. Missing or failing API raises one error per
 -- session and disables the feature; callers then serve without a refresh.

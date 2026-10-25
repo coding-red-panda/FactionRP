@@ -37,7 +37,7 @@ C.CHUNK_SIZE = 220
 -- Outbound pacing: SEND_RATE chunks per second released on a SEND_INTERVAL
 -- tick via a fractional token bucket (credit capped at SEND_RATE).
 C.SEND_INTERVAL = 0.2
-C.SEND_RATE = 2
+C.SEND_RATE = 1
 
 -- Cap on the reusable send-descriptor pool; sends beyond it just allocate.
 C.POOL_SEND_DESC = 256
@@ -95,13 +95,14 @@ C.BNET_HI_COOLDOWN = 30     -- min gap between HI replies to the same account
 C.REJECTED_SENDER_TTL = 300
 
 -- Pull exchange. Requests are serial: one subject at a time, REQ'd to a
--- single contact (round-robin over confirmed BNet peers, then guild and
--- community relays). A silent contact drops the subject outright unless it
--- is a total stranger (no shared club/guild, no group, no BNet friend) AND
--- we hold no confirmed relay: the mesh leg is cold-start coverage only.
+-- single contact (per-tier shuffled decks over confirmed BNet peers, then
+-- guild and community relays). A silent contact drops the subject outright
+-- unless it is a total stranger (no shared club/guild, no group, no BNet
+-- friend) AND we hold no confirmed relay: the mesh leg is cold-start
+-- coverage only.
 -- Such strangers fall back to a single channel REQ, collecting whispered
 -- ACKs for REQ_CHANNEL_WINDOW and granting the freshest offer.
-C.REQ_CONTACT_TIMEOUT = 4  -- silent contact drops the request
+C.REQ_CONTACT_TIMEOUT = 12  -- silent contact drops the request
 C.REQ_DATA_TIMEOUT = 120   -- accepted request expires without data
 C.REQ_DATA_STALL = 25      -- granted serve dies if no chunk lands this long
 C.SERVE_REFRESH_TTL = 3600 -- held copies this fresh serve without a refresh query
@@ -140,9 +141,14 @@ C.REQ_MESH_FLAG = "m"       -- REQ arg6 marker: sampled mesh request
 C.REQ_HELD_TTL = 1800
 
 -- A servable server refreshes its held copy before ACKing; the reply
--- defers until data lands or the delay elapses.
+-- defers until data lands or the delay elapses. A known-but-unserved unit
+-- instead fetches the profile on demand, deferring for REQ_FETCH_DELAY.
+-- A from-nothing pull runs longer than a refresh.
 C.REQ_FRESHEN_DELAY = 2 -- seconds a serve waits for a refresh
 C.REQ_FRESHEN_MAX = 16  -- bound on deferred replies
+C.REQ_FETCH_DELAY = 20  -- seconds a fetch waits for the pull to land
+C.REQ_FETCH_TTL = 600   -- a pulled subject serves from the register this
+						-- long before another REQ may re-query it
 
 -- Channel serve cooldown: while a granted serve's chunks sit in the send
 -- queue we ACK no broadcast REQs at all, and once a mesh serve's last
