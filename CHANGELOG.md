@@ -1,5 +1,10 @@
 ﻿# FactionRP Changelog
 
+## 0.4.5
+
+### Fixes
+- Sometimes a transition would cause realmnames to disappear from character data. If realmname is missing or unresolvable, drop relay probe.
+
 ## 0.4.4
 
 ### Changed

@@ -186,7 +186,9 @@ function Broadcast:whisperProbeTarget(now)
 		local idx = ((self.probeCursor + step - 1) % total) + 1
 		local name = idx <= gn and guildRoster[idx] or commRoster[idx - gn]
 		local key = Util.normalizeUnitName(name)
-		if key then
+		local target = Util.fullUnitName(name)
+		-- Realms can fail to resolve entirely mid-transition. Move on.
+		if key and target and target:sub(-1) ~= "-" then
 			local p = self.relays[key]
 			if p and p.ign == 0 then
 				local fresh = p.conf ~= 0
@@ -197,7 +199,7 @@ function Broadcast:whisperProbeTarget(now)
 						if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
 							p.ign = now
 							if ns.debugPeer then
-								ns.debugPeer("whisper " .. name
+								ns.debugPeer("whisper " .. target
 									.. " ignored (unanswered probe)")
 							end
 						end
@@ -205,12 +207,12 @@ function Broadcast:whisperProbeTarget(now)
 						or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
 					then
 						self.probeCursor = idx
-						return key, name
+						return key, target
 					end
 				end
 			elseif not p then
 				self.probeCursor = idx
-				return key, name
+				return key, target
 			end
 		end
 	end
@@ -498,7 +500,15 @@ function Broadcast:tick()
 		-- regardless of age — the probe budget goes to plausible FRP users
 		-- only.
 		for key, p in pairs(self.relays) do
-			if p.ign ~= 0 and not Util.isClubMemberOnline(p.name or key) then
+			if key:sub(-1) == "-" then
+				-- Keyed while the realm was unresolvable; a "name-" stub
+				-- can never be whispered to or confirmed by an inbound.
+				self.relays[key] = nil
+				if ns.debugPeer then
+					ns.debugPeer("whisper " .. key
+						.. " dropped (realm unresolved)")
+				end
+			elseif p.ign ~= 0 and not Util.isClubMemberOnline(p.name or key) then
 				p.ign, p.pr = 0, 0
 				if ns.debugPeer then
 					ns.debugPeer("whisper " .. tostring(p.name or key)
@@ -1662,7 +1672,7 @@ end
 function Broadcast:forceTarget(unitID)
 	local key = unitID and Util.normalizeUnitName(unitID)
 	local display = key and Util.fullUnitName(unitID)
-	if key and display then
+	if display and display:sub(-1) ~= "-" then
 		self.forcedTargets[key] = display
 		return display
 	end
