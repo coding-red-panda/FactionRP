@@ -929,12 +929,44 @@ function Broadcast:pumpChannelReq(guid, req, now)
 	req.acks = {}
 end
 
---- Move a failed request onto the channel leg, once per request and for
--- eligible stranger subjects only. Our own held copy publishes first —
--- free content while the offers collect.
+--- Whether any confirmed relay could take a unicast REQ right now: a
+-- BNet-confirmed subject or peer, or a confirmed online club relay.
+-- Mirrors reqContact's roster without touching the cursor.
+function Broadcast:hasContact(guid, now)
+	local comms = ns.comms
+	if guid then
+		local info = C_BattleNet.GetGameAccountInfoByGUID(guid)
+		local id = info and info.gameAccountID
+		if id and comms:isBNetConfirmed(id, now) then
+			return true
+		end
+	end
+	for _, id in ipairs(comms:bnetAccounts()) do
+		if comms:isBNetConfirmed(id, now) then
+			return true
+		end
+	end
+	for _, p in pairs(self.relays) do
+		if p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
+			and Util.isClubMemberOnline(p.name)
+			and (Util.isGuildClubMember(p.name)
+				or Util.isCommunityClubMember(p.name))
+		then
+			return true
+		end
+	end
+	return false
+end
+
+--- Move a failed request onto the channel leg, once per request, for
+-- eligible stranger subjects, and only while we hold no confirmed relay:
+-- the mesh exists for cold-start coverage, not as a fallback to relays.
+-- Our own held copy publishes first: free content while offers collect.
 -- @return boolean Whether the request lives on (false = drop it).
 function Broadcast:tryChannelFallback(guid, req, now)
-	if req.channeled or not self:channelEligible(guid, req.unitID) then
+	if req.channeled or not self:channelEligible(guid, req.unitID)
+		or self:hasContact(guid, now)
+	then
 		return false
 	end
 	req.channeled = true

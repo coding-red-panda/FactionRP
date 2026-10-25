@@ -297,7 +297,10 @@ a silent contact, or a serve that stalled or expired — the subject gets
 one channel attempt *if it is a stranger*: the fallback is skipped when
 the subject shares a guild or community club with us, is a BNet friend,
 or sits in our group, because those relations already provide a native
-or direct pull path. On a thin mesh the fallback broadcasts a single
+or direct pull path. It is also skipped whenever we hold any confirmed
+relay at all — a fresh BNet peer or an online club relay — since the
+mesh exists to cover having *no* proven contacts, not to rescue ones
+that failed. On a thin mesh the fallback broadcasts a single
 `REQ` on `frp<N>comms`; on a mesh larger than `REQ_MESH_SAMPLE_AT` (10)
 members it instead whispers the `REQ` — flagged with the `m` marker —
 to `REQ_MESH_SAMPLE_SIZE` (3) random channel members, because a dense

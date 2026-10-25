@@ -91,10 +91,12 @@ serves at most one request per cycle, then the cursor wraps.
    waits up to `REQ_DATA_TIMEOUT` (120s) for it; other subjects queue
    meanwhile. Ungranted offers just expire — denied or obsolete offers
    never cost a data leg.
-4. **Channel fallback** — no reply within `REQ_CONTACT_TIMEOUT` (4s), or
-   no contacts at all: a *stranger* subject gets one channel attempt,
-   skipped when it shares a club or group with us or is a BNet friend —
-   those relations already provide a pull path. The mesh `REQ` collects
+4. **Channel fallback** — a *stranger* subject gets one channel attempt,
+   and only while we hold no confirmed relay at all: the mesh is
+   cold-start coverage, not a fallback for failed contacts. It is also
+   skipped when the subject shares a club or group with us or is a BNet
+   friend — those relations already provide a pull path. The mesh `REQ`
+   collects
    whispered `ACK` offers for `REQ_CHANNEL_WINDOW` (3s), then `OK`s the
    best freshness claim; every other offer just expires.
 

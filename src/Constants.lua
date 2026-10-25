@@ -97,9 +97,10 @@ C.REJECTED_SENDER_TTL = 300
 -- Pull exchange. Requests are serial: one subject at a time, REQ'd to a
 -- single contact (round-robin over confirmed BNet peers, then guild and
 -- community relays). A silent contact drops the subject outright unless it
--- is a total stranger (no shared club/guild, no group, no BNet friend):
--- strangers fall back to a single channel REQ, collecting whispered ACKs
--- for REQ_CHANNEL_WINDOW and granting the freshest offer.
+-- is a total stranger (no shared club/guild, no group, no BNet friend) AND
+-- we hold no confirmed relay: the mesh leg is cold-start coverage only.
+-- Such strangers fall back to a single channel REQ, collecting whispered
+-- ACKs for REQ_CHANNEL_WINDOW and granting the freshest offer.
 C.REQ_CONTACT_TIMEOUT = 4  -- silent contact drops the request
 C.REQ_DATA_TIMEOUT = 120   -- accepted request expires without data
 C.REQ_DATA_STALL = 25      -- granted serve dies if no chunk lands this long
@@ -113,7 +114,8 @@ C.SERVE_PENDING_CAP = 16 -- bound on granted-or-awaiting serves per peer+subject
 C.SERVE_TIMEOUT = 30     -- pending serve expires without an OK
 
 -- Channel fallback. One broadcast REQ per request, only for stranger
--- subjects. REQs park in "chan-wait" while REQ_CHANNEL_INTERVAL has not
+-- subjects while we hold no confirmed relay. REQs park in "chan-wait"
+-- while REQ_CHANNEL_INTERVAL has not
 -- elapsed since our last broadcast, giving up after REQ_CHANNEL_WAIT_MAX.
 -- Inbound channel REQs are throttled per requester at
 -- REQ_CHANNEL_SENDER_INTERVAL; we self-rate at the same pace, so only
