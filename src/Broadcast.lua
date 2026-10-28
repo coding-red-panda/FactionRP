@@ -502,7 +502,16 @@ function Broadcast:tick()
 			local activity = (lastChunk and lastChunk > req.at)
 				and lastChunk or req.at
 			local stalled = (now - activity) > C.REQ_DATA_STALL
-			if stalled or (now - req.at) > C.REQ_DATA_TIMEOUT then
+			-- Deadline comes from the serve's first-chunk total: drain
+			-- estimate + jitter + queue backlog + stall grace.
+			local _, streamTotal = srcKey and comms.assembler:progress(srcKey)
+			local deadline = req.at + C.REQ_DATA_TIMEOUT
+			if streamTotal then
+				req.jitter = req.jitter or (1 + math.random() * C.REQ_DATA_JITTER_PCT)
+				deadline = req.at + (streamTotal / C.SEND_RATE) * req.jitter
+					+ comms:queueDepth() / C.SEND_RATE + C.REQ_DATA_STALL
+			end
+			if stalled or now > deadline then
 				-- The serve stalled or died; drop the sender's partial
 				-- chunks so a resumed send cannot complete a ghost message.
 				if srcKey
@@ -1283,6 +1292,70 @@ function Broadcast:resolveSubject(guid, wireUnitID)
 	return unitID
 end
 
+--- Shared reject path for verifyDataLeg.
+--- @return nil
+local function rejectDataLeg(reason, subject)
+	if ns.statsError then
+		ns.statsError(reason)
+	end
+	if ns.debugPeer then
+		ns.debugPeer("data " .. Util.nameForGuid(subject)
+			.. " rejected (" .. reason .. ")")
+	end
+	return nil
+end
+
+--- Whether an inbound data envelope may reach the cache.
+--- If we didn't OK the ack then the serve is unsolicited.
+--- @return string|nil Consensus unitID for the candidate, or nil to drop.
+function Broadcast:verifyDataLeg(msg, context)
+	-- sendToPeer emits WHISPER or BNET, which are the only serves.
+	if context.medium ~= "WHISPER" and context.medium ~= "BNET" then
+		return rejectDataLeg("unsolicited_data", msg.subject)
+	end
+	local guid = msg.subject
+	local req = self.requests[guid]
+	if not req and not self.recentReqs[guid] then
+		return rejectDataLeg("unsolicited_data", guid)
+	end
+	if not ns.getAdapter(msg.addon) then
+		return rejectDataLeg("unknown_addon", guid)
+	end
+	local wireUnitID = msg.unitID ~= "" and Util.fullUnitName(msg.unitID)
+	if not wireUnitID then
+		return rejectDataLeg("bad_unitid", guid)
+	end
+
+	-- Enforce consensus case-insensitively.
+	local unitID, unitKey, conflict = nil, nil, false
+	local function claim(id)
+		id = id and Util.fullUnitName(id)
+		if not id then
+			return
+		end
+		local key = id:lower()
+		if unitKey and unitKey ~= key then
+			conflict = true
+		end
+		unitID, unitKey = id, key
+	end
+	local entry = ns.cache:get(guid)
+	claim(entry and entry.unitID)
+	claim(Util.unitForGuidFromClient(guid))
+	claim(Util.unitForGuid(guid))
+	claim(req and req.unitID)
+	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+	claim(rec and rec.unitID)
+	claim(wireUnitID)
+	if conflict then
+		if context.senderKey then
+			ns.comms:blockSender(context.senderKey)
+		end
+		return rejectDataLeg("identity_conflict", guid)
+	end
+	return unitID
+end
+
 --- Post-serve broadcast mute, scaled to mesh size: a thin mesh gets
 -- SERVE_CHANNEL_COOLDOWN_MIN (availability beats dedup when we may be the
 -- only holder), a dense one ramps linearly to the MAX at
@@ -1909,6 +1982,11 @@ function Broadcast:onMessage(raw, context)
 		self:onControl(msg, context)
 		return
 	end
+	-- Drop data legs that cannot be a granted serve.
+	local unitID = self:verifyDataLeg(msg, context)
+	if not unitID then
+		return
+	end
 	if ns.debugReceive then
 		ns.debugReceive(msg.sender, msg.subject)
 	end
@@ -1939,7 +2017,7 @@ function Broadcast:onMessage(raw, context)
 
 	local candidate = {
 		guid = msg.subject,
-		unitID = msg.unitID,
+		unitID = unitID,
 		addon = msg.addon,
 		originTime = msg.originTime,
 		contentVersion = msg.contentVersion,

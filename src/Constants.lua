@@ -80,6 +80,11 @@ C.CTL_PROTO = "FRP1"
 -- the sender's worst-case drain at SEND_RATE.
 C.REASSEMBLY_TIMEOUT = 120
 
+-- Bounds on inbound chunk streams. No legit send should
+-- come even close to these.
+C.REASSEMBLY_MAX_CHUNKS = 512 -- ~112KB per logical message
+C.REASSEMBLY_PER_SENDER = 4   -- concurrent partial streams per sender
+
 -- Seconds the online BNet game-account list is memoized; enumeration
 -- allocates client tables per account, so stale presence is acceptable.
 C.BNET_MEMO = 15
@@ -111,6 +116,7 @@ C.REJECTED_SENDER_TTL = 300
 C.REQ_CONTACT_TIMEOUT = 12  -- silent contact drops the request
 C.REQ_DATA_TIMEOUT = 120   -- accepted request expires without data
 C.REQ_DATA_STALL = 25      -- granted serve dies if no chunk lands this long
+C.REQ_DATA_JITTER_PCT = 0.25 -- upward margin on the computed data deadline
 C.SERVE_REFRESH_TTL = 3600 -- held copies this fresh serve without a refresh query
 C.REQ_COOLDOWN = 60        -- min gap between requests for the same subject
 C.REQ_BACKLOG_CAP = 8      -- queued subjects awaiting their turn
