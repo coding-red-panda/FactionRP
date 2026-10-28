@@ -34,7 +34,9 @@ faction entirely.
 
 **Every leg is a single hop.** The requester unicasts `REQ` to one contact
 at a time; a recipient that can serve replies `ACK` and, once granted
-with `OK`, sends the profile *directly* to the requester. "Relay" in this document means a reachable
+with `OK`, sends the profile *directly* to the requester — always as a
+`WHISPER` or `BNET` leg; data never travels on the channel or group media.
+"Relay" in this document means a reachable
 cross-faction *endpoint* — never a forwarder: no client relays or re-sends
 anything on behalf of another. `REQ`s are broadcast only as a fallback,
 once per request and only for stranger subjects (see "The pull exchange");
@@ -106,7 +108,11 @@ of at most `C.CHUNK_SIZE` (220) payload bytes with a framing header:
 Receivers reassemble per `(senderKey, messageId)` (two-level map — senderKey
 is the whisper name/channel sender or `bn:<gameAccountID>`). Partial buffers
 expire after `C.REASSEMBLY_TIMEOUT` (120s); duplicate chunks are counted and
-ignored.
+ignored. Chunk framing is validated on arrival: `total` may not exceed
+`REASSEMBLY_MAX_CHUNKS` (512), `index` must sit inside `[1,total]`, a
+stream's `total` cannot change mid-flight, and at most
+`REASSEMBLY_PER_SENDER` (4) partial streams are kept per sender. Violating
+chunks are dropped without consequence to the sender — buggy is not hostile.
 
 ## Pacing and the send queue
 
@@ -295,9 +301,12 @@ Silence is the only rejection — there is no `NOK` on the unicast path.
 After the ACK the requester grants the offer with `OK` and waits for the
 profile; an ungranted pendingServe expires via `SERVE_TIMEOUT`. The window
 is bounded
-by `REQ_DATA_TIMEOUT` (120s, covering TRP3's own 60s query lifetime plus
-margin) and by a stall watch — no chunk from the grantee for
-`REQ_DATA_STALL` (25s) ends it early.
+by a stall watch — no chunk from the grantee for `REQ_DATA_STALL` (25s)
+ends it early — and by a deadline that starts as `REQ_DATA_TIMEOUT` (120s)
+and recomputes once the serve's first chunk lands: `total / SEND_RATE`
+scaled by a per-request upward jitter (`REQ_DATA_JITTER_PCT`, up to +25%)
+plus queued-traffic headroom and a stall-length grace. A serve that keeps
+landing chunks gets the time its own size provably needs.
 
 **Channel fallback.** When the unicast leg fails — no reachable contact,
 a silent contact, or a serve that stalled or expired — the subject gets
@@ -360,10 +369,12 @@ rules (they just hit the per-requester channel throttle harder).
 - Pending subjects queue dedup'd (`REQ_BACKLOG_CAP`=8, oldest dropped on
   overflow) and are re-validated on release — a subject cached or served
   while waiting never sends.
-- `contact` state expires after `REQ_CONTACT_TIMEOUT` (4s) without an ACK;
+- `contact` state expires after `REQ_CONTACT_TIMEOUT` (12s) without an ACK;
   `awaiting-data` ends on stall (`REQ_DATA_STALL`, counted from the grant
-  or the server's last chunk, whichever is newer) or `REQ_DATA_TIMEOUT`
-  (120s). Every outcome frees the pump for the next queued subject.
+  or the server's last chunk, whichever is newer) or on a deadline computed
+  from the serve's own chunk `total` once its first chunk lands — fixed
+  `REQ_DATA_TIMEOUT` (120s) until then. Every outcome frees the pump for
+  the next queued subject.
 - An `ACK` whose `seenAt` claim sits at or below our freshness floor is
   denied silently — a stale offer cannot win a grant. On the unicast leg
   the sole candidate's ACK opens the data window directly.
@@ -377,6 +388,16 @@ rules (they just hit the per-requester channel throttle harder).
   the mesh misses.
 - Data received for a pending subject completes the request from any
   source.
+- **Data leg gate.** A data envelope is only honoured when it could be a
+  serve we asked for: it must arrive on `WHISPER` or `BNET` (`sendToPeer`
+  emits nothing else), its subject must be a guid we requested this session
+  (pending or `recentReqs`), its `addon` must map to a loaded adapter, and
+  its asserted `unitID` must agree — case-insensitively — with every claim
+  we hold for the subject GUID (cache entry, client player-info, club
+  roster, persisted `seen` record, the pending request, and the wire claim
+  itself). A conflicting identity is forged: the message is dropped and the
+  sender blocklisted. Unsolicited or unverifiable data dies before `peek`,
+  so it neither touches the cache nor ends a pending request early.
 - Misses get no reply — relay confirmation rides the `HELLO`/`HI` probes
   instead of paying a reply per non-holder.
 
