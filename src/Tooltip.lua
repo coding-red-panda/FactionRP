@@ -21,6 +21,9 @@ function Tooltip:start()
 		self:startIndicator()
 	end
 	ns.RegisterEvent("UPDATE_MOUSEOVER_UNIT", function()
+		if ns.Util.commsRestricted() then
+			return
+		end
 		local exists = UnitExists("mouseover")
 		if ns.Util.canWeUse(exists) and exists then
 			self:tryInject("mouseover")
@@ -70,6 +73,13 @@ function Tooltip:tryInject(unit)
 end
 
 function Tooltip:onTooltipUnit(tt)
+	if ns.Util.commsRestricted() then
+		if self.ind then
+			self.ind:Hide()
+		end
+		return
+	end
+
 	local _, unit = tt:GetUnit()
 	if unit then
 		self:tryInject(unit)

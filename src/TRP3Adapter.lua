@@ -64,6 +64,41 @@ function TRP3Adapter:getPlayerUnitID()
 	return ns.ProfileAdapter.getPlayerUnitID(self)
 end
 
+--- //edit: check if we are set IC in TRP3, returns a bool or nil
+function TRP3Adapter:isPlayerIC()
+	if not ns.Util.fieldsUsable(AddOn_TotalRP3, "Player") then
+		return nil
+	end
+
+	local playerAPI = AddOn_TotalRP3.Player
+	if not ns.Util.fieldsUsable(playerAPI, "GetCurrentUser")
+		or type(playerAPI.GetCurrentUser) ~= "function" then
+		return nil
+	end
+
+	local ok, player = pcall(playerAPI.GetCurrentUser)
+	if not ok or not ns.Util.fieldsUsable(player, "IsInCharacter")
+		or type(player.IsInCharacter) ~= "function" then
+		return nil
+	end
+
+	local statusOK, isIC = pcall(player.IsInCharacter, player)
+	if not statusOK or not ns.Util.canWeUse(isIC) or type(isIC) ~= "boolean" then
+		return nil
+	end
+
+	return isIC
+end
+
+function TRP3Adapter:isPlayerOOC()
+	local isIC = self:isPlayerIC()
+	if isIC == nil then
+		return nil
+	end
+
+	return not isIC
+end
+
 -- Build the opaque content-version from the sections' per-section counters;
 -- missing sections contribute 0. MSP-sourced profiles lack .v counters, so
 -- profile.mspver CRC versions fold in as a sorted suffix.
@@ -220,6 +255,10 @@ end
 -- never alias (and later serialize) TRP3's live tables.
 -- @return table|nil A profile object, or nil if TRP3 has no data for the unit.
 function TRP3Adapter:extract(unitID)
+	if ns.Util.isPaused() then
+		return nil
+	end
+
 	if not self:isAvailable() then
 		return nil
 	end
@@ -347,7 +386,7 @@ end
 -- session and disables the feature; callers then serve without a refresh.
 function TRP3Adapter:refreshQuery(unitID)
 
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return false
 	end
 
@@ -402,7 +441,7 @@ end
 -- Mirrors the sequence TRP3 itself uses when receiving a profile.
 -- @return boolean Whether anything was injected.
 function TRP3Adapter:inject(unitID, data, classID)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return false
 	end
 

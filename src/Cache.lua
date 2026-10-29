@@ -227,7 +227,7 @@ end
 -- kept: no adapter is not proof of absence. A changed register profileID
 -- means the subject switched profiles; the record re-anchors to its stamp.
 function Cache:sweepSeen()
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 
@@ -254,7 +254,7 @@ end
 
 --- Remove all expired entries. Invoked on a timer; safe to call manually.
 function Cache:sweep()
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 

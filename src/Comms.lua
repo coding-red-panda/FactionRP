@@ -54,6 +54,7 @@ function Comms:init()
 	self.initialLoading = self.loading
 	self.resumeAt = 0
 	self.loadGeneration = 0
+	self.activityPaused = false
 	self.whisperBackoff = {}
 	self.whisperAttempts = {}
 	self.restricted = false -- edge flag: partials pruned once per restriction
@@ -72,12 +73,15 @@ function Comms:start()
 		return
 	end
 	self.started = true
+	self:updateActivityState()
 
 	-- Channel/group addon traffic echoes back to the sender; remember our
 	-- normalized name so the echo can be dropped at intake.
-	local ownName = GetUnitName("player", true)
-	if not ns.Util.isLoading() and ns.Util.canWeUse(ownName) then
-		self.ownName = ns.Util.normalizeUnitName(ownName)
+	if not ns.Util.isPaused() then
+		local ownName = GetUnitName("player", true)
+		if ns.Util.canWeUse(ownName) then
+			self.ownName = ns.Util.normalizeUnitName(ownName)
+		end
 	end
 
 	C_ChatInfo.RegisterAddonMessagePrefix(self.prefix)
@@ -90,7 +94,7 @@ function Comms:start()
 	end)
 
 	-- (Re)join the hidden channel whenever we (re)enter the world.
-	if not ns.Util.isLoading() then
+	if not ns.Util.isPaused() then
 		self:joinChannel()
 	end
 
@@ -148,7 +152,7 @@ function Comms:start()
 		self:flushQueue()
 	end)
 	self.pruneTicker = C_Timer.NewTicker(C.REASSEMBLY_TIMEOUT / 2, function()
-		if ns.Util.isLoading() then
+		if ns.Util.isPaused() then
 			return
 		end
 		local dropped = self.assembler:prune(C.REASSEMBLY_TIMEOUT)
@@ -182,6 +186,10 @@ function Comms:pauseForLoading()
 	self.resumeAt = 0
 	self.loadGeneration = self.loadGeneration + 1
 
+	self:clearTransfers()
+end
+
+function Comms:clearTransfers()
 -- //edit: Old transfered data should not start sending after we finish the teleport
 	local q = self.queue
 	for i = q.head, q.tail do
@@ -213,13 +221,41 @@ function Comms:pauseForLoading()
 	end
 end
 
+function Comms:updateActivityState()
+	local paused = ns.Util.isActivityPaused()
+	if paused == self.activityPaused then
+		return
+	end
+
+	self.activityPaused = paused
+	if paused then
+		self.loadGeneration = self.loadGeneration + 1
+		self.resumeAt = 0
+
+		-- //edit: Cancel our old requests instead of saving a burst for after the fight
+		self:clearTransfers()
+		wipe(self.whisperAttempts)
+
+		if ns.scanner then
+			ns.scanner:pauseForActivity()
+		end
+		if ns.broadcast then
+			wipe(ns.broadcast.injectQueue)
+			wipe(ns.broadcast.injectOrder)
+			ns.broadcast.injectOrder.head, ns.broadcast.injectOrder.tail = 1, 0
+		end
+	elseif not self.loading then
+		self:resumeAfterLoading()
+	end
+end
+
 function Comms:resumeAfterLoading()
 	self.loadGeneration = self.loadGeneration + 1
 	local generation = self.loadGeneration
 	self.resumeAt = GetTime() + C.LOADING_RESUME_DELAY
 
 	C_Timer.After(C.LOADING_RESUME_DELAY, function()
-		if self.loading or generation ~= self.loadGeneration then
+		if self.loading or generation ~= self.loadGeneration or ns.Util.isActivityPaused() then
 			return
 		end
 
@@ -268,6 +304,10 @@ function Comms:backoffWhisper(target)
 end
 
 function Comms:onWhisperError(message)
+	if ns.Util.isPaused() then
+		return
+	end
+
 	local format = ERR_CHAT_PLAYER_NOT_FOUND_S
 
 	if type(message) ~= "string" or type(format) ~= "string"
@@ -354,7 +394,7 @@ end
 --- Join the hidden same-faction channel. Joining fires CHANNEL_UI_UPDATE
 -- churn in the client even when already joined, so skip when we are in.
 function Comms:joinChannel()
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 
@@ -386,7 +426,7 @@ end
 --- Member names of the comms channel for REQ sampling, or nil while not
 -- joined. May be partial while the roster streams.
 function Comms:meshRoster()
-	if self.loading then
+	if ns.Util.isPaused() then
 		return nil -- member names are unreliable mid-transition
 	end
 	local idx = self:channelIndex()
@@ -407,6 +447,7 @@ end
 -- Register an event so we can update our channel on reorder over the pipe.
 hooksecurefunc(C_ChatInfo, "SwapChatChannelsByChannelIndex", function()
 	C_Timer.After(0, function() 
+-- //edit: data thats waiting still need the right channel during a pause
 		ns.Util.fixChompChannelTargets(Comms:channelIndex())
 	end)
 end)
@@ -422,7 +463,7 @@ end
 
 --- Queue a send descriptor for paced delivery.
 function Comms:enqueue(desc)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		self.descRelease(desc)
 		return false
 	end
@@ -438,7 +479,7 @@ end
 --- Dispatch a queued descriptor through Chomp (or the raw fallback),
 -- recording stats hooks. The descriptor is released after dispatch.
 function Comms:sendDescriptor(desc)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 
@@ -525,6 +566,7 @@ end
 -- token bucket. Credit caps at one send's worth so an idle queue cannot
 -- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
 function Comms:flushQueue()
+	self:updateActivityState()
 	-- Hold all sends while restricted; the queue drains after. On entry,
 	-- drop partial inbound buffers: their missing chunks can never arrive.
 	if ns.Util.commsRestricted() then
@@ -569,7 +611,7 @@ end
 -- @return table The queued descriptor (callers may stamp leg-completion fields).
 function Comms:sendAddon(text, kind, target)
 
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 
@@ -586,7 +628,7 @@ end
 
 --- Send one raw chunk to a Battle.net game account.
 function Comms:sendBNet(text, gameAccountID)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 
 	end
@@ -612,7 +654,7 @@ end
 -- @return number|false Chunk count queued, or false when the whole leg was
 --   dropped for capacity. Callers must not mark work as sent on false.
 function Comms:sendChunksAddon(chunks, kind, target)
-	if ns.Util.isLoading() or (kind == "WHISPER" and not self:canWhisper(target)) then
+	if ns.Util.isPaused() or (kind == "WHISPER" and not self:canWhisper(target)) then
 		return false
 	end
 
@@ -641,7 +683,7 @@ end
 --- Send a chunk list over a named custom channel (e.g. a previous-generation
 -- channel for the version announcement). Resolves to an index at dispatch.
 function Comms:sendChunksChannel(chunks, channelName)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return false
 	end
 
@@ -669,7 +711,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 end
 
 function Comms:sendChunksBNet(chunks, gameAccountID)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return false
 
 	end
@@ -717,6 +759,10 @@ end
 -- the current region whose character is opposite-faction. These are our
 -- cross-faction relays.
 function Comms:eachBNetGameAccount(callback)
+	if ns.Util.isPaused() then
+		return
+	end
+
 	if not BNFeaturesEnabledAndConnected() then
 		return
 	end
@@ -749,6 +795,9 @@ end
 -- @return table List of gameAccountIDs (do not mutate, shared reference).
 function Comms:bnetAccounts()
 	local memo = self.bnetAcctMemo
+	if ns.Util.isPaused() then
+		return memo.ids
+	end
 	local now = GetTime()
 	if (now - memo.at) > C.BNET_MEMO then
 		local ids = memo.ids
@@ -892,6 +941,11 @@ function Comms:onChatMsgAddon(prefix, text, channel, sender)
 	if prefix ~= self.prefix then
 		return
 	end
+	if ns.Util.commsRestricted() then
+		noteRestrictedResponses()
+		return
+	end
+
 	-- Our own channel/group echo does not need to be read.
 	if self.ownName and ns.Util.normalizeUnitName(sender) == self.ownName then
 		if ns.statsError then
@@ -911,6 +965,11 @@ function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
 	if prefix ~= self.prefix then
 		return
 	end
+	if ns.Util.commsRestricted() then
+		noteRestrictedResponses()
+		return
+	end
+
 	local key = bnetIDGameAccount and bnKeys[bnetIDGameAccount]
 	if not key then
 		key = "bn:" .. tostring(bnetIDGameAccount)
@@ -986,6 +1045,17 @@ end
 
 -- Singleton, started after login.
 ns.comms = Comms:new()
+
+-- //edit: registering events to update when we pause/resume
+for _, event in ipairs({
+	"PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED",
+	"CHALLENGE_MODE_START", "CHALLENGE_MODE_COMPLETED", "CHALLENGE_MODE_RESET",
+	"ZONE_CHANGED_NEW_AREA", "PLAYER_ENTERING_WORLD",
+}) do
+	ns.RegisterEvent(event, function()
+		ns.comms:updateActivityState()
+	end)
+end
 
 -- //edit: register before the login so we also get this loading screen
 ns.RegisterEvent("LOADING_SCREEN_ENABLED", function()

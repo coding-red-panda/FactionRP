@@ -111,6 +111,9 @@ end
 --- Own GUID, fetched fresh and validated on every use.
 -- @return string|nil
 function Broadcast:senderGUID()
+	if Util.isPaused() then
+		return nil
+	end
 	local guid = UnitGUID("player")
 	self.playerGUID = Util.canWeUse(guid) and guid or nil
 	return self.playerGUID
@@ -319,7 +322,7 @@ end
 --- One-time broadcast of our addon version on the comm channel. Retried
 -- while the channel join pends; gives up after C.VER_BROADCAST_ATTEMPTS.
 function Broadcast:broadcastVersion()
-	if Util.isLoading() then
+	if Util.isPaused() then
 		self.versionPending = true
 		return
 	end
@@ -445,7 +448,7 @@ end
 
 --- BNet and whisper probe rotations plus exchange expiry, one ticker.
 function Broadcast:tick()
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 
@@ -970,6 +973,10 @@ end
 -- data still wins on landing, and it gives the requester content even
 -- when the mesh misses entirely.
 function Broadcast:publishHeld(guid, unitID)
+	if Util.isPaused() then
+		return false
+	end
+
 	local adapter = ns.getAvailableAdapter()
 	if not (unitID and adapter and adapter.canServe
 		and adapter:canServe(unitID))
@@ -1192,7 +1199,7 @@ end
 
 --- Send the requested profile directly to a granted peer.
 function Broadcast:serveData(serve)
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 	local adapter = ns.getAvailableAdapter()
@@ -1370,6 +1377,10 @@ end
 -- @return boolean Whether an ACK was sent.
 function Broadcast:tryAck(subject, unitID, adapter, medium, target,
 						  reqAt, reqPid, reqCvh, selfReq, mesh)
+	if Util.isPaused() then
+		return false
+	end
+
 	local now = GetTime()
 	local peer = ns.debugPeer
 	local leg = ns.statsLeg
@@ -1419,6 +1430,10 @@ end
 -- expire instead of costing a data leg.
 function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 								reqAt, reqPid, reqCvh, selfReq)
+	if Util.isPaused() then
+		return
+	end
+
 	local suppressed, offerAt = self:suppressable(
 		subject, unitID, adapter, reqAt, reqPid, reqCvh, selfReq)
 	if suppressed then
@@ -1485,7 +1500,7 @@ end
 -- re-check the cooldown.
 function Broadcast:flushFreshen(key, expected)
 	local entry = self.freshenPending[key]
-	if Util.isLoading() or not entry or (expected and entry ~= expected) then
+	if Util.isPaused() or not entry or (expected and entry ~= expected) then
 		return
 	end
 	self.freshenPending[key] = nil
@@ -1527,7 +1542,7 @@ end
 --- A unit's register profile was written (our freshen query, native exchange,
 -- MSP merge, profileID rebind): flush deferred ACKs waiting on that unit.
 function Broadcast:onFreshenReceived(unitID)
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 	for key, entry in pairs(self.freshenPending) do
@@ -1540,7 +1555,7 @@ end
 --- Dispatch an inbound control message. Reachable on every medium; the
 -- HELLO/HI verbs only carry meaning over BNet.
 function Broadcast:onControl(msg, context)
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 	local comms = ns.comms
@@ -1832,6 +1847,10 @@ end
 -- @param unitID  string The subject's "Name-Realm".
 -- @param profile table  { addon, contentVersion, data } from an adapter.
 function Broadcast:publish(guid, unitID, profile)
+	if Util.isPaused() then
+		return
+	end
+
 	local candidate = {
 		guid = guid,
 		unitID = unitID,
@@ -1853,7 +1872,7 @@ end
 
 --- Handle a fully-reassembled inbound message.
 function Broadcast:onMessage(raw, context)
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 	local msg = Serializer.parseMessage(raw)
@@ -1985,6 +2004,10 @@ end
 --- Queue a stored profile for injection into its source AddOn's register.
 -- Deduped by GUID.
 function Broadcast:queueInject(candidate)
+	if Util.isPaused() then
+		return
+	end
+
 	-- Our own profile is already authoritative; never inject it back.
 	if candidate.guid == self:senderGUID() then
 		return
@@ -2002,7 +2025,7 @@ end
 
 --- Drain up to INJECT_BURST pending injections per tick.
 function Broadcast:drainInject()
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 	local o = self.injectOrder

@@ -68,7 +68,7 @@ end
 
 --- Publish the local player's own profile to the cache.
 function Scanner:shareSelf()
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 
@@ -85,15 +85,16 @@ end
 
 --- Handle a mouseover/target change.
 function Scanner:onSelect(unit)
-	-- Any mouseover change kills a pending hover REQ, even one we can't
-	-- resolve below.
-	if unit == "mouseover" then
-		self:cancelHover()
-	end
 	if ns.Util.commsRestricted() then
+		if unit == "mouseover" then
+			self:cancelHover()
+		end
 		return -- no unit reads at all under lockdown
 	end
 	if not ns.Util.canWeUse(unit) then
+		return
+	end
+	if unit == "mouseover" and self:updateHover() then
 		return
 	end
 	-- The token checks out, but the results themselves could still be secret if
@@ -136,6 +137,10 @@ end
 -- and TRP3 already sends its own vernum query on selection, so we skip
 -- our pull for them.
 function Scanner:xfacRequest(guid, unitID)
+	if ns.Util.commsRestricted() then
+		return
+	end
+
 	local adapter = ns.getAvailableAdapter()
 	if adapter and adapter.name == C.SOURCE.TRP3
 		and (ns.Util.isCommunityClubMember(unitID)
@@ -150,30 +155,99 @@ function Scanner:xfacRequest(guid, unitID)
 	ns.broadcast:requestProfile(guid, unitID)
 end
 
---- REQ an xfac mouseover only if the cursor is still on them after
--- MOUSEOVER_REQ_DELAY. The GUID check backs up cancelHover for cases
--- where no mouseover-change event fires.
+--- REQ an xfac mouseover after actual hover time
+--//edit: tiny interruptions pauses the countdown for the same player
 function Scanner:hoverRequest(guid, unitID)
+	if self.hoverTimer and self.hoverGuid == guid then
+		return
+	end
+
+	local now = GetTime()
+	local previous = self.hoverPrevious
+	if previous and now - previous.lostAt >= C.MOUSEOVER_GRACE_PERIOD then
+		previous = nil
+	end
+
+	local elapsed = 0
+	if previous and previous.guid == guid then
+		elapsed = previous.elapsed
+		previous = nil
+	end
+
+-- //edit: keeping the players progress when someone tries screwing you by running through your cursor
+	if not previous and self.hoverTimer and self.hoverLostAt
+		and now - self.hoverLostAt < C.MOUSEOVER_GRACE_PERIOD then
+		previous = {
+			guid = self.hoverGuid,
+			elapsed = self.hoverElapsed,
+			lostAt = self.hoverLostAt,
+		}
+	end
+
 	self:cancelHover()
 	self.hoverGuid = guid
-	self.hoverAt = GetTime()
-	-- NewTimer, not After: only the former documents a cancellable handle.
-	-- A nil handle would silently stack one uncancellable timer per hover.
-	self.hoverTimer = C_Timer.NewTimer(C.MOUSEOVER_REQ_DELAY, function()
-		self.hoverTimer = nil
-		self.hoverGuid = nil
-		if ns.Util.isLoading() then
-			return
+	self.hoverUnitID = unitID
+	self.hoverAt = now
+	self.hoverElapsed = elapsed
+	self.hoverPrevious = previous
 
-		end
-
-		local cur = UnitGUID("mouseover")
-		if ns.Util.canWeUse(cur) and cur == guid then
-			self:xfacRequest(guid, unitID)
+-- //edit: mouseover can break without an event so checking while we wait
+	local timer
+	timer = C_Timer.NewTicker(C.MOUSEOVER_CHECK_INTERVAL, function()
+		if self.hoverTimer == timer then
+			self:updateHover()
 		end
 	end)
+	self.hoverTimer = timer
 	if not self.hoverTimer then
-		error("FactionRP: C_Timer.NewTimer returned no handle in Scanner:hoverRequest")
+		error("FactionRP: C_Timer.NewTicker returned no handle in Scanner:hoverRequest")
+	end
+end
+
+---//edit: updating a pending hover and returning true if request was triggered
+function Scanner:updateHover()
+	if not self.hoverTimer then
+		return
+	end
+	if ns.Util.commsRestricted() then
+		self:cancelHover()
+		return
+	end
+
+	local now = GetTime()
+	if self.hoverPrevious and now - self.hoverPrevious.lostAt >= C.MOUSEOVER_GRACE_PERIOD then
+		self.hoverPrevious = nil
+	end
+
+	local cur = UnitGUID("mouseover")
+	if not ns.Util.canWeUse(cur) or cur ~= self.hoverGuid then
+		if not self.hoverLostAt then
+			self.hoverElapsed = self.hoverElapsed + now - self.hoverAt
+			self.hoverLostAt = now
+			self.hoverAt = nil
+		end
+		if now - self.hoverLostAt >= C.MOUSEOVER_GRACE_PERIOD then
+			self:cancelHover()
+		end
+		return
+	end
+
+	if self.hoverLostAt then
+		if now - self.hoverLostAt >= C.MOUSEOVER_GRACE_PERIOD then
+			self:cancelHover()
+			return
+		end
+
+-- //edit: Keeping the time we already hovered without the interuption time
+		self.hoverAt = now
+		self.hoverLostAt = nil
+	end
+
+	if self.hoverElapsed + now - self.hoverAt >= C.MOUSEOVER_REQ_DELAY then
+		local guid, unitID = self.hoverGuid, self.hoverUnitID
+		self:cancelHover()
+		self:xfacRequest(guid, unitID)
+		return true
 	end
 end
 
@@ -184,6 +258,20 @@ function Scanner:cancelHover()
 		self.hoverTimer = nil
 	end
 	self.hoverGuid = nil
+	self.hoverUnitID = nil
+	self.hoverAt = nil
+	self.hoverElapsed = nil
+	self.hoverLostAt = nil
+	self.hoverPrevious = nil
+end
+
+function Scanner:pauseForActivity()
+	self:cancelHover()
+	for unitID, pending in pairs(self.receivedPending) do
+		self.pendingRelease(pending)
+		self.receivedPending[unitID] = nil
+	end
+	wipe(self.receivedQueue)
 end
 
 --- Fraction (0..1) of MOUSEOVER_REQ_DELAY elapsed while hovering `guid`,
@@ -191,7 +279,12 @@ end
 -- indicator's countdown fill.
 function Scanner:hoverProgress(guid)
 	if guid and self.hoverTimer and self.hoverGuid == guid then
-		return (GetTime() - self.hoverAt) / C.MOUSEOVER_REQ_DELAY
+		local now = GetTime()
+		if self.hoverLostAt and now - self.hoverLostAt >= C.MOUSEOVER_GRACE_PERIOD then
+			return
+		end
+		local elapsed = self.hoverElapsed + (self.hoverAt and now - self.hoverAt or 0)
+		return math.min(elapsed / C.MOUSEOVER_REQ_DELAY, 1)
 	end
 end
 
@@ -200,7 +293,7 @@ end
 -- re-publish user-selected units; an unchanged content version collapses
 -- the feedback to a no-op.
 function Scanner:onAdapterUpdate(adapter, unitID)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 	local guid
@@ -222,7 +315,7 @@ end
 -- section, so we queue a jittered ready time that collapses the burst into
 -- one extraction and keeps simultaneous receipts off the same tick.
 function Scanner:onAdapterReceived(adapter, unitID)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 
@@ -275,7 +368,7 @@ end
 
 --- Fire at most one ready received-profile publish per tick.
 function Scanner:drainReceived()
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 
 	end
@@ -315,7 +408,7 @@ end
 -- Repeated publishes would only extend the TTL at an extraction per tick,
 -- so we also stop early when the version matches our last publish.
 function Scanner:share(adapter, unitID, guid)
-	if ns.Util.isLoading() then
+	if ns.Util.isPaused() then
 		return
 	end
 

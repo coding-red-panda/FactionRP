@@ -285,7 +285,7 @@ local function stepRosterBuild(build)
 		return -- superseded
 	end
 
-	if Util.isLoading() then
+	if Util.isPaused() then
 		rosterBuild = nil
 		return
 	end
@@ -435,7 +435,7 @@ end
 
 local function startRosterBuild()
 
-	if Util.isLoading() then
+	if Util.isPaused() then
 		return
 	end
 
@@ -724,6 +724,10 @@ local memoPruneCounter = 0
 -- @param unitID string "Name-Realm".
 -- @return string|nil The GUID, or nil if it cannot be resolved.
 function Util.resolveGUID(unitID)
+	if Util.isPaused() then
+		return nil
+	end
+
 	if not unitID then
 		return nil
 	end
@@ -888,13 +892,30 @@ function Util.isLoading()
 	return comms ~= nil and (comms.loading or GetTime() < (comms.resumeAt or 0)) or false
 end
 
+function Util.isActivityPaused()
+	if C_ChallengeMode.IsChallengeModeActive() then
+		return true
+	end
+
+	local _, instanceType = IsInInstance()
+	if instanceType == "arena" or instanceType == "pvp" then
+		return true
+	end
+
+-- //edit: we need to make the difference between raiding/dungeons PvE or roleplaying in an instance
+	return (instanceType == "party" or instanceType == "raid") and InCombatLockdown()
+end
+
+function Util.isPaused()
+	return Util.isLoading() or Util.isActivityPaused()
+end
+
 --- Whether comms must stay silent: combat lockdown, a chat-messaging
 -- lockdown (encounters, M+), or an active challenge-mode run.
 function Util.commsRestricted()
-	return Util.isLoading()
+	return Util.isPaused()
 		or InCombatLockdown()
 		or C_ChatInfo.InChatMessagingLockdown()
-		or C_ChallengeMode.IsChallengeModeActive()
 end
 
 --- Whether the table is indexable and the named fields hold no secrets.
