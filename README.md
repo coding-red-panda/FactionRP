@@ -90,9 +90,10 @@ so the same members do not absorb everyone's first requests.
 3. **OK \<guid\>** — the requester grants the offer. The server refreshes
    its held copy through the RP AddOn's own headless query when stale,
    then sends the normal data envelope directly to the requester, who
-   waits up to `REQ_DATA_TIMEOUT` (120s) for it; other subjects queue
-   meanwhile. Ungranted offers just expire — denied or obsolete offers
-   never cost a data leg.
+   waits out a deadline sized by the serve's own chunk count once the first
+   chunk lands (drain estimate plus jittered margin; `REQ_DATA_TIMEOUT`,
+   120s, until then); other subjects queue meanwhile. Ungranted offers just
+   expire — denied or obsolete offers never cost a data leg.
 4. **Channel fallback** — a *stranger* subject gets one channel attempt,
    and only while we hold no confirmed relay at all: the mesh is
    cold-start coverage, not a fallback for failed contacts. It is also
@@ -306,6 +307,10 @@ A message should be ignored when any of the following is true:
 * We already hold the subject's profile with the same `CONTENT-VERSION`, or with an `ORIGIN-TIME`
   newer than the incoming message (de-duplication / staleness rejection). We only store and
   inject when the content differs *and* the incoming copy is not older.
+* It is profile data for a subject we never requested, it arrived over a
+  medium that cannot carry serves (data legs are `WHISPER`/`BNET` only), or
+  its asserted `Name-Realm` conflicts with what we hold for the GUID —
+  forged data legs never reach the cache.
 
 Control messages (`subject = "_frp"`) are handled by the exchange state machines
 and never cached, injected, or relayed.

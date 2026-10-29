@@ -178,6 +178,12 @@ function ChunkReassembler:add(sender, chunkString)
 	if not index or not total or total < 1 then
 		return nil
 	end
+	-- Out-of-range or absurd framing is never legit, so drop like last season's sparks.
+	if total > C.REASSEMBLY_MAX_CHUNKS or index < 1 or index > total
+		or index % 1 ~= 0 or total % 1 ~= 0
+	then
+		return nil, "bad_header"
+	end
 
 	-- Single-chunk messages need no buffering.
 	if total == 1 then
@@ -185,12 +191,27 @@ function ChunkReassembler:add(sender, chunkString)
 	end
 
 	local perSender = self.buffers[sender]
-	if not perSender then
-		perSender = {}
-		self.buffers[sender] = perSender
-	end
-	local buf = perSender[msgId]
-	if not buf then
+	local buf = perSender and perSender[msgId]
+	if buf then
+		-- msgIds are unique per sender session.
+		if buf.total ~= total then
+			return nil, "conflict"
+		end
+	else
+		-- Bound concurrent partial streams per sender.
+		local n = 0
+		if perSender then
+			for _ in pairs(perSender) do
+				n = n + 1
+			end
+		end
+		if n >= C.REASSEMBLY_PER_SENDER then
+			return nil, "cap"
+		end
+		if not perSender then
+			perSender = {}
+			self.buffers[sender] = perSender
+		end
 		buf = self.bufAcquire()
 		buf.total = total
 		buf.count = 0
