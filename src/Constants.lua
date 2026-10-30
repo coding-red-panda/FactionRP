@@ -25,7 +25,7 @@ C.MSG_PREFIX = "FactionRP"
 -- so older clients sit on a disjoint channel.
 C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp5comms"
 -- Previous generation's channel, briefly joined to announce VER there.
-C.COMM_CHANNEL_PROTO3 = "frp3comms"
+C.COMM_CHANNEL_PROTO3 = "frp3comms" -- stranded-generation channel; repoint to the outgoing channel when PROTO_MAJOR bumps
 
 -- Field separator inside a message payload; virtually never appears in data.
 C.SEPARATOR = "||"

@@ -74,7 +74,10 @@ A message is malformed unless all seven separators are present and
 `protoMajor` is a hard interop gate: receivers reject any envelope
 advertising a lower generation (`statsError("proto_old")`), *before* any
 peer-state side effect — a too-old or forged message cannot confirm a relay,
-serve a request, or enter the cache. The comm channel also carries the
+serve a request, or enter the cache. The gate is one-way: a *newer*
+`protoVer` passes the check, so an older client accepts a newer envelope and
+only fails at `decodeProfile` — it pays the full download before reporting
+the data undecodable. The comm channel also carries the
 generation (`frp5comms`), so older-protocol clients sit on a disjoint channel
 by construction. On load and on every (re)join we additionally *leave* the
 legacy `FactionRP` channel and any `frp<N>comms` channel of a different
@@ -253,11 +256,15 @@ version — a `VER <addonVer>` control chunk (addonVer read from the
 channel only (no BNet/whisper legs; faction-mates logging in with an updated
 build keep the channel covered anyway). Because old-generation peers sit on
 a disjoint channel and could never hear the announcement otherwise, the
-broadcast also joins the previous generation's channel
-(`C.COMM_CHANNEL_PROTO3`, currently `frp3comms`) just long enough to launch
-the chunk there — membership is dropped `VER_PREV_CHANNEL_HOLD` later.
-Proto-3 clients accept a proto-4 `VER` (the gate only rejects *lower*
-generations), so the notice still reaches them. A receiver that hears a newer version
+broadcast also joins a pinned legacy channel
+(`C.COMM_CHANNEL_PROTO3`, currently `frp3comms`) just long enough to
+launch the chunk there — membership is dropped `VER_PREV_CHANNEL_HOLD`
+later. The pin targets proto-3 stragglers specifically: proto-4 was
+deliberately starved, not just superseded, so its channel is never
+revisited. Proto-3 clients accept a higher-generation `VER` (the gate
+only rejects *lower* generations), so the notice still reaches them.
+Repoint `COMM_CHANNEL_PROTO3` to the outgoing channel on every
+`PROTO_MAJOR` bump — the same debt then attaches to proto-5. A receiver that hears a newer version
 than its own prints a chat notice that it is outdated. Notices are deduped by
 the highest version already announced that session, so a wave of peers
 logging in cannot spam the chat; `/frp status` shows the newest version
@@ -362,6 +369,17 @@ rules (they just hit the per-requester channel throttle harder).
   while it is in the future *and* the RP AddOn's register still holds the
   profile (`profileMeta` non-nil), local requests do not fire. A register
   purge ends the suppression early.
+- The same freshness gate (`Broadcast:profileFresh` = cached-fresh or
+  held-suppressed) applies *at selection*, before any pull machinery runs:
+  a fresh subject skips unit-ID resolution, REQ scheduling, and the hover
+  countdown entirely. An armed countdown cancels mid-hover if the cache
+  entry lands through another exchange.
+- The hover countdown only *arms* on sustained mouseover (`MOUSEOVER_REQ_DELAY`,
+  polled on `MOUSEOVER_CHECK_INTERVAL`, with `MOUSEOVER_GRACE_PERIOD` of
+  interruption credit). The tooltip indicator reports request state:
+  "Requesting profile in Ns" while the countdown runs, "Please wait... N%"
+  while a serve is in flight, "No response. Try again in Ns" after a
+  contact-silent failure inside `REQ_COOLDOWN`.
 - Skip if the subject shares a club with us (community or guild): the RP
   AddOn's own cross-faction whisper query already pulls that profile on
   mouseover/target — a `REQ` would duplicate the native pull, whose landing
@@ -478,29 +496,25 @@ rules (they just hit the per-requester channel throttle harder).
 
 ### Traffic shape
 
-The serial pipeline exists to bound per-request traffic. Rough message
-counts per request, before profile data:
+The serial pipeline exists to bound per-request traffic. Per subject,
+before profile data:
 
-| Scenario (one subject request)        | Old fanout                          | New pipeline                     |
-|---------------------------------------|-------------------------------------|----------------------------------|
-| REQ legs sent                         | 1 channel + 1 group + N BNet + up to 10 relay whispers | 1 whisper; +1 channel chunk only on stranger fallback |
-| ACKs generated                        | one per reachable holder            | 1 (contact); ≤`REQ_CHANNEL_ACK_CAP` collected offers on fallback |
-| OK/NOK arbitration                    | 1 OK + implicit loser timeouts      | 1 OK to the best-scoring offer; losers expire silently |
-| TRP3 refreshes triggered at the subject | up to one **per holder** (every ACKer queried) | ≤1 unicast; on fallback, one per holder that ACKs |
-| Profile data legs                     | 1 (winner only)                     | 1 (winner only)                  |
+- **REQ legs**: 1 whisper to a single contact; +1 channel chunk (or a
+  `REQ_MESH_SAMPLE_SIZE` whispered sample) only on stranger fallback.
+- **ACKs**: 1 on the contact leg; ≤`REQ_CHANNEL_ACK_CAP` collected offers
+  on fallback.
+- **Arbitration**: 1 OK to the best-scoring offer; losers expire silently.
+- **TRP3 refreshes at the subject**: ≤1 unicast; on fallback, one per
+  holder that ACKs.
+- **Data legs**: 1, to the grantee only.
 
-Worst cases: under fanout, a subject nobody held could still wake every
-listener plus 5 guild + 5 community whispers per request, and every holder
-that ACKed had already paid a TRP3 vernum exchange at the subject — the
-amplification the pipeline removes. Under the pipeline, a dead contact
-costs REQ_CONTACT_TIMEOUT of silence then a single channel chunk; a contact that ACKs but
-cannot deliver costs a stall-bounded window (≤`REQ_DATA_TIMEOUT`), then the channel
-fallback. The fallback itself fires at most once per request and only for
-strangers, and our own channel REQs are spaced by REQ_CHANNEL_INTERVAL —
-so a crowded scene produces a trickle of single-chunk broadcasts, not the
-per-sighting fanout that made broadcasts delay real requests. Repeated
-cycles only repeat the single-contact pattern — the decks reshuffle
-rather than fanning out.
+A dead contact costs REQ_CONTACT_TIMEOUT of silence then a single channel
+chunk; a contact that ACKs but cannot deliver costs a stall-bounded window
+(≤`REQ_DATA_TIMEOUT`), then the channel fallback. The fallback fires at
+most once per request and only for strangers, and channel REQs are spaced
+by REQ_CHANNEL_INTERVAL — so a crowded scene produces a trickle of
+single-chunk broadcasts, not a flood. Repeated cycles repeat the
+single-contact pattern — the decks reshuffle rather than fanning out.
 
 ### Freshness floor
 

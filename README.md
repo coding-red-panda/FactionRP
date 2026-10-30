@@ -46,7 +46,12 @@ When a player is "selected" (mouseover or target), two things can happen:
 * **Opposite-faction**: this is the pull trigger. If the subject's profile is
   not fresh in our cache, we send a `REQ` for their GUID — carrying their
   unitID when we know it — into the serial pull pipeline (see "The pull
-  exchange").
+  exchange"). While a held profile *is* fresh the whole trigger is suspended:
+  no unitID resolution, no REQ scheduling, no hover countdown. The countdown
+  only arms after `MOUSEOVER_REQ_DELAY` of sustained hover, and cancels
+  mid-hover if the profile lands through another exchange. The tooltip shows
+  the request state: "Requesting profile in Ns", "Please wait... N%" while a
+  serve is in flight, or "No response. Try again in Ns" after a failed pull.
 
 A player is also "selected" indirectly: whenever the RP AddOn itself receives
 profile data over its own comm channels — like TRP3's exchange protocol, or MSP
@@ -187,8 +192,9 @@ Because there is otherwise no way to learn that your FactionRP is outdated
 except checking Curse, every client announces its addon version once per
 session: shortly after logging in it broadcasts a single version message on
 our hidden comm channel (see "Request pipeline"). The announcement also goes
-to the previous protocol generation's channel — old-protocol peers are on a
-disjoint channel by design, so we briefly join `frp3comms`, launch the
+to a pinned legacy channel: old-protocol peers are on a
+disjoint channel by design, so we briefly join `frp3comms` (the stranded
+proto-3 fleet — proto-4 was starved on purpose), launch the
 announcement, and leave again. Since that channel is
 faction-scoped, every faction-mate running FactionRP hears the announcement
 the moment someone logs in with a newer build.
@@ -368,6 +374,10 @@ Running the base command with no (or an unrecognised) sub-command prints the usa
 * `/factionrp stats [section]` — Show collected traffic statistics (requires
   the `stats` category). Sections: `mediums`, `sizes`, `timing`, `cache`,
   `errors`, `queue`, `last [n]`; `reset` zeroes everything.
+* `/factionrp codec` — Verify the wire codec against known-answer vectors
+  produced by the previous implementation (raw-deflate format, channel
+  escape byte-identity, pre-change payload decode, round-trip). PASS on all
+  checks is required before shipping codec changes.
 * `/factionrp mem` — Show live addon memory after a forced garbage collection
   and counter refresh. `churn [n]` samples the allocation rate over n seconds
   (default 10); `census` counts the suspect internal tables (queues, cache,
@@ -391,6 +401,7 @@ The categories:
 * `peers` — Battle.net handshake and pull-exchange events (probes,
   confirmations, ignores, REQ/ACK/OK/NOK traffic, serves)
 * `stats` — collects traffic statistics (see below)
+* `reorders` — prints reorder operations in chat
 
 ### Traffic statistics
 

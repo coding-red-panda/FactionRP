@@ -335,8 +335,8 @@ function Broadcast:broadcastVersion()
 	end
 	local comms = ns.comms
 
-	-- Old-generation peers sit on a disjoint channel; join the previous
-	-- one long enough to launch the announcement there too.
+	-- Stranded peers sit on a disjoint channel; join the pinned legacy
+	-- channel long enough to launch the announcement there too.
 	local prevChan = C.COMM_CHANNEL_PROTO3
 	local prevIdx = prevChan and GetChannelName(prevChan)
 	if prevIdx == 0 then
