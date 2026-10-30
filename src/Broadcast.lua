@@ -682,14 +682,18 @@ function Broadcast:reqStatus(guid)
 	return nil
 end
 
---- Queue a request for `guid`'s profile. No-op when the cache is fresh,
--- the subject is pending or queued, or it is on cooldown.
+--- Check if `guid` is so fresh that pulling it is pointless.
+function Broadcast:profileFresh(guid)
+	return ns.cache:fresh(guid) or self:heldSuppressed(guid)
+end
+
+--- Queue a request for `guid`'s profile. No-op when the subject's data is
+-- fresh, the subject is pending or queued, or it is on cooldown.
 function Broadcast:requestProfile(guid, unitID)
 	if not guid or Util.commsRestricted() then
 		return
 	end
-	if ns.cache:fresh(guid)
-		or self:heldSuppressed(guid)
+	if self:profileFresh(guid)
 		or self.requests[guid]
 		or self.reqQueued[guid]
 	then
@@ -753,8 +757,7 @@ function Broadcast:pumpRequests()
 		o.head = o.head + 1
 		self.reqQueued[entry.guid] = nil
 		local last = self.recentReqs[entry.guid]
-		if not ns.cache:fresh(entry.guid)
-			and not self:heldSuppressed(entry.guid)
+		if not self:profileFresh(entry.guid)
 			and not (last and (now - last) < C.REQ_COOLDOWN)
 		then
 			self:issueRequest(entry.guid, entry.unitID, now)
