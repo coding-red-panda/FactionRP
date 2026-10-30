@@ -30,7 +30,7 @@ flowchart LR
 
     start --> request
     request --> ack
-    request -.->|silent 4s| channel
+    request -.->|silent REQ_CONTACT_TIMEOUT| channel
     ack --> serve
     serve --> process
 ```
@@ -91,8 +91,8 @@ so the same members do not absorb everyone's first requests.
    its held copy through the RP AddOn's own headless query when stale,
    then sends the normal data envelope directly to the requester, who
    waits out a deadline sized by the serve's own chunk count once the first
-   chunk lands (drain estimate plus jittered margin; `REQ_DATA_TIMEOUT`,
-   120s, until then); other subjects queue meanwhile. Ungranted offers just
+   chunk lands (drain estimate plus jittered margin; `REQ_DATA_TIMEOUT`
+   until then); other subjects queue meanwhile. Ungranted offers just
    expire — denied or obsolete offers never cost a data leg.
 4. **Channel fallback** — a *stranger* subject gets one channel attempt,
    and only while we hold no confirmed relay at all: the mesh is
@@ -100,7 +100,7 @@ so the same members do not absorb everyone's first requests.
    skipped when the subject shares a club or group with us or is a BNet
    friend — those relations already provide a pull path. The mesh `REQ`
    collects
-   whispered `ACK` offers for `REQ_CHANNEL_WINDOW` (3s), then `OK`s the
+   whispered `ACK` offers for `REQ_CHANNEL_WINDOW`, then `OK`s the
    best freshness claim; every other offer just expires.
 
 A pull is also skipped entirely for subjects sharing one of our clubs
@@ -109,12 +109,12 @@ mouseover/target, and the shared membership is exactly what makes that
 cross-faction whisper deliverable — a `REQ` would just duplicate the native
 pull (which fills our cache anyway once it lands, via the received listener).
 
-Requests deduplicate per subject (active + queued + a 60s cooldown) and
+Requests deduplicate per subject (active + queued + a `REQ_COOLDOWN` cooldown) and
 wait in a small bounded FIFO. On the serving side, unicast REQs are
 throttled per sender (`REQ_SENDER_INTERVAL`), while channel REQs are
 gated by a per-requester throttle and a drain-aware serve cooldown: we
 answer no broadcasts while a serve's chunks are queued, and stay muted
-for 10–60s after a mesh serve's last chunk leaves — scaled by the channel
+for `SERVE_CHANNEL_COOLDOWN_MIN`–`MAX` after a mesh serve's last chunk leaves — scaled by the channel
 member count so a thin mesh keeps serving while a dense one shares the
 load. On a dense mesh (more than `REQ_MESH_SAMPLE_AT` members) the
 fallback also whispers its REQ to `REQ_MESH_SAMPLE_SIZE` random channel
@@ -166,13 +166,13 @@ handshake confirms peers session-locally:
 
 * Only a friend's *opposite-faction* WoW characters enter the peer pool —
   a friend playing our faction is reachable on the comm channel anyway.
-* Every `BNET_PROBE_INTERVAL` (5s) we burst `HELLO`s to every eligible
+* Every `BNET_PROBE_INTERVAL` we burst `HELLO`s to every eligible
   friend — unconfirmed, non-ignored, none awaiting — bounded by the shared
   send budget; the reply is `HI`.
 * Any complete, parseable FactionRP message from an account — handshake or
-  otherwise — confirms it for `BNET_CONFIRM_TTL` (10 min).
-* A probe unanswered past `BNET_PROBE_DEADLINE` (60s) ignores the account
-  for `BNET_IGNORE_TTL` (10 min); the ignored account *coming online*
+  otherwise — confirms it for `BNET_CONFIRM_TTL`.
+* A probe unanswered past `BNET_PROBE_DEADLINE` ignores the account
+  for `BNET_IGNORE_TTL`; the ignored account *coming online*
   (`BN_FRIEND_ACCOUNT_ONLINE`) re-opens probing early with a fresh slate —
   mere presence churn (zone changes, status updates) does not.
 * Data and `REQ` legs on Battle.net go to confirmed accounts only.
@@ -267,12 +267,12 @@ single-chunk control messages, and every client maintains its own relay lists �
 coverage is distributed across requesters.
 
 Rather than waiting for requests, we **actively probe** the roster: every
-`RELAY_PROBE_INTERVAL` (30s) a burst of up to `RELAY_PROBE_BURST` (5)
+`RELAY_PROBE_INTERVAL` a burst of up to `RELAY_PROBE_BURST`
 candidates gets a whispered `HELLO`, walked in order through the guild list
 then the community list so everyone gets a turn. Each candidate gets exactly
 one probe: a whispered `HELLO` earns a `HI` reply and any parseable inbound
-whisper confirms the sender as a relay for `RELAY_CONFIRM_TTL` (10min);
-a probe with no answer inside `RELAY_PROBE_COOLDOWN` (45s) kicks the target
+whisper confirms the sender as a relay for `RELAY_CONFIRM_TTL`;
+a probe with no answer inside `RELAY_PROBE_COOLDOWN` kicks the target
 to the ignore list. Ignore is offline-aware rather than time-driven —
 someone who stays online stays ignored (their silence is the answer), while
 a member observed *offline* by the roster scan is un-ignored and earns a
@@ -329,7 +329,7 @@ It needs to track the following data:
 
 * The GUID of the player who's profile is stored (cache key)
 * The `Name-Realm` of that player (needed to display/inject the profile)
-* When the entry was added locally (drives the 5 minute TTL / expiry)
+* When the entry was added locally (drives the `CACHE_TTL` expiry)
 * The `ORIGIN-TIME` and `CONTENT-VERSION` of the profile (used for ordering and de-duplication)
 * The AddOn of the profile, e.g. TRP3 or something
 * The actual Profile data
@@ -344,7 +344,7 @@ In practice this means: when an opposite-faction unit is hovered/targeted and we
 profile for their GUID, we inject that data into TRP3's own register (keyed by `Name-Realm`) via
 its public API (`addCharacter` → `saveCurrentProfileID` → `saveInformation`, gated by
 `shouldUpdateInformation`). TRP3 then renders the tooltip itself, so we do not maintain a separate
-tooltip implementation. Injected entries are treated as transient and respect the 5 minute TTL.
+tooltip implementation. Injected entries are treated as transient and respect the `CACHE_TTL` TTL.
 
 ### Slash Commands
 
