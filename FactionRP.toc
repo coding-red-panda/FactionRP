@@ -2,14 +2,13 @@
 ## Title: FactionRP
 ## Notes: Cross-faction RP profile sharing - a continuation of CrossRP.
 ## Author: FactionRP
-## Version: 0.4.7
+## Version: 0.4.7-dev
 ## SavedVariables: FactionRPDB
 ## OptionalDeps: totalRP3
 ## IconTexture: Interface\ICONS\INV_Misc_GroupLooking
 
 # --- Embedded libraries ---
 Libs\LibStub\LibStub.lua
-Libs\LibDeflate\LibDeflate.lua
 Libs\LibSerialize\LibSerialize.lua
 
 # --- Foundation (Phase 1) ---
