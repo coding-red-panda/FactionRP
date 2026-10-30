@@ -78,7 +78,7 @@ function Comms:start()
 	-- Channel/group addon traffic echoes back to the sender; remember our
 	-- normalized name so the echo can be dropped at intake.
 	if not ns.Util.isPaused() then
-		local ownName = GetUnitName("player", true)
+		local ownName = ns.Util.getUnitID("player")
 		if ns.Util.canWeUse(ownName) then
 			self.ownName = ns.Util.normalizeUnitName(ownName)
 		end
@@ -260,7 +260,7 @@ function Comms:resumeAfterLoading()
 		end
 
 		self.resumeAt = 0
-		local ownName = GetUnitName("player", true)
+		local ownName = ns.Util.getUnitID("player")
 
 		if ns.Util.canWeUse(ownName) then
 			self.ownName = ns.Util.normalizeUnitName(ownName)

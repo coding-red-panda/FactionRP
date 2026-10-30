@@ -48,7 +48,7 @@ function Util.getUnitID(unit)
 	end
 	-- The token checks out, but the results themselves can still be secret.
 	local isPlayer = UnitIsPlayer(unit)
-	local name, realm = UnitName(unit)
+	local name, realm = UnitNameUnmodified(unit)
 	if not Util.canWeUse(isPlayer, name, realm)
 		or not isPlayer or not name or name == ""
 	then
