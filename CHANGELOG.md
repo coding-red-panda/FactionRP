@@ -8,6 +8,7 @@
 ### Fixes
 - Use UnitNameUnmodified over UnitName.
 - Not all workflows in FRP were paused during restrictions, like roster building, but this is now fixed.
+- Suspend pull machinery while held profile is fresh.
 
 ## 0.4.6
 
