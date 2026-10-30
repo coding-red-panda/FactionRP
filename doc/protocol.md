@@ -91,7 +91,7 @@ before reassembly for `REJECTED_SENDER_TTL` (300s). The block decays so a
 peer that upgrades mid-session recovers automatically; blocked traffic is
 still counted in inbound byte stats, it just never reaches the assembler.
 
-- **Data envelopes**: `data` is the LibSerialize+LibDeflate-encoded profile
+- **Data envelopes**: `data` is the LibSerialize-serialized, deflate-compressed profile, NUL-escaped for the addon channel
   table `{ profileID, sections }`.
 - **Control envelopes**: `subject` is `_frp`; `data` is plain text
   `FRP1 <verb> <arg>`.
