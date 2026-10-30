@@ -13,9 +13,11 @@ bytes) and travels over these mediums:
 | Medium     | API path                                         | Reach                        |
 |------------|--------------------------------------------------|------------------------------|
 | `CHANNEL`  | `SendAddonMessage` on the `frp<N>comms` channel  | same-faction subscribers     |
-| `PARTY`/`RAID`/`INSTANCE_CHAT` | `SendAddonMessage`      | current group                |
 | `WHISPER`  | `SendAddonMessage` to a player                   | cross-faction club members   |
 | `BNET`     | `BNSendGameData` to a `gameAccountID`            | BNet friends, any faction    |
+
+The send primitives accept group kinds (`PARTY`/`RAID`/`INSTANCE_CHAT`) but
+nothing uses them — group comms are TRP3's domain.
 
 `frp<N>comms` is an ordinary custom chat channel (like `/1`), joined via
 `JoinTemporaryChannel`. Custom channels are faction-scoped — an
