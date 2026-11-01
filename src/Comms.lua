@@ -37,7 +37,8 @@ function Comms:init()
 	-- Memoized online WoW BNet account ids (see bnetAccounts).
 	self.bnetAcctMemo = { ids = {}, at = 0 }
 	-- FRP1 BNet peer confirmation state, session-only, reset in place:
-	--   [gameAccountID] = { confirmedAt, probeSentAt, ignoredAt, lastHi, version }
+	--   [gameAccountID] = { confirmedAt, probeSentAt, ignoredAt, lastHi,
+	--     version, proto }
 	self.bnetPeers = {}
 	self.probeCursor = 0
 	-- [senderKey] = GetTime() expiry; chunks from senders whose messages
@@ -365,11 +366,14 @@ end
 
 -- Channel -------------------------------------------------------------------
 
---- Leave any FactionRP channel that is not our protocol generation. Channel
--- membership survives /reload, so an upgraded client would otherwise keep
--- hearing old-protocol traffic for the session.
+--- Leave any FactionRP channel outside our join set. Channel membership
+-- survives /reload, so stale-generation channels would otherwise keep
+-- streaming their traffic for the session.
 function Comms:leaveForeignChannels()
-	local current = C.COMM_CHANNEL:lower()
+	local keep = { [C.COMM_CHANNEL:lower()] = true }
+	for _, name in pairs(C.LEGACY_CHANNELS) do
+		keep[name:lower()] = true
+	end
 	-- Direct check for the legacy channel; hidden channels may not
 	-- enumerate in GetChannelList.
 	local legacyId = GetChannelName("FactionRP")
@@ -381,9 +385,8 @@ function Comms:leaveForeignChannels()
 		local _, name = GetChannelList(i)
 		if type(name) == "string" then
 			local lower = name:lower()
-			local gen = lower:match("^frp(%d+)comms$")
-			if (lower == "factionrp" or (gen and tonumber(gen) ~= C.PROTO_MAJOR))
-				and lower ~= current
+			if (lower == "factionrp" or lower:match("^frp%d*comms$"))
+				and not keep[lower]
 			then
 				LeaveChannelByName(name)
 			end
@@ -391,27 +394,37 @@ function Comms:leaveForeignChannels()
 	end
 end
 
---- Join the hidden same-faction channel. Joining fires CHANNEL_UI_UPDATE
--- churn in the client even when already joined, so skip when we are in.
+--- Join the hidden same-faction channels: the unified channel plus every
+-- supported legacy channel. Joining fires CHANNEL_UI_UPDATE churn in the
+-- client even when already joined, so skip the ones we are in.
 function Comms:joinChannel()
 	if ns.Util.isPaused() then
 		return
 	end
 
 	self:leaveForeignChannels()
-	if self:channelIndex() then
-		return -- already in the channel; nothing to do
+	if not self:channelIndexFor(C.COMM_CHANNEL) then
+		JoinTemporaryChannel(C.COMM_CHANNEL)
 	end
-	JoinTemporaryChannel(C.COMM_CHANNEL)
+	for _, name in pairs(C.LEGACY_CHANNELS) do
+		if not self:channelIndexFor(name) then
+			JoinTemporaryChannel(name)
+		end
+	end
 end
 
---- Current channel index for the relay channel, or nil if not joined.
-function Comms:channelIndex()
-	local id = GetChannelName(C.COMM_CHANNEL)
+--- Current channel index for a named channel, or nil if not joined.
+function Comms:channelIndexFor(name)
+	local id = GetChannelName(name)
 	if not id or id == 0 then
 		return nil
 	end
 	return id
+end
+
+--- Current channel index for the unified channel, or nil if not joined.
+function Comms:channelIndex()
+	return self:channelIndexFor(C.COMM_CHANNEL)
 end
 
 --- Live member count of the comms channel: 0 while not joined, and until
@@ -820,15 +833,16 @@ end
 local function peerEntry(peers, id)
 	local p = peers[id]
 	if not p then
-		p = { confirmedAt = 0, probeSentAt = 0, ignoredAt = 0, lastHi = 0, version = nil }
+		p = { confirmedAt = 0, probeSentAt = 0, ignoredAt = 0, lastHi = 0,
+			version = nil, proto = nil }
 		peers[id] = p
 	end
 	return p
 end
 
 --- Stamp `id` as confirmed: it sent us a parseable FRP message. Records
--- the remote addon version when control messages carry it.
-function Comms:bnetPeerSeen(id, version)
+-- the remote addon version and protocol generation when they are carried.
+function Comms:bnetPeerSeen(id, version, proto)
 	if not id then
 		return
 	end
@@ -840,8 +854,13 @@ function Comms:bnetPeerSeen(id, version)
 	if version and version ~= "" then
 		p.version = version
 	end
+	if proto then
+		p.proto = proto
+	end
 	if was == 0 and ns.debugPeer then
-		ns.debugPeer("bnet " .. id .. " confirmed" .. (p.version and (" v" .. p.version) or ""))
+		ns.debugPeer("bnet " .. id .. " confirmed"
+			.. (p.version and (" v" .. p.version) or "")
+			.. (p.proto and (" g" .. p.proto) or ""))
 	end
 end
 
@@ -946,8 +965,11 @@ function Comms:onChatMsgAddon(prefix, text, channel, sender)
 		return
 	end
 
-	-- Our own channel/group echo does not need to be read.
-	if self.ownName and ns.Util.normalizeUnitName(sender) == self.ownName then
+	-- Our own channel/group echo does not need to be read. selfEchoUntil is
+	-- the /frp selfx loopback window: only whispers to self pass through.
+	if self.ownName and ns.Util.normalizeUnitName(sender) == self.ownName
+		and (channel ~= "WHISPER" or GetTime() > (self.selfEchoUntil or 0))
+	then
 		if ns.statsError then
 			ns.statsError("self_echo")
 		end

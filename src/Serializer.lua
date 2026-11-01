@@ -1,13 +1,11 @@
 -- Serializer.lua
 --
 -- Messages to wire-safe bytes and back:
---   1. Profile codec   - table <-> compressed, channel-safe string
+--   1. Channel escape  - NUL-safety for the addon channel
 --   2. Envelope codec  - the "||"-delimited message header + data
 --   3. Chunking        - split across the 255-byte message limit, reassemble
 --
--- Profile data pipeline:
---   table --Serialize--> string --CompressString(Deflate)--> bytes --channelEncode--> safe string
--- Wire bytes are unchanged: raw deflate plus the same NUL-escaper.
+-- The profile codec is per-generation and lives in Dialects.lua.
 --
 -- The encoded string contains no NULL byte (the only byte the channel
 -- forbids); it may contain "|" or ":", so framing parses positionally.
@@ -18,12 +16,6 @@ local C = ns.Const
 local Serializer = {}
 ns.Serializer = Serializer
 
-local LibSerialize = LibStub("LibSerialize")
-
--- I got sick of writing Enum.Compressionwhatever
-local DEFLATE = Enum.CompressionMethod.Deflate
-local MAX_SIZE = Enum.CompressionLevel.OptimizeForSize
-
 -- NUL-escaper for the addon channel; byte-identical to the old codec
 -- (\000 -> \001\002, \001 -> \001\003). NUL must be %z in patterns.
 function Serializer.channelEncode(s)
@@ -33,56 +25,14 @@ function Serializer.channelDecode(s)
 	return (s:gsub("\001\002", "\000"):gsub("\001\003", "\001"))
 end
 
--- Profile data codec --------------------------------------------------------
-
---- Serialize+compress+encode an (opaque) profile data table into a wire-safe
--- string. Returns nil if the value cannot be serialized.
--- @param data table
--- @return string|nil
-function Serializer.encodeProfile(data)
-	-- pcall keeps a single unserializable profile from erroring the caller.
-	local ok, serialized = pcall(function()
-		return LibSerialize:Serialize(data)
-	end)
-	if not ok or not serialized then
-		return nil
-	end
-	local compressed = C_EncodingUtil.CompressString(serialized,
-		DEFLATE, MAX_SIZE)
-	if not compressed then
-		return nil
-	end
-	return Serializer.channelEncode(compressed)
-end
-
---- Reverse of encodeProfile. Returns nil on any decode/integrity failure.
--- @param encoded string
--- @return table|nil
-function Serializer.decodeProfile(encoded)
-	local compressed = Serializer.channelDecode(encoded)
-	if not compressed then
-		return nil
-	end
-	-- pcall: malformed wire input may error rather than return nil.
-	local okD, serialized = pcall(C_EncodingUtil.DecompressString,
-		compressed, DEFLATE)
-	if not okD or not serialized then
-		return nil
-	end
-	local ok, value = LibSerialize:Deserialize(serialized)
-	if not ok then
-		return nil
-	end
-	return value
-end
-
 -- Envelope codec ------------------------------------------------------------
 --
 -- Wire layout (see doc/protocol.md):
 --   SENDER || SUBJECT || NAME-REALM || ADDON || ORIGIN-TIME || CONTENT-VERSION
 --        || PROTO-MAJOR || DATA
--- Receivers reject envelopes on a lower PROTO_MAJOR. DATA is always last so
--- "||" inside the payload is preserved.
+-- PROTO-MAJOR stamps the sender's true generation; receivers decode payloads
+-- via DIALECTS[min(stamp, own)] and reject stamps below the supported floor.
+-- DATA is always last so "||" inside the payload is preserved.
 
 local SEP_LEN = #C.SEPARATOR
 
@@ -96,7 +46,8 @@ function Serializer.buildMessage(msg)
 	-- can be unknown when getUnitID cannot see the realm (issue #26).
 	return msg.sender .. sep .. msg.subject .. sep .. (msg.unitID or "") .. sep
 		.. msg.addon .. sep .. tostring(msg.originTime) .. sep
-		.. msg.contentVersion .. sep .. C.PROTO_MAJOR .. sep .. msg.data
+		.. msg.contentVersion .. sep
+		.. tostring(msg.protoVer or C.PROTO_MAJOR) .. sep .. msg.data
 end
 
 --- Parse an envelope string back into a message table. Returns nil if the

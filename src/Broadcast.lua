@@ -26,6 +26,7 @@ function Broadcast:init()
 	--     lp      last probe sent        pr   consecutive unanswered probes,
 	--     ign     ignored-since time     lastHi last HI we sent them,
 	--     version peer's addon version (when seen)
+	--     proto   peer's protocol generation (latest envelope stamp)
 	--   }
 	--   xfacContacts: proven cross-faction reachable RP-AddOn users, not
 	--     necessarily FRP.
@@ -61,11 +62,13 @@ function Broadcast:init()
 	--     served contact to spent and once every tier's draw is drained
 	--     all spent piles reshuffle back, so order decorrelates across
 	--     clients and each contact serves at most once per cycle.
-	--   pendingServes[key] = { subject, unitID, medium, target, at, mesh, ok }
+	--   pendingServes[key] = { subject, unitID, medium, target, at, mesh, ok,
+	--     peerGen }
 	--     key = "<peer>:<guid>". ACK'd serves awaiting the requester's OK
 	--     ok = grant already received while a serve-side refresh pends
+	--     peerGen = requester's protocol generation (its REQ's clamped stamp)
 	--   freshenPending[key] = { mode, subject, unitID, medium, target,
-	--                           reqAt, reqPid, reqCvh }
+	--                           reqAt, reqPid, reqCvh, peerGen }
 	--     mode "ack": channel REQ whose ACK waits on an RP-AddOn refresh
 	--     mode "serve": unicast REQ whose serve waits on refresh and OK
 	--     mode "fetch": unicast REQ for an unserved-but-pullable unit;
@@ -270,10 +273,32 @@ local function ownUnitID()
 	return Util.getUnitID("player") or ""
 end
 
---- Build (and chunk) a control envelope: subject "_frp", data "FRP1 <verb>
--- <arg>". Called at request/probe time only, not a hot path.
--- @return table Chunk list.
-function Broadcast:buildCtl(verb, arg)
+--- Highest generation a peer is known to speak, from its own envelope
+-- stamps. nil means nothing recorded; send at own generation.
+function Broadcast:peerGen(medium, target)
+	if medium == "BNET" then
+		local p = ns.comms.bnetPeers[target]
+		return p and p.proto
+	end
+	local key = Util.normalizeUnitName(target)
+	local p = key and self.relays[key]
+	return p and p.proto
+end
+
+--- Generation to encode a leg for (medium, target): min(own, peerGen),
+-- or nil when the peer's generation has no dialect.
+function Broadcast:sendGenForPeer(medium, target)
+	return ns.Dialect.sendGen(self:peerGen(medium, target))
+end
+
+--- Build (and chunk) a control envelope: subject "_frp", data per the
+-- dialect for `gen`. Called at request/probe time only, not a hot path.
+-- @return table|nil Chunk list, or nil when the dialect cannot encode.
+function Broadcast:buildCtl(verb, fields, gen)
+	local data = ns.Dialect.buildCtlData(verb, fields, gen)
+	if not data then
+		return nil
+	end
 	local message = Serializer.buildMessage({
 		sender = self:senderGUID(),
 		subject = C.CTL_SUBJECT,
@@ -281,8 +306,7 @@ function Broadcast:buildCtl(verb, arg)
 		addon = "FRP",
 		originTime = time(),
 		contentVersion = "0",
-		data = arg and (C.CTL_PROTO .. " " .. verb .. " " .. arg)
-			or (C.CTL_PROTO .. " " .. verb),
+		data = data,
 	})
 	return Serializer.chunk(message)
 end
@@ -290,21 +314,25 @@ end
 -- Handshake chunks are constant per session; build once, reuse forever.
 function Broadcast:ctlHello()
 	if not self._hello then
-		self._hello = self:buildCtl("HELLO", C.VERSION)
+		self._hello = self:buildCtl("HELLO", { version = C.VERSION })
 	end
 	return self._hello
 end
 
 function Broadcast:ctlHi()
 	if not self._hi then
-		self._hi = self:buildCtl("HI", C.VERSION)
+		self._hi = self:buildCtl("HI", { version = C.VERSION })
 	end
 	return self._hi
 end
 
 --- Send a chunk-list to one peer: BNet to the gameAccountID, anything else
--- as a whisper to the named sender.
+-- as a whisper to the named sender. A nil chunk list (a dialect could not
+-- encode) counts as a send failure like a queue drop.
 function Broadcast:sendToPeer(chunks, medium, target)
+	if not chunks then
+		return false
+	end
 	if medium == "BNET" then
 		return ns.comms:sendChunksBNet(chunks, target)
 	end
@@ -319,8 +347,10 @@ local function ownVersion()
 	return C_AddOns.GetAddOnMetadata(C.ADDON_NAME, "Version") or C.VERSION
 end
 
---- One-time broadcast of our addon version on the comm channel. Retried
--- while the channel join pends; gives up after C.VER_BROADCAST_ATTEMPTS.
+--- One-time broadcast of our addon version on every channel we sit on, plus
+-- the pinned stray channel of an amputated generation. VER is frozen
+-- vocabulary, so one chunk build covers all of them. Retried while channel
+-- joins pend; gives up after C.VER_BROADCAST_ATTEMPTS.
 function Broadcast:broadcastVersion()
 	if Util.isPaused() then
 		self.versionPending = true
@@ -335,37 +365,38 @@ function Broadcast:broadcastVersion()
 	end
 	local comms = ns.comms
 
-	-- Stranded peers sit on a disjoint channel; join the pinned legacy
-	-- channel long enough to launch the announcement there too.
-	local prevChan = C.COMM_CHANNEL_PROTO3
-	local prevIdx = prevChan and GetChannelName(prevChan)
-	if prevIdx == 0 then
-		prevIdx = nil
+	-- Stragglers on the amputated channel sit outside our join set; join it
+	-- only long enough to launch the announcement there.
+	local strayChan = C.VER_STRAY_CHANNEL
+	local strayIdx = strayChan and GetChannelName(strayChan)
+	if strayIdx == 0 then
+		strayIdx = nil
 	end
-	if prevChan and not prevIdx then
-		JoinTemporaryChannel(prevChan)
-		prevIdx = GetChannelName(prevChan)
-		if prevIdx == 0 then
-			prevIdx = nil
+	if strayChan and not strayIdx then
+		JoinTemporaryChannel(strayChan)
+		strayIdx = GetChannelName(strayChan)
+		if strayIdx == 0 then
+			strayIdx = nil
 		end
 	end
 
 	local idx = comms and comms:channelIndex()
-	if Util.commsRestricted() or not idx or (prevChan and not prevIdx) then
+	if Util.commsRestricted() or not idx or (strayChan and not strayIdx) then
 		self.verAttempts = self.verAttempts + 1
 		if self.verAttempts < C.VER_BROADCAST_ATTEMPTS then
 			C_Timer.After(C.VER_BROADCAST_RETRY, function()
 				self:broadcastVersion()
 			end)
-		elseif prevChan then
-			LeaveChannelByName(prevChan)
+		elseif strayChan then
+			LeaveChannelByName(strayChan)
 		end
 		if ns.debugPeer then
 			ns.debugPeer("ver broadcast deferred (channel join pending)")
 		end
 		return
 	end
-	if comms:sendChunksAddon(self:buildCtl("VER", version), "CHANNEL", idx) then
+	local chunks = self:buildCtl("VER", { version = version })
+	if comms:sendChunksAddon(chunks, "CHANNEL", idx) then
 		if ns.statsLeg then
 			ns.statsLeg("ver", 1)
 		end
@@ -373,26 +404,27 @@ function Broadcast:broadcastVersion()
 			ns.debugPeer("ver " .. version .. " -> channel")
 		end
 	end
-	if prevChan then
-		if comms:sendChunksChannel(self:buildCtl("VER", version), prevChan)
-			and ns.debugPeer
-		then
-			ns.debugPeer("ver " .. version .. " -> " .. prevChan)
+	for _, name in pairs(C.LEGACY_CHANNELS) do
+		comms:sendChunksChannel(chunks, name)
+	end
+	if strayChan then
+		if comms:sendChunksChannel(chunks, strayChan) and ns.debugPeer then
+			ns.debugPeer("ver " .. version .. " -> " .. strayChan)
 		end
 		-- Keep membership until the paced queue has flushed the chunk.
 		C_Timer.After(C.VER_PREV_CHANNEL_HOLD, function()
-			LeaveChannelByName(prevChan)
+			LeaveChannelByName(strayChan)
 		end)
 	end
 end
 
---- REQ argument: subject guid plus our unitID and held freshness
--- (as-of stamp, profileID, content-version hash) so stale holders can
--- suppress themselves. `mesh` appends the sampled-mesh marker.
-local function reqArg(guid, unitID, mesh)
+--- REQ fields: subject guid plus our unitID and held freshness (as-of
+-- stamp, profileID, content-version hash) so stale holders can suppress
+-- themselves. `mesh` sets the sampled-mesh flag.
+local function reqFields(guid, unitID, mesh)
 	local wire = unitID and Util.fullUnitName(unitID)
 	if not wire then
-		return guid
+		return { guid = guid }
 	end
 	local floor = ns.cache:freshnessFloor(guid, unitID)
 	local pid, cvh = "-", "-"
@@ -409,8 +441,11 @@ local function reqArg(guid, unitID, mesh)
 			cvh = rec.cv and Util.hashStr(rec.cv) or "-"
 		end
 	end
-	return string.format("%s %s %d %s %s%s", guid, wire, floor, pid, cvh,
-		mesh and (" " .. C.REQ_MESH_FLAG) or "")
+	return {
+		guid = guid, unitID = wire, seenAt = floor,
+		pid = pid, cvHash = cvh,
+		flag = mesh and C.REQ_MESH_FLAG or nil,
+	}
 end
 
 --- Whether the register's held copy is fresh enough to serve without a
@@ -889,11 +924,13 @@ end
 function Broadcast:issueRequest(guid, unitID, now)
 	-- Stamp the cooldown up front so a failed send cannot retry-storm.
 	self.recentReqs[guid] = now
-	local chunks = self:buildCtl("REQ", reqArg(guid, unitID))
 	local comms = ns.comms
 	local contact = self:reqContact(guid, now)
+	local chunks = contact
+		and self:buildCtl("REQ", reqFields(guid, unitID),
+			self:sendGenForPeer(contact.medium, contact.target))
 	local queueStart = comms.queue.tail
-	if not contact
+	if not chunks
 		or not self:sendToPeer(chunks, contact.medium, contact.target)
 	then
 		-- Nobody reachable: stranger subjects still get the channel leg.
@@ -1046,7 +1083,8 @@ function Broadcast:sendSampledReq(guid, req)
 		return 0
 	end
 	local comms = ns.comms
-	local chunks = self:buildCtl("REQ", reqArg(guid, req.unitID, true))
+	local chunks = self:buildCtl("REQ", reqFields(guid, req.unitID, true),
+		C.PROTO_MAJOR)
 	local legs = 0
 	for _, name in ipairs(targets) do
 		if comms:sendChunksAddon(chunks, "WHISPER", name) then
@@ -1077,26 +1115,41 @@ function Broadcast:pumpChannelReq(guid, req, now)
 	local legs = 0
 	if comms:meshCount() > C.REQ_MESH_SAMPLE_AT then
 		legs = self:sendSampledReq(guid, req)
-	else
-		local idx = comms:channelIndex()
-		if idx and comms:sendChunksAddon(
-				self:buildCtl("REQ", reqArg(guid, req.unitID)), "CHANNEL", idx)
-		then
-			legs = 1
+	end
+	local fields = reqFields(guid, req.unitID)
+	local function chanReq(gen, name)
+		if not comms:channelIndexFor(name) then
+			return
+		end
+		local chunks = self:buildCtl("REQ", fields, gen)
+		if chunks and comms:sendChunksChannel(chunks, name) then
+			legs = legs + 1
 			self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
-			if ns.statsLeg then
-				ns.statsLeg("req_chan", 1)
-			end
 			if ns.debugPeer then
 				ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
-					.. " -> channel")
+					.. " -> " .. name)
 			end
 		end
+	end
+	if comms:meshCount() <= C.REQ_MESH_SAMPLE_AT then
+		-- Thin mesh: broadcast. Stay parked until the channel is joined.
+		if not comms:channelIndex() then
+			return
+		end
+		chanReq(C.PROTO_MAJOR, C.COMM_CHANNEL)
+	end
+	-- The legacy bridge reaches the older fleet in its own dialect,
+	-- dense mesh or thin.
+	for gen, name in pairs(C.LEGACY_CHANNELS) do
+		chanReq(gen, name)
 	end
 	if legs == 0 then
 		return
 	end
 	self.lastChannelReqAt = now
+	if ns.statsLeg then
+		ns.statsLeg("req_chan", legs)
+	end
 	req.state = "broadcast"
 	req.at = now
 	req.acks = {}
@@ -1167,7 +1220,8 @@ function Broadcast:grantBestOffer(guid, req, now)
 		return false
 	end
 	if not self:sendToPeer(
-		self:buildCtl("OK", guid), best.medium, best.target)
+		self:buildCtl("OK", { guid = guid }, best.gen),
+		best.medium, best.target)
 	then
 		return false
 	end
@@ -1216,7 +1270,8 @@ function Broadcast:serveData(serve)
 	end
 	local adapter = ns.getAvailableAdapter()
 	local profile = adapter and adapter:extract(serve.unitID)
-	local encoded = profile and Serializer.encodeProfile(profile.data)
+	local encoded = profile and ns.Dialect.encodeProfile(profile.data,
+		ns.Dialect.sendGen(serve.peerGen))
 	if not encoded then
 		if ns.statsError then
 			ns.statsError("encode_fail")
@@ -1452,7 +1507,7 @@ end
 -- deferred flush so the advertised claim is evaluated at decision time.
 -- @return boolean Whether an ACK was sent.
 function Broadcast:tryAck(subject, unitID, adapter, medium, target,
-						  reqAt, reqPid, reqCvh, selfReq, mesh)
+						  reqAt, reqPid, reqCvh, selfReq, mesh, reqGen)
 	if Util.isPaused() then
 		return false
 	end
@@ -1477,18 +1532,19 @@ function Broadcast:tryAck(subject, unitID, adapter, medium, target,
 	if pending >= C.SERVE_PENDING_CAP then
 		return false
 	end
-	-- arg3 advertises our TRP3 directory last-seen stamp: requesters
+	-- dirSeenAt advertises our TRP3 directory last-seen stamp: requesters
 	-- collecting channel offers weigh it against the content claim.
 	local meta = adapter.profileMeta and adapter:profileMeta(unitID)
 	local dirAt = (meta and meta.at) or 0
 	if not self:sendToPeer(
-		self:buildCtl("ACK", subject .. " " .. offerAt .. " " .. dirAt),
+		self:buildCtl("ACK",
+			{ guid = subject, seenAt = offerAt, dirSeenAt = dirAt }, reqGen),
 		medium, target
 	) then
 		return false
 	end
 	self.pendingServes[serveKey(target, subject)] = {
-		subject = subject, unitID = unitID,
+		subject = subject, unitID = unitID, peerGen = reqGen,
 		medium = medium, target = target, at = now, mesh = mesh,
 	}
 	if leg then
@@ -1505,7 +1561,7 @@ end
 -- like the channel path: denied offers and serves obsoleted mid-flight
 -- expire instead of costing a data leg.
 function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
-								reqAt, reqPid, reqCvh, selfReq)
+								reqAt, reqPid, reqCvh, selfReq, reqGen)
 	if Util.isPaused() then
 		return
 	end
@@ -1530,14 +1586,15 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 	local meta = adapter.profileMeta and adapter:profileMeta(unitID)
 	local dirAt = (meta and meta.at) or 0
 	if not self:sendToPeer(
-		self:buildCtl("ACK", subject .. " " .. offerAt .. " " .. dirAt),
+		self:buildCtl("ACK",
+			{ guid = subject, seenAt = offerAt, dirSeenAt = dirAt }, reqGen),
 		medium, target
 	) then
 		return
 	end
 	local key = serveKey(target, subject)
 	self.pendingServes[key] = {
-		subject = subject, unitID = unitID,
+		subject = subject, unitID = unitID, peerGen = reqGen,
 		medium = medium, target = target, at = GetTime(),
 	}
 	if ns.statsLeg then
@@ -1553,6 +1610,7 @@ function Broadcast:serveUnicast(subject, unitID, adapter, medium, target,
 	if not selfReq
 		and adapter.refreshQuery
 		and freshenN < C.REQ_FRESHEN_MAX
+		and not self.selfxNoPull
 		and not serveFreshEnough(adapter, unitID, reqAt)
 		and adapter:refreshQuery(unitID)
 	then
@@ -1595,7 +1653,8 @@ function Broadcast:flushFreshen(key, expected)
 	if entry.mode == "fetch" then
 		-- Data landed: evaluate like a fresh unicast REQ.
 		self:serveUnicast(entry.subject, entry.unitID, adapter, entry.medium,
-			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false)
+			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false,
+			entry.peerGen)
 	elseif entry.mode == "serve" then
 		-- A `*` stub may have refreshed into a real profile mid-wait.
 		if adapter.isDefaultUnit and adapter:isDefaultUnit(entry.unitID) then
@@ -1611,7 +1670,7 @@ function Broadcast:flushFreshen(key, expected)
 	else
 		self:tryAck(entry.subject, entry.unitID, adapter, entry.medium,
 			entry.target, entry.reqAt, entry.reqPid, entry.reqCvh, false,
-			entry.mesh)
+			entry.mesh, entry.peerGen)
 	end
 end
 
@@ -1628,23 +1687,17 @@ function Broadcast:onFreshenReceived(unitID)
 	end
 end
 
---- Dispatch an inbound control message. Reachable on every medium; the
--- HELLO/HI verbs only carry meaning over BNet.
-function Broadcast:onControl(msg, context)
+--- Dispatch an inbound control message, already parsed into a canonical
+-- record by ns.Dialect.parseCtl. Reachable on every medium; the HELLO/HI
+-- verbs only carry meaning over BNet. `ctl.gen` is the generation to use
+-- when replying to this sender.
+function Broadcast:onControl(ctl, msg, context)
 	if Util.isPaused() then
 		return
 	end
 	local comms = ns.comms
 	local now = GetTime()
-	local verb, arg, arg2, arg3, arg4, arg5, arg6 =
-		msg.data:match("^FRP1 (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
-	if not verb then
-		return
-	end
-	-- Exchange verbs carry a subject GUID; empty args (arg == "") are malformed.
-	if arg == "" and verb ~= "HELLO" and verb ~= "HI" then
-		return
-	end
+	local verb = ctl.verb
 	local target = context.gameAccountID or context.senderName
 	if not target then
 		return -- no way to address the peer back
@@ -1654,7 +1707,8 @@ function Broadcast:onControl(msg, context)
 
 	if verb == "HELLO" then
 		if context.medium == "BNET" and context.gameAccountID then
-			comms:bnetPeerSeen(context.gameAccountID, arg)
+			comms:bnetPeerSeen(context.gameAccountID, ctl.args.version,
+				msg.protoVer)
 			if comms:canHi(context.gameAccountID, now)
 				and comms:sendChunksBNet(self:ctlHi(), context.gameAccountID)
 			then
@@ -1670,7 +1724,7 @@ function Broadcast:onControl(msg, context)
 			local key = Util.normalizeUnitName(context.senderName)
 			local p = key and self:relay(key, context.senderName)
 			if p then
-				p.version = arg
+				p.version = ctl.args.version
 				if (now - p.lastHi) >= C.RELAY_HI_COOLDOWN
 					and self:sendToPeer(self:ctlHi(), "WHISPER", target)
 				then
@@ -1683,19 +1737,24 @@ function Broadcast:onControl(msg, context)
 		end
 	elseif verb == "HI" then
 		if context.medium == "BNET" and context.gameAccountID then
-			comms:bnetPeerSeen(context.gameAccountID, arg)
+			comms:bnetPeerSeen(context.gameAccountID, ctl.args.version,
+				msg.protoVer)
 		elseif context.medium == "WHISPER" and context.senderName then
 			-- Inbound already confirmed them; record the version.
 			local key = Util.normalizeUnitName(context.senderName)
 			local p = key and self.relays[key]
 			if p then
-				p.version = arg
+				p.version = ctl.args.version
 			end
 		end
 	elseif verb == "REQ" then
+		local guid = ctl.args.guid
+		local reqAt = ctl.args.seenAt or 0
+		local reqPid = ctl.args.pid or ""
+		local reqCvh = ctl.args.cvHash or ""
 		-- A REQ flagged with the mesh marker is a broadcast delivered by
 		-- whisper, so it takes the channel path on any medium.
-		local meshReq = arg6 == C.REQ_MESH_FLAG
+		local meshReq = ctl.args.flag == C.REQ_MESH_FLAG
 		local wideReq = meshReq
 			or (context.medium ~= "WHISPER" and context.medium ~= "BNET")
 		if wideReq then
@@ -1708,18 +1767,17 @@ function Broadcast:onControl(msg, context)
 			end
 			self.chanReqSenderAt[target] = now
 		end
-		-- "Who can serve subject `arg`?" Ourselves answer directly; anyone
+		-- "Who can serve subject guid?" Ourselves answer directly; anyone
 		-- else resolves by identity consensus. canServe reads the register
 		-- live, so cache-absent subjects are still servable.
-		local selfReq = (arg == self:senderGUID())
+		local selfReq = (guid == self:senderGUID())
 		local unitID
 		if selfReq then
 			unitID = ownUnitID()
 		else
-			unitID = self:resolveSubject(arg, arg2)
+			unitID = self:resolveSubject(guid, ctl.args.unitID or "")
 		end
 		local adapter = ns.getAvailableAdapter()
-		local reqAt = tonumber(arg3) or 0
 		if wideReq then
 			-- Broadcast path: many holders may hear it, so ACK/OK
 			-- arbitration and the serve cooldown still apply.
@@ -1733,7 +1791,9 @@ function Broadcast:onControl(msg, context)
 			end
 			-- Refresh before answering; the ACK defers until data lands
 			-- or REQ_FRESHEN_DELAY elapses.
-			if not selfReq and adapter.refreshQuery then
+			if not selfReq and adapter.refreshQuery
+				and not self.selfxNoPull
+			then
 				local freshenN = 0
 				for _ in pairs(self.freshenPending) do
 					freshenN = freshenN + 1
@@ -1742,11 +1802,11 @@ function Broadcast:onControl(msg, context)
 					and not serveFreshEnough(adapter, unitID, reqAt)
 					and adapter:refreshQuery(unitID)
 				then
-					local key = serveKey(target, arg)
+					local key = serveKey(target, guid)
 					self.freshenPending[key] = {
-						subject = arg, unitID = unitID,
+						subject = guid, unitID = unitID, peerGen = ctl.gen,
 						medium = context.medium, target = target,
-						reqAt = reqAt, reqPid = arg4, reqCvh = arg5,
+						reqAt = reqAt, reqPid = reqPid, reqCvh = reqCvh,
 						mesh = meshReq,
 					}
 					local pending = self.freshenPending[key]
@@ -1754,14 +1814,14 @@ function Broadcast:onControl(msg, context)
 						self:flushFreshen(key, pending)
 					end)
 					if peer then
-						peer("freshen " .. arg .. " (defer ack -> "
+						peer("freshen " .. guid .. " (defer ack -> "
 							.. tostring(target) .. ")")
 					end
 					return
 				end
 			end
-			self:tryAck(arg, unitID, adapter, context.medium, target,
-				reqAt, arg4, arg5, selfReq, meshReq)
+			self:tryAck(guid, unitID, adapter, context.medium, target,
+				reqAt, reqPid, reqCvh, selfReq, meshReq, ctl.gen)
 			return
 		end
 		-- Unicast path: per-sender throttle, then serve or silence.
@@ -1772,16 +1832,17 @@ function Broadcast:onControl(msg, context)
 		self.reqSenderAt[target] = now
 		if unitID and adapter then
 			if adapter.canServe and adapter:canServe(unitID) then
-				self:serveUnicast(arg, unitID, adapter, context.medium, target,
-					reqAt, arg4, arg5, selfReq)
+				self:serveUnicast(guid, unitID, adapter, context.medium, target,
+					reqAt, reqPid, reqCvh, selfReq, ctl.gen)
 			elseif not selfReq
 				and adapter.canPull and adapter:canPull(unitID)
 				and adapter.refreshQuery
+				and not self.selfxNoPull
 			then
 				-- Known but unserved: pull the profile on demand. A fresh
 				-- fetch record means the register owns this subject until
 				-- the TTL lapses. Never re-query it back-to-back.
-				local rec = self.fetchCache[arg]
+				local rec = self.fetchCache[guid]
 				if rec and (now - rec.at) < C.REQ_FETCH_TTL then
 					return
 				end
@@ -1800,19 +1861,20 @@ function Broadcast:onControl(msg, context)
 				if freshenN < C.REQ_FRESHEN_MAX
 					and adapter:refreshQuery(unitID)
 				then
-					self.fetchCache[arg] = { at = now, unitID = unitID }
-					local key = serveKey(target, arg)
+					self.fetchCache[guid] = { at = now, unitID = unitID }
+					local key = serveKey(target, guid)
 					self.freshenPending[key] = {
-						mode = "fetch", subject = arg, unitID = unitID,
+						mode = "fetch", subject = guid, unitID = unitID,
 						medium = context.medium, target = target,
-						reqAt = reqAt, reqPid = arg4, reqCvh = arg5,
+						reqAt = reqAt, reqPid = reqPid, reqCvh = reqCvh,
+						peerGen = ctl.gen,
 					}
 					local pending = self.freshenPending[key]
 					C_Timer.After(C.REQ_FETCH_DELAY, function()
 						self:flushFreshen(key, pending)
 					end)
 					if peer then
-						peer("fetch " .. arg .. " (pull on demand -> "
+						peer("fetch " .. guid .. " (pull on demand -> "
 							.. tostring(target) .. ")")
 					end
 				end
@@ -1820,16 +1882,17 @@ function Broadcast:onControl(msg, context)
 		end
 		-- Misses stay silent.
 	elseif verb == "ACK" then
-		-- offerAt is the holder's content claim; arg3 is its TRP3
+		local guid = ctl.args.guid
+		-- seenAt is the holder's content claim; dirSeenAt is its TRP3
 		-- directory last-seen stamp. A claim at or under our persisted
 		-- floor cannot carry anything newer — silence is rejection.
-		local req = self.requests[arg]
-		local offerAt = tonumber(arg2) or 0
+		local req = self.requests[guid]
+		local offerAt = ctl.args.seenAt or 0
 		if req and (offerAt + C.FRESHNESS_SKEW)
-			< ns.cache:freshnessFloor(arg, req.unitID)
+			< ns.cache:freshnessFloor(guid, req.unitID)
 		then
 			if peer then
-				peer("ack " .. arg .. " <- " .. tostring(target)
+				peer("ack " .. guid .. " <- " .. tostring(target)
 					.. " denied (stale claim)")
 			end
 		elseif req and req.state == "contact" and req.target == target then
@@ -1838,12 +1901,13 @@ function Broadcast:onControl(msg, context)
 			req.at = now
 			req.winner = { medium = context.medium, target = target }
 			-- The grant the server's pendingServe waits on.
-			self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
+			self:sendToPeer(self:buildCtl("OK", { guid = guid }, ctl.gen),
+				context.medium, target)
 			if leg then
 				leg("ok", 1)
 			end
 			if peer then
-				peer("ack " .. (req.unitID or Util.nameForGuid(arg))
+				peer("ack " .. (req.unitID or Util.nameForGuid(guid))
 					.. " <- " .. tostring(target))
 			end
 		elseif req and req.state == "chan-wait"
@@ -1855,12 +1919,13 @@ function Broadcast:onControl(msg, context)
 			req.at = now
 			req.winner = { medium = context.medium, target = target }
 			req.acks = nil
-			self:sendToPeer(self:buildCtl("OK", arg), context.medium, target)
+			self:sendToPeer(self:buildCtl("OK", { guid = guid }, ctl.gen),
+				context.medium, target)
 			if leg then
 				leg("ok", 1)
 			end
 			if peer then
-				peer("ack " .. (req.unitID or Util.nameForGuid(arg))
+				peer("ack " .. (req.unitID or Util.nameForGuid(guid))
 					.. " <- " .. tostring(target) .. " (late contact)")
 			end
 		elseif req and req.state == "broadcast"
@@ -1869,17 +1934,17 @@ function Broadcast:onControl(msg, context)
 			-- Collect the offer; the window end grants the freshest.
 			if req.acks and #req.acks < C.REQ_CHANNEL_ACK_CAP then
 				req.acks[#req.acks + 1] = {
-					medium = context.medium, target = target,
-					offerAt = offerAt, dirAt = tonumber(arg3) or 0,
+					medium = context.medium, target = target, gen = ctl.gen,
+					offerAt = offerAt, dirAt = ctl.args.dirSeenAt or 0,
 				}
 				if peer then
-					peer("ack " .. arg .. " <- " .. tostring(target)
+					peer("ack " .. guid .. " <- " .. tostring(target)
 						.. " (offer " .. #req.acks .. ")")
 				end
 			end
 		end
 	elseif verb == "OK" then
-		local key = serveKey(target, arg)
+		local key = serveKey(target, ctl.args.guid)
 		local serve = self.pendingServes[key]
 		if serve then
 			local fp = self.freshenPending[key]
@@ -1892,24 +1957,25 @@ function Broadcast:onControl(msg, context)
 			end
 		end
 	elseif verb == "NOK" then
-		self.pendingServes[serveKey(target, arg)] = nil
-		self.freshenPending[serveKey(target, arg)] = nil
+		self.pendingServes[serveKey(target, ctl.args.guid)] = nil
+		self.freshenPending[serveKey(target, ctl.args.guid)] = nil
 	elseif verb == "VER" then
 		-- Peer version announcement. Print a notice when it beats ours,
 		-- deduped by the highest version seen this session.
+		local version = ctl.args.version
 		if not self.topPeerVersion
-			or Util.versionCompare(arg, self.topPeerVersion) > 0
+			or Util.versionCompare(version, self.topPeerVersion) > 0
 		then
-			self.topPeerVersion = arg
+			self.topPeerVersion = version
 			local own = ownVersion()
-			if Util.versionCompare(arg, own) > 0
+			if Util.versionCompare(version, own) > 0
 				and (not self.notifiedVersion
-					or Util.versionCompare(arg, self.notifiedVersion) > 0)
+					or Util.versionCompare(version, self.notifiedVersion) > 0)
 			then
-				self.notifiedVersion = arg
-				ns.Print(("|cffffd200outdated:|r A new version of FactionRP is available. Please update to %s. (Yours: %s)"):format(arg, own))
+				self.notifiedVersion = version
+				ns.Print(("|cffffd200outdated:|r A new version of FactionRP is available. Please update to %s. (Yours: %s)"):format(version, own))
 				if peer then
-					peer("update notice for " .. arg)
+					peer("update notice for " .. version)
 				end
 			end
 		end
@@ -1961,8 +2027,10 @@ function Broadcast:onMessage(raw, context)
 		return
 	end
 
-	-- Hard protocol gate, before any peer-state side effects.
-	if not msg.protoVer or msg.protoVer < C.PROTO_MAJOR then
+	-- Hard protocol gate, before any peer-state side effects: stamps below
+	-- the supported dialect floor are amputated generations. Newer stamps
+	-- pass; decode resolves min(stamp, own) downstream.
+	if not msg.protoVer or msg.protoVer < ns.Dialect.floor() then
 		if ns.statsError then
 			ns.statsError("proto_old")
 		end
@@ -1970,15 +2038,19 @@ function Broadcast:onMessage(raw, context)
 		return
 	end
 
-	-- Drop our own echoed traffic.
-	if msg.sender == self:senderGUID() then
+	-- Drop our own echoed traffic. selfEchoUntil is the selfx loopback
+	-- window: our own serves come back through the whole path on purpose.
+	if msg.sender == self:senderGUID()
+		and GetTime() > (ns.comms and ns.comms.selfEchoUntil or 0)
+	then
 		if ns.statsError then
 			ns.statsError("self_echo")
 		end
 		return
 	end
 	-- A parseable inbound whisper from an xfac club member confirms a
-	-- relay; ctl verbs confirm senders too.
+	-- relay; ctl verbs confirm senders too. The envelope stamp records the
+	-- sender's generation for dialect selection.
 	if context.medium == "WHISPER" and context.senderName then
 		local key = Util.normalizeUnitName(context.senderName)
 		if key and Util.isXfacClubMember(context.senderName) then
@@ -1989,6 +2061,7 @@ function Broadcast:onMessage(raw, context)
 			p.conf = GetTime()
 			p.pr = 0
 			p.ign = 0
+			p.proto = msg.protoVer
 
 -- //Edit: We have a reply so failures before should not block this contact
 			ns.comms.whisperBackoff[key] = nil
@@ -1997,11 +2070,14 @@ function Broadcast:onMessage(raw, context)
 	end
 	-- Any parseable BNet message confirms the account runs FactionRP.
 	if context.medium == "BNET" and context.gameAccountID then
-		ns.comms:bnetPeerSeen(context.gameAccountID)
+		ns.comms:bnetPeerSeen(context.gameAccountID, nil, msg.protoVer)
 	end
 	-- Control messages never reach the cache or register.
 	if msg.subject == C.CTL_SUBJECT then
-		self:onControl(msg, context)
+		local ctl = ns.Dialect.parseCtl(msg)
+		if ctl then
+			self:onControl(ctl, msg, context)
+		end
 		return
 	end
 	-- Drop data legs that cannot be a granted serve.
@@ -2048,7 +2124,7 @@ function Broadcast:onMessage(raw, context)
 	-- peek first: duplicates and stale copies skip the expensive decode.
 	local result = ns.cache:peek(candidate)
 	if not result then
-		local profileData = Serializer.decodeProfile(msg.data)
+		local profileData = ns.Dialect.decodeProfile(msg.data, msg.protoVer)
 		if not profileData then
 			if ns.statsError then
 				ns.statsError("undecodable")

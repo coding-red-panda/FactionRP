@@ -10,22 +10,26 @@ ns.Const = C
 -- Identity -----------------------------------------------------------------
 
 C.ADDON_NAME = "FactionRP"
-C.VERSION = "0.4.7"
+C.VERSION = "0.5.0"
 
--- Wire-protocol generation, stamped into every envelope and the channel
--- name. Peers on a lower PROTO_MAJOR are rejected; bump on breaking changes.
-C.PROTO_MAJOR = 5
+-- Wire-protocol generation, stamped into every envelope. Peers below the
+-- supported dialect floor are rejected; bump on breaking changes.
+C.PROTO_MAJOR = 6
 
 -- Communication -------------------------------------------------------------
 
 -- Addon-message prefix registered with the client; max 16 characters.
 C.MSG_PREFIX = "FactionRP"
 
--- Hidden channel for same-faction traffic. Carries the protocol generation
--- so older clients sit on a disjoint channel.
-C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp5comms"
--- Previous generation's channel, briefly joined to announce VER there.
-C.COMM_CHANNEL_PROTO3 = "frp3comms" -- stranded-generation channel; repoint to the outgoing channel when PROTO_MAJOR bumps
+-- Hidden channel for same-faction traffic, fixed since generation 6. The
+-- generation travels in the envelope, so all future generations share it.
+C.COMM_CHANNEL = "frpcomms"
+-- Transitional bridge: channels of still-supported generations join beside
+-- the unified one. Delete an entry when its dialect is dropped.
+C.LEGACY_CHANNELS = { [5] = "frp5comms" }
+-- A fully amputated generation's channel, briefly joined to announce VER
+-- there (stragglers still parse a newer-stamped FRP1 VER). Repoint on bumps.
+C.VER_STRAY_CHANNEL = "frp3comms"
 
 -- Field separator inside a message payload; virtually never appears in data.
 C.SEPARATOR = "||"
@@ -53,25 +57,18 @@ C.WHISPER_ERROR_WINDOW = 10
 C.REFRESH_QUERY_INTERVAL = 10
 
 -- FRP1 control channel -----------------------------------------------------
--- Control messages are 7-field envelopes whose subject is CTL_SUBJECT
--- (subjects are always GUIDs, so "_frp" never collides). The data field
--- carries "FRP1 <verb> <arg>". Verbs:
+-- Control messages are envelopes whose subject is CTL_SUBJECT (subjects are
+-- always GUIDs, so "_frp" never collides). The data field carries
+-- "FRP1 <verb> <args>".
 --   HELLO <version>  BNet peer probe ("I run FactionRP")
 --   HI <version>     handshake reply
---   REQ <subjectGuid> [unitID] [seenAt] [profileID] [cvHash] [m]
---      pull-exchange request: "who has this profile?" unitID lets a server
---      answer straight from the register; seenAt/profileID/cvHash advertise
---      what the requester already holds so stale holders skip their ACK.
---      A trailing "m" marks a sampled mesh REQ (see mesh sampling below):
---      the recipient runs channel REQ arbitration (ACK, then serve only
---      on OK) instead of serving a whispered REQ at once. Servers too
---      old to parse arg6 just serve immediately, which still works.
---   ACK <subjectGuid> <seenAt> [dirSeenAt]
---      "I can serve it, as of <seenAt>"; dirSeenAt is the server's TRP3
---      directory last-seen stamp (profile.time), a second freshness signal
---      for requesters collecting multiple offers.
---   OK  <subjectGuid>   grant: "you may send it"
---   NOK <subjectGuid>   cancel: winner mid-send, data landed elsewhere
+--   VER <version>    one-time version broadcast on login
+-- These three are the frozen handshake vocabulary: every generation emits
+-- and parses them identically so peers can be discovered before their
+-- generation is known.
+--   REQ/ACK/OK/NOK   negotiated pull-exchange verbs. Their argument schemas
+--   live in the per-generation dialect tables (src/Dialects.lua); dispatch
+--   reads named fields, never positional args.
 -- Control messages are never cached, injected, or relayed.
 C.CTL_SUBJECT = "_frp"
 C.CTL_PROTO = "FRP1"
@@ -146,7 +143,7 @@ C.REQ_CHANNEL_ACK_CAP = 8         -- offers recorded per broadcast
 -- random members instead of broadcasting, bounding the ACK barrage.
 C.REQ_MESH_SAMPLE_AT = 10   -- mesh size above which channel REQs sample
 C.REQ_MESH_SAMPLE_SIZE = 3  -- random members whispered per sampled REQ
-C.REQ_MESH_FLAG = "m"       -- REQ arg6 marker: sampled mesh request
+C.REQ_MESH_FLAG = "m"       -- REQ flag field: sampled mesh request
 
 -- Held-copy suppression: after we accept a profile, local requests for the
 -- subject are suppressed for REQ_HELD_TTL while the RP AddOn's register
