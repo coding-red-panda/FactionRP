@@ -12,15 +12,23 @@ bytes) and travels over these mediums:
 
 | Medium     | API path                                         | Reach                        |
 |------------|--------------------------------------------------|------------------------------|
-| `CHANNEL`  | `SendAddonMessage` on the `frp<N>comms` channel  | same-faction subscribers     |
+| `CHANNEL`  | `SendAddonMessage` on the `frpcomms` channel     | same-faction subscribers     |
 | `WHISPER`  | `SendAddonMessage` to a player                   | cross-faction club members   |
 | `BNET`     | `BNSendGameData` to a `gameAccountID`            | BNet friends, any faction    |
 
 The send primitives accept group kinds (`PARTY`/`RAID`/`INSTANCE_CHAT`) but
 nothing uses them — group comms are TRP3's domain.
 
-`frp<N>comms` is an ordinary custom chat channel (like `/1`), joined via
-`JoinTemporaryChannel`. Custom channels are faction-scoped — an
+`frpcomms` is an ordinary custom chat channel (like `/1`), joined via
+`JoinTemporaryChannel`. Its name is fixed since generation 6: the
+generation travels inside the envelope now, so all future generations
+share one channel instead of minting a fresh `frp<N>comms` per bump.
+While a previous generation's dialect is still supported, its old channel
+is also joined (`C.LEGACY_CHANNELS`, currently `frp5comms`) — channel
+REQs broadcast there in the matching dialect so the older fleet keeps
+serving and being served during the transition. Deleting a dialect's
+entry retires its bridge.
+Custom channels are faction-scoped — an
 opposite-faction player can never be on it — so its job in the exchange is
 the **same-faction holder pool**: every faction-mate who previously pulled
 a subject is a candidate server, and one channel chunk reaches all of them.
@@ -65,7 +73,7 @@ sender || subject || unitID || addon || originTime || contentVersion || protoMaj
 | `addon`          | source RP AddOn id (`TRP3`) — `"FRP"` on control messages        |
 | `originTime`     | freshness claim: `time()` for self-serves; the holder's last-seen "as of" stamp otherwise |
 | `contentVersion` | opaque version string (`c#:k#:m#` section versions)              |
-| `protoMajor`     | wire-protocol generation (`C.PROTO_MAJOR`, currently 5)          |
+| `protoMajor`     | the sender's wire-protocol generation (`C.PROTO_MAJOR`, now 6)    |
 | `data`           | payload; may itself contain `||` — it is always the last field   |
 
 A message is malformed unless all seven separators are present and
@@ -73,19 +81,39 @@ A message is malformed unless all seven separators are present and
 
 ### Protocol versioning
 
-`protoMajor` is a hard interop gate: receivers reject any envelope
-advertising a lower generation (`statsError("proto_old")`), *before* any
-peer-state side effect — a too-old or forged message cannot confirm a relay,
-serve a request, or enter the cache. The gate is one-way: a *newer*
-`protoVer` passes the check, so an older client accepts a newer envelope and
-only fails at `decodeProfile` — it pays the full download before reporting
-the data undecodable. The comm channel also carries the
-generation (`frp5comms`), so older-protocol clients sit on a disjoint channel
-by construction. On load and on every (re)join we additionally *leave* the
-legacy `FactionRP` channel and any `frp<N>comms` channel of a different
-generation — channel membership survives `/reload` (until logout), so an
-upgraded client would otherwise keep hearing the old fleet for the session.
-Bump `C.PROTO_MAJOR` on any wire-incompatible change.
+`protoMajor` stamps the sender's *true* generation on every envelope,
+even when the payload was downgraded for the recipient. Each supported
+generation is described by a frozen dialect table (`DIALECTS` in
+`src/Dialects.lua`): its ctlProto marker, its control-verb argument
+schemas, and its profile codec. Dialects are written once at bump time
+and never edited later; dropping a generation means deleting its entry.
+
+Negotiation works because every leg encodes at
+`min(sender generation, recipient generation)`:
+
+- A peer's generation is knowable from the stamps on its own envelopes
+  and is recorded per session (`relays[].proto`, `bnetPeers[].proto`).
+- Unicast legs encode at `min(own, peerGen)`; channel-context sends
+  encode at the sender's own generation; a REQ's `pendingServe` stores
+  the requester's stamp so the serve comes back in the right dialect.
+- Inbound, the receiver decodes via `DIALECTS[min(stamp, own)]` — the
+  sender's clamp and the receiver's clamp resolve to the same dialect
+  whenever both know each other's generation.
+
+The version gate is now a *floor*: receivers reject any envelope stamped
+below the lowest supported generation (`statsError("proto_old")`), before
+any peer-state side effect — a too-old or forged message cannot confirm a
+relay, serve a request, or enter the cache. That is the semantic
+amputation: generations whose dialect was removed are ignored entirely,
+while supported generations interoperate. Newer-than-own stamps pass and
+decode against our newest dialect, which is correct by construction when
+the sender downgraded for us and merely best-effort when they did not.
+On load and on every (re)join we *leave* the legacy `FactionRP` channel
+and every `frp<N>comms` channel outside our join set — channel membership
+survives `/reload` (until logout), so an upgraded client would otherwise
+keep hearing dead-generation traffic for the session.
+Bump `C.PROTO_MAJOR` on any wire-incompatible change and write the new
+dialect table then.
 
 Because the version field lives inside the envelope, a chunk cannot be
 classified until its message is fully reassembled. To keep old-protocol
@@ -96,10 +124,12 @@ before reassembly for `REJECTED_SENDER_TTL`. The block decays so a
 peer that upgrades mid-session recovers automatically; blocked traffic is
 still counted in inbound byte stats, it just never reaches the assembler.
 
-- **Data envelopes**: `data` is the LibSerialize-serialized, deflate-compressed profile, NUL-escaped for the addon channel
-  table `{ profileID, sections }`.
+- **Data envelopes**: `data` is the dialect-serialized, deflate-compressed,
+  NUL-escaped profile table `{ profileID, sections, clientInfo }` —
+  LibSerialize under dialect 5, native `C_EncodingUtil` CBOR under
+  dialect 6.
 - **Control envelopes**: `subject` is `_frp`; `data` is plain text
-  `FRP1 <verb> <arg>`.
+  `FRP1 <verb> <args>` per the negotiated dialect's verb schema.
 
 ## Chunking and reassembly
 
@@ -132,20 +162,31 @@ Every outbound chunk — data or control — queues through a paced send queue:
 ## The FRP1 control channel
 
 Control messages are ordinary envelopes with `subject = "_frp"` and
-`data = "FRP1 <verb> <arg>"`. `FRP1` is the control-protocol revision.
-Control messages are **never cached, never injected, never relayed** — they
+`data = "FRP1 <verb> <args>"`. Control messages are
+**never cached, never injected, never relayed** — they
 terminate at the recipient. Clients without FRP1 parse the envelope, fail to
 decode `data` as a profile, and drop it harmlessly.
 
+Verbs split into two sets:
+
+- **Frozen handshake vocabulary** — `HELLO`, `HI`, `VER`. Every generation
+  emits and parses `FRP1 <verb> <addonVer>` identically, so a peer can be
+  discovered and told its version is stale before its generation is known.
+- **Negotiated verbs** — `REQ`, `ACK`, `OK`, `NOK`. Each dialect table
+  declares an ordered field schema per verb; `parseCtl` decodes wire text
+  into a canonical record of named fields and `buildCtlData` serializes
+  fields back under the chosen generation. Schemas are append-tolerant:
+  trailing args beyond the declared fields are ignored on parse.
+
 | Verb    | Args                | Meaning                                     |
 |---------|---------------------|---------------------------------------------|
-| `HELLO` | addonVer            | BNet probe — "I run FactionRP"              |
-| `HI`    | addonVer            | handshake reply                             |
-| `VER`   | addonVer            | one-time version broadcast on login (see below) |
-| `REQ`   | subjectGuid [unitID] [seenAt] [pid] [cvHash] [m] | pull request — "who can serve this profile?" |
-| `ACK`   | subjectGuid [seenAt]| "I can serve it, as of `seenAt`"            |
-| `OK`    | subjectGuid         | grant — "you may send it"                   |
-| `NOK`   | subjectGuid         | cancel — winner mid-send, data landed elsewhere |
+| `HELLO` | version             | BNet/whisper probe — "I run FactionRP"      |
+| `HI`    | version             | handshake reply                             |
+| `VER`   | version             | one-time version broadcast on login (see below) |
+| `REQ`   | guid [unitID] [seenAt] [pid] [cvHash] [flag] | pull request — "who can serve this profile?" |
+| `ACK`   | guid seenAt [dirSeenAt]| "I can serve it, as of `seenAt`"         |
+| `OK`    | guid                | grant — "you may send it"                   |
+| `NOK`   | guid                | cancel — winner mid-send, data landed elsewhere |
 
 `REQ` is the only multi-argument verb:
 
@@ -254,19 +295,19 @@ job, so a request never whispers strangers.
 
 Once per session, shortly after login, every client broadcasts its addon
 version — a `VER <addonVer>` control chunk (addonVer read from the
-.toc's `## Version:` via `C_AddOns.GetAddOnMetadata`) on the same-faction comm
-channel only (no BNet/whisper legs; faction-mates logging in with an updated
-build keep the channel covered anyway). Because old-generation peers sit on
-a disjoint channel and could never hear the announcement otherwise, the
-broadcast also joins a pinned legacy channel
-(`C.COMM_CHANNEL_PROTO3`, currently `frp3comms`) just long enough to
+.toc's `## Version:` via `C_AddOns.GetAddOnMetadata`) on every channel it
+sits on (no BNet/whisper legs): the unified `frpcomms` plus each joined
+legacy channel, so every still-supported generation hears it in the
+frozen handshake form. Amputated generations get one courtesy notice too:
+the broadcast joins the pinned stray channel
+(`C.VER_STRAY_CHANNEL`, currently `frp3comms`) just long enough to
 launch the chunk there — membership is dropped `VER_PREV_CHANNEL_HOLD`
 later. The pin targets proto-3 stragglers specifically: proto-4 was
 deliberately starved, not just superseded, so its channel is never
-revisited. Proto-3 clients accept a higher-generation `VER` (the gate
-only rejects *lower* generations), so the notice still reaches them.
-Repoint `COMM_CHANNEL_PROTO3` to the outgoing channel on every
-`PROTO_MAJOR` bump — the same debt then attaches to proto-5. A receiver that hears a newer version
+revisited. Stray-generation clients accept a higher-generation `VER`
+(their gate only rejects *lower* generations), so the notice still
+reaches them. Repoint `VER_STRAY_CHANNEL` on every `PROTO_MAJOR` bump
+that strands a channel. A receiver that hears a newer version
 than its own prints a chat notice that it is outdated. Notices are deduped by
 the highest version already announced that session, so a wave of peers
 logging in cannot spam the chat; `/frp status` shows the newest version
@@ -326,7 +367,8 @@ or direct pull path. It is also skipped whenever we hold any confirmed
 relay at all — a fresh BNet peer or an online club relay — since the
 mesh exists to cover having *no* proven contacts, not to rescue ones
 that failed. On a thin mesh the fallback broadcasts a single
-`REQ` on `frp<N>comms`; on a mesh larger than `REQ_MESH_SAMPLE_AT`
+`REQ` on `frpcomms` (plus one per joined legacy channel, in that channel's
+dialect); on a mesh larger than `REQ_MESH_SAMPLE_AT`
 members it instead whispers the `REQ` — flagged with the `m` marker —
 to `REQ_MESH_SAMPLE_SIZE` random channel members, because a dense
 mesh would have every holder `ACK` at once. The sample is drawn from
@@ -501,8 +543,9 @@ rules (they just hit the per-requester channel throttle harder).
 The serial pipeline exists to bound per-request traffic. Per subject,
 before profile data:
 
-- **REQ legs**: 1 whisper to a single contact; +1 channel chunk (or a
-  `REQ_MESH_SAMPLE_SIZE` whispered sample) only on stranger fallback.
+- **REQ legs**: 1 whisper to a single contact; +1 channel chunk per joined
+  channel (or a `REQ_MESH_SAMPLE_SIZE` whispered sample on the unified
+  channel) only on stranger fallback.
 - **ACKs**: 1 on the contact leg; ≤`REQ_CHANNEL_ACK_CAP` collected offers
   on fallback.
 - **Arbitration**: 1 OK to the best-scoring offer; losers expire silently.

@@ -1,5 +1,22 @@
 ﻿# FactionRP Changelog
 
+## 0.5.0
+
+### Changed
+- Protocol generation 6. Each supported generation is now described by a
+  frozen dialect table (control schemas + profile codec), so older
+  generations degrade gracefully instead of being amputated on every bump.
+- Profile payloads serialize via native C_EncodingUtil CBOR in generation 6.
+  Generation-5 peers are still served LibSerialize legs.
+- The comms channel is now a permanent `frpcomms` shared by all future
+  generations. During the transition the client also joins `frp5comms`, so
+  the older fleet keeps serving and being served.
+- Control messages are schema-driven: handlers read named fields instead of
+  positional args, and each peer's generation is learned from its envelopes
+  so legs encode at min(own, peer).
+- `/frp debug` now opens a debug UI where you can toggle debug settings.
+  Click the text frames to open a copy frame.
+
 ## 0.4.7
 
 ### Changes
