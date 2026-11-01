@@ -92,7 +92,7 @@ C.BNET_MEMO = 15
 -- account after BNET_PROBE_DEADLINE until BNET_IGNORE_TTL decays it or
 -- the account comes online. Confirmations expire BNET_CONFIRM_TTL after
 -- the peer's last proof.
-C.BNET_CONFIRM_TTL = 600
+C.BNET_CONFIRM_TTL = 1800
 C.BNET_PROBE_INTERVAL = 5   -- probe ticker cadence (burst + sweep tick)
 C.BNET_PROBE_DEADLINE = 60  -- an awaiting probe older than this is ignored
 C.BNET_IGNORE_TTL = 600     -- ignore-list decay
@@ -227,7 +227,7 @@ C.GUID_RESOLVE_MEMO = 60
 -- absence explains itself, so they earn a retry when they return.
 C.RELAY_PROBE_INTERVAL = 30 -- gap between whisper probe bursts
 C.RELAY_PROBE_BURST = 5     -- probe targets per burst
-C.RELAY_CONFIRM_TTL = 600   -- relay confirmation expires without fresh proof
+C.RELAY_CONFIRM_TTL = 1800  -- relay confirmation expires without fresh proof
 C.RELAY_PROBE_COOLDOWN = 45 -- per-target probe gap AND the answer window
 C.RELAY_PROBE_MAX = 1       -- unanswered probes before ignoring
 C.RELAY_HI_COOLDOWN = 30    -- min gap between HI replies to the same target
