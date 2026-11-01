@@ -295,6 +295,88 @@ ns.RegisterCommand("relays", function()
 		deckStr[1], deckStr[2], deckStr[3], mapSize(b.forcedTargets or {})))
 end, "Show learned relays/contacts and the pull pipeline state")
 
+-- /factionrp codec --------------------------------------------------------
+--
+-- Known-answer vectors produced by the vendored LibDeflate before removal.
+-- They pin the wire format so the native codec can be verified in-game.
+
+local CODEC_FIXTURE = "FactionRP codec selftest fixture: the quick brown fox jumps over the lazy dog. 1234567890"
+local CODEC_DEFLATE_HEX = "734B4C2EC9CCCF0B0A5048CE4F494D56284ECD492B492D2E5148CBAC28292D4AB55228C94855282CCD4CCE56482ACA2FCF5348CBAF50C82ACD2D2856C82F4B2D024BE72456552AA4E4A7EB29181A199B989A995B581A00FE"
+local CODEC_RAW = "FRP\000codec\001selftest\000vector"
+local CODEC_CHANNEL_HEX = "4652500102636F646563010373656C66746573740102766563746F72"
+local CODEC_PROFILE = {
+	profileID = "selftest",
+	sections = { characteristics = { FN = "Ald", LN = "Vane" } },
+	clientInfo = { client = "Total RP 3", msp = false },
+}
+local CODEC_PIPELINE_HEX = "63345B949C93999A57E2999796AF66945B5C909104115814925F9298A31014A060DC549C9A5C92999F572CF6293923B12831B924B528B3B82433B9584DC9C7CF292C312F55C9CDCFC83127655241517E5A664EAAA70B504F4E5A496A7109E0"
+
+local function deepEqual(a, b)
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in pairs(a) do
+		if not deepEqual(v, b[k]) then
+			return false
+		end
+	end
+	for k in pairs(b) do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+ns.RegisterCommand("codec", function()
+	local ser = ns.Serializer
+	if not ser then
+		return
+	end
+	local all = true
+	local function check(name, ok, detail)
+		local pass = ok == true
+		all = all and pass
+		ns.Print((pass and "|cff33ff66PASS|r" or "|cffff5555FAIL|r") .. " "
+			.. name .. (detail and (" | " .. tostring(detail)) or ""))
+		return pass
+	end
+
+	-- A LibDeflate-produced raw deflate stream decodes natively.
+	local inflated = C_EncodingUtil.DecompressString(
+		C_EncodingUtil.DecodeHex(CODEC_DEFLATE_HEX),
+		Enum.CompressionMethod.Deflate)
+	check("LibDeflate vector decompresses natively", inflated == CODEC_FIXTURE)
+
+	-- Native output must be raw deflate; a 0x78 first byte is zlib magic.
+	local packed = C_EncodingUtil.CompressString(CODEC_FIXTURE,
+		Enum.CompressionMethod.Deflate, Enum.CompressionLevel.OptimizeForSize)
+	check("native output is raw deflate",
+		packed ~= nil and packed:byte(1) ~= 0x78,
+		packed and ("first byte 0x" .. ("%02x"):format(packed:byte(1))))
+
+	-- The inline escape must match the old codec byte-for-byte.
+	local chanVec = C_EncodingUtil.DecodeHex(CODEC_CHANNEL_HEX)
+	check("channel escape byte-identical", chanVec ~= nil
+		and ser.channelEncode(CODEC_RAW) == chanVec
+		and ser.channelDecode(chanVec) == CODEC_RAW)
+
+	-- A real pre-change wire payload decodes end to end.
+	local payload = C_EncodingUtil.DecodeHex(CODEC_PIPELINE_HEX)
+	check("pre-change payload decodes",
+		payload ~= nil and deepEqual(ser.decodeProfile(payload), CODEC_PROFILE))
+
+	local rt = ser.encodeProfile(CODEC_PROFILE)
+	check("encode/decode round-trip",
+		rt ~= nil and deepEqual(ser.decodeProfile(rt), CODEC_PROFILE))
+
+	ns.Print(all and "codec selftest: all checks passed"
+		or "|cffff5555codec selftest: FAILURES - do not ship|r")
+end, "Verify the wire codec against LibDeflate known-answer vectors")
+
 -- Richer status command (overrides the placeholder registered in Core).
 ns.RegisterCommand("status", function()
 	local adapter = ns.getAvailableAdapter()

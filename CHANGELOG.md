@@ -9,6 +9,7 @@
 - Use UnitNameUnmodified over UnitName.
 - Not all workflows in FRP were paused during restrictions, like roster building, but this is now fixed.
 - Suspend pull machinery while held profile is fresh.
+- Compress and decompress profiles via native C_EncodingUtil instead of LibDeflate.
 
 ## 0.4.6
 

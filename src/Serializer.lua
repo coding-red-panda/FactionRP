@@ -6,7 +6,8 @@
 --   3. Chunking        - split across the 255-byte message limit, reassemble
 --
 -- Profile data pipeline:
---   table --Serialize--> string --CompressDeflate--> bytes --EncodeForWoWAddonChannel--> safe string
+--   table --Serialize--> string --CompressString(Deflate)--> bytes --channelEncode--> safe string
+-- Wire bytes are unchanged: raw deflate plus the same NUL-escaper.
 --
 -- The encoded string contains no NULL byte (the only byte the channel
 -- forbids); it may contain "|" or ":", so framing parses positionally.
@@ -18,7 +19,19 @@ local Serializer = {}
 ns.Serializer = Serializer
 
 local LibSerialize = LibStub("LibSerialize")
-local LibDeflate = LibStub("LibDeflate")
+
+-- I got sick of writing Enum.Compressionwhatever
+local DEFLATE = Enum.CompressionMethod.Deflate
+local MAX_SIZE = Enum.CompressionLevel.OptimizeForSize
+
+-- NUL-escaper for the addon channel; byte-identical to the old codec
+-- (\000 -> \001\002, \001 -> \001\003). NUL must be %z in patterns.
+function Serializer.channelEncode(s)
+	return (s:gsub("\001", "\001\003"):gsub("%z", "\001\002"))
+end
+function Serializer.channelDecode(s)
+	return (s:gsub("\001\002", "\000"):gsub("\001\003", "\001"))
+end
 
 -- Profile data codec --------------------------------------------------------
 
@@ -34,20 +47,26 @@ function Serializer.encodeProfile(data)
 	if not ok or not serialized then
 		return nil
 	end
-	local compressed = LibDeflate:CompressDeflate(serialized)
-	return LibDeflate:EncodeForWoWAddonChannel(compressed)
+	local compressed = C_EncodingUtil.CompressString(serialized,
+		DEFLATE, MAX_SIZE)
+	if not compressed then
+		return nil
+	end
+	return Serializer.channelEncode(compressed)
 end
 
 --- Reverse of encodeProfile. Returns nil on any decode/integrity failure.
 -- @param encoded string
 -- @return table|nil
 function Serializer.decodeProfile(encoded)
-	local compressed = LibDeflate:DecodeForWoWAddonChannel(encoded)
+	local compressed = Serializer.channelDecode(encoded)
 	if not compressed then
 		return nil
 	end
-	local serialized = LibDeflate:DecompressDeflate(compressed)
-	if not serialized then
+	-- pcall: malformed wire input may error rather than return nil.
+	local okD, serialized = pcall(C_EncodingUtil.DecompressString,
+		compressed, DEFLATE)
+	if not okD or not serialized then
 		return nil
 	end
 	local ok, value = LibSerialize:Deserialize(serialized)
