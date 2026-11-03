@@ -23,13 +23,12 @@ local TEXT_EXPIRES_IN = "Elixir of Tongues expires in %s."
 local TEXT_EXPIRED = "Elixir of Tongues has expired."
 local TEXT_INACTIVE = "Elixir of Tongues is not active."
 
---- Number of elixirs in the player's bags (0 when the API is unavailable).
+--- Number of elixirs in the player's bags.
+-- No existence check on the item API: if it disappears, this should error
+-- loudly rather than quietly stop reminding people.
 local function elixirCount()
-	if C_Item and C_Item.GetItemCount then
-		-- Bags only: the item action cannot consume one from the bank.
-		return C_Item.GetItemCount(C.ELIXIR_ITEM_ID, false, false, false) or 0
-	end
-	return GetItemCount(C.ELIXIR_ITEM_ID) or 0
+	-- Bags only: the item action cannot consume one from the bank.
+	return C_Item.GetItemCount(C.ELIXIR_ITEM_ID, false, false, false)
 end
 
 --- Replace the dialog's body text and let the dialog grow or shrink to fit.
@@ -44,9 +43,9 @@ local function setDialogText(dialog, text)
 end
 
 --- The dialog's own first button (labelled Refresh), which the secure
--- refresh button is laid over. Blizzard exposes it as button1 / GetButton1().
+-- refresh button is laid over.
 local function dialogRefreshButton(dialog)
-	return dialog.GetButton1 and dialog:GetButton1() or dialog.button1
+	return dialog:GetButton1()
 end
 
 function ElixirNotice:init()
