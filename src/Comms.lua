@@ -260,7 +260,7 @@ function Comms:resumeAfterLoading()
 		end
 
 		self.resumeAt = 0
-		local ownName = GetUnitName("player", true)
+		local ownName = ns.Util.getUnitID("player")
 
 		if ns.Util.canWeUse(ownName) then
 			self.ownName = ns.Util.normalizeUnitName(ownName)
@@ -1033,6 +1033,12 @@ function Comms:handleIncoming(chunkString, context)
 		ns.debugChunk("in", context.medium, senderKey, #chunkString)
 	end
 	local full, chunks, elapsed, dupes = self.assembler:add(senderKey, chunkString)
+	-- A string in slot 2 is a validation-drop reason.
+	if not full and type(chunks) == "string" then
+		if ns.statsError then
+			ns.statsError("reassemble_" .. chunks)
+		end
+	end
 	if full then
 		if ns.statsIn then
 			ns.statsIn(full, senderKey, context.medium, chunks, elapsed, dupes)

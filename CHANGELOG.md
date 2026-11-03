@@ -1,5 +1,16 @@
 ﻿# FactionRP Changelog
 
+## 0.4.7
+
+### Changes
+- Mouseover fetching now has a short grace period where you're not immediately interrupted if someone walks across your mouse.
+
+### Fixes
+- Use UnitNameUnmodified over UnitName.
+- Not all workflows in FRP were paused during restrictions, like roster building, but this is now fixed.
+- Suspend pull machinery while held profile is fresh.
+- Compress and decompress profiles via native C_EncodingUtil instead of LibDeflate.
+
 ## 0.4.6
 
 ### Fixes

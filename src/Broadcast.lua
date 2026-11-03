@@ -335,8 +335,8 @@ function Broadcast:broadcastVersion()
 	end
 	local comms = ns.comms
 
-	-- Old-generation peers sit on a disjoint channel; join the previous
-	-- one long enough to launch the announcement there too.
+	-- Stranded peers sit on a disjoint channel; join the pinned legacy
+	-- channel long enough to launch the announcement there too.
 	local prevChan = C.COMM_CHANNEL_PROTO3
 	local prevIdx = prevChan and GetChannelName(prevChan)
 	if prevIdx == 0 then
@@ -505,7 +505,16 @@ function Broadcast:tick()
 			local activity = (lastChunk and lastChunk > req.at)
 				and lastChunk or req.at
 			local stalled = (now - activity) > C.REQ_DATA_STALL
-			if stalled or (now - req.at) > C.REQ_DATA_TIMEOUT then
+			-- Deadline comes from the serve's first-chunk total: drain
+			-- estimate + jitter + queue backlog + stall grace.
+			local _, streamTotal = srcKey and comms.assembler:progress(srcKey)
+			local deadline = req.at + C.REQ_DATA_TIMEOUT
+			if streamTotal then
+				req.jitter = req.jitter or (1 + math.random() * C.REQ_DATA_JITTER_PCT)
+				deadline = req.at + (streamTotal / C.SEND_RATE) * req.jitter
+					+ comms:queueDepth() / C.SEND_RATE + C.REQ_DATA_STALL
+			end
+			if stalled or now > deadline then
 				-- The serve stalled or died; drop the sender's partial
 				-- chunks so a resumed send cannot complete a ghost message.
 				if srcKey
@@ -673,14 +682,18 @@ function Broadcast:reqStatus(guid)
 	return nil
 end
 
---- Queue a request for `guid`'s profile. No-op when the cache is fresh,
--- the subject is pending or queued, or it is on cooldown.
+--- Check if `guid` is so fresh that pulling it is pointless.
+function Broadcast:profileFresh(guid)
+	return ns.cache:fresh(guid) or self:heldSuppressed(guid)
+end
+
+--- Queue a request for `guid`'s profile. No-op when the subject's data is
+-- fresh, the subject is pending or queued, or it is on cooldown.
 function Broadcast:requestProfile(guid, unitID)
 	if not guid or Util.commsRestricted() then
 		return
 	end
-	if ns.cache:fresh(guid)
-		or self:heldSuppressed(guid)
+	if self:profileFresh(guid)
 		or self.requests[guid]
 		or self.reqQueued[guid]
 	then
@@ -744,8 +757,7 @@ function Broadcast:pumpRequests()
 		o.head = o.head + 1
 		self.reqQueued[entry.guid] = nil
 		local last = self.recentReqs[entry.guid]
-		if not ns.cache:fresh(entry.guid)
-			and not self:heldSuppressed(entry.guid)
+		if not self:profileFresh(entry.guid)
 			and not (last and (now - last) < C.REQ_COOLDOWN)
 		then
 			self:issueRequest(entry.guid, entry.unitID, now)
@@ -1286,6 +1298,70 @@ function Broadcast:resolveSubject(guid, wireUnitID)
 			ns.debugPeer("req " .. Util.nameForGuid(guid)
 				.. " resolved via wire unitID " .. unitID)
 		end
+	end
+	return unitID
+end
+
+--- Shared reject path for verifyDataLeg.
+--- @return nil
+local function rejectDataLeg(reason, subject)
+	if ns.statsError then
+		ns.statsError(reason)
+	end
+	if ns.debugPeer then
+		ns.debugPeer("data " .. Util.nameForGuid(subject)
+			.. " rejected (" .. reason .. ")")
+	end
+	return nil
+end
+
+--- Whether an inbound data envelope may reach the cache.
+--- If we didn't OK the ack then the serve is unsolicited.
+--- @return string|nil Consensus unitID for the candidate, or nil to drop.
+function Broadcast:verifyDataLeg(msg, context)
+	-- sendToPeer emits WHISPER or BNET, which are the only serves.
+	if context.medium ~= "WHISPER" and context.medium ~= "BNET" then
+		return rejectDataLeg("unsolicited_data", msg.subject)
+	end
+	local guid = msg.subject
+	local req = self.requests[guid]
+	if not req and not self.recentReqs[guid] then
+		return rejectDataLeg("unsolicited_data", guid)
+	end
+	if not ns.getAdapter(msg.addon) then
+		return rejectDataLeg("unknown_addon", guid)
+	end
+	local wireUnitID = msg.unitID ~= "" and Util.fullUnitName(msg.unitID)
+	if not wireUnitID then
+		return rejectDataLeg("bad_unitid", guid)
+	end
+
+	-- Enforce consensus case-insensitively.
+	local unitID, unitKey, conflict = nil, nil, false
+	local function claim(id)
+		id = id and Util.fullUnitName(id)
+		if not id then
+			return
+		end
+		local key = id:lower()
+		if unitKey and unitKey ~= key then
+			conflict = true
+		end
+		unitID, unitKey = id, key
+	end
+	local entry = ns.cache:get(guid)
+	claim(entry and entry.unitID)
+	claim(Util.unitForGuidFromClient(guid))
+	claim(Util.unitForGuid(guid))
+	claim(req and req.unitID)
+	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
+	claim(rec and rec.unitID)
+	claim(wireUnitID)
+	if conflict then
+		if context.senderKey then
+			ns.comms:blockSender(context.senderKey)
+		end
+		return rejectDataLeg("identity_conflict", guid)
 	end
 	return unitID
 end
@@ -1928,6 +2004,11 @@ function Broadcast:onMessage(raw, context)
 		self:onControl(msg, context)
 		return
 	end
+	-- Drop data legs that cannot be a granted serve.
+	local unitID = self:verifyDataLeg(msg, context)
+	if not unitID then
+		return
+	end
 	if ns.debugReceive then
 		ns.debugReceive(msg.sender, msg.subject)
 	end
@@ -1958,7 +2039,7 @@ function Broadcast:onMessage(raw, context)
 
 	local candidate = {
 		guid = msg.subject,
-		unitID = msg.unitID,
+		unitID = unitID,
 		addon = msg.addon,
 		originTime = msg.originTime,
 		contentVersion = msg.contentVersion,

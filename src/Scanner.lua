@@ -108,15 +108,22 @@ function Scanner:onSelect(unit)
 	-- dedupes and rate-limits. Mouseover delays so a passing cursor
 	-- costs nothing.
 	if ns.Util.isOppositeFaction(unit) then
+		local guid = UnitGUID(unit)
+		-- Don't do work if profile exists and is fresh.
+		if not ns.Util.canWeUse(guid) or not guid
+			or ns.broadcast:profileFresh(guid)
+		then
+			return
+		end
 		local adapter = ns.getAvailableAdapter()
 		local unitID = adapter and adapter:getUnitID(unit)
-		local guid = UnitGUID(unit)
-		if ns.Util.canWeUse(unitID, guid) and guid then
-			if unit == "mouseover" then
-				self:hoverRequest(guid, unitID)
-			else
-				self:xfacRequest(guid, unitID)
-			end
+		if not ns.Util.canWeUse(unitID) then
+			return
+		end
+		if unit == "mouseover" then
+			self:hoverRequest(guid, unitID)
+		else
+			self:xfacRequest(guid, unitID)
 		end
 		return
 	end
