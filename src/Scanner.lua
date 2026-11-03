@@ -147,9 +147,6 @@ function Scanner:xfacRequest(guid, unitID)
 	if ns.Util.commsRestricted() then
 		return
 	end
-	if ns.broadcast:profileFresh(guid) then
-		return -- held copy went fresh since selection; nothing to pull
-	end
 
 	local adapter = ns.getAvailableAdapter()
 	if adapter and adapter.name == C.SOURCE.TRP3
@@ -168,9 +165,6 @@ end
 --- REQ an xfac mouseover after actual hover time
 --//edit: tiny interruptions pauses the countdown for the same player
 function Scanner:hoverRequest(guid, unitID)
-	if ns.broadcast:profileFresh(guid) then
-		return
-	end
 	if self.hoverTimer and self.hoverGuid == guid then
 		return
 	end
@@ -223,11 +217,6 @@ function Scanner:updateHover()
 		return
 	end
 	if ns.Util.commsRestricted() then
-		self:cancelHover()
-		return
-	end
-	-- Countdown is moot if we're fresh.
-	if self.hoverGuid and ns.cache:fresh(self.hoverGuid) then
 		self:cancelHover()
 		return
 	end
