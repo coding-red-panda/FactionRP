@@ -38,6 +38,9 @@ src\Broadcast.lua
 src\Scanner.lua
 src\Tooltip.lua
 
+# --- Elixir of Tongues reminder -----------------------------------------------
+src\ElixirNotice.lua
+
 # --- Debug & instrumentation (Phase 8) ---
 src\Debug.lua
 src\DebugUI.lua
