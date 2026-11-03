@@ -129,15 +129,6 @@ local function flagText(on)
 	return on and "|cff33ff66on|r" or "|cffff5555off|r"
 end
 
---- Print the current state of every debug category plus the `all` override.
-local function printFlags()
-	local d = ns.db.debug
-	ns.Print("debug flags (" .. flagText(d.all) .. " = all):")
-	for _, cat in ipairs(C.DEBUG_CATEGORIES) do
-		ns.Print(("  %s: %s - %s"):format(cat.key, flagText(d.all or d[cat]), cat.desc))
-	end
-end
-
 local function setFlag(key, on)
 	-- write every flag when toggling `all`.
 	if key == "all" then
@@ -166,7 +157,8 @@ ns.RegisterCommand("debug", function(arg)
 		return
 	end
 	if sub == "" then
-		printFlags()
+		-- Bare /frp debug opens the panel; flags toggle from there.
+		ns.debugUI:toggle()
 		return
 	end
 	if sub == "all" then
@@ -188,7 +180,7 @@ ns.RegisterCommand("debug", function(arg)
 		end
 		return keys
 	end)(), ", ") .. ", target")
-end, "List debug flags; '<category>' toggles one, 'all' toggles all, 'target <name>' pins a whisper test target")
+end, "Open the debug panel; '<category>' toggles one, 'all' toggles all, 'target <name>' pins a whisper test target")
 
 -- /factionrp relays ----------------------------------------------------------
 
@@ -223,12 +215,13 @@ ns.RegisterCommand("relays", function()
 		else
 			tag = " [?]" -- in neither club's current roster (left / stale)
 		end
+		local gen = p.proto and (" g" .. p.proto) or ""
 		if p.ign ~= 0 then
 			ignored = ignored + 1
 		elseif p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL then
-			conf[#conf + 1] = p.name .. tag
+			conf[#conf + 1] = p.name .. tag .. gen
 		elseif p.pr > 0 then
-			probing[#probing + 1] = p.name .. tag
+			probing[#probing + 1] = p.name .. tag .. gen
 		end
 	end
 	ns.Print("known relays (confirmed FRP): " .. joined(conf))
@@ -262,15 +255,19 @@ ns.RegisterCommand("relays", function()
 		end
 		return tostring(id)
 	end
+	local function protoSuffix(id)
+		local p = ns.comms and ns.comms.bnetPeers[id]
+		return (p and p.proto) and (" g" .. p.proto) or ""
+	end
 	local bnetConf, bnetProb, bnetIgn = {}, {}, {}
 	for _, id in ipairs(lists.confirmed) do
-		bnetConf[#bnetConf + 1] = bnetName(id)
+		bnetConf[#bnetConf + 1] = bnetName(id) .. protoSuffix(id)
 	end
 	for _, id in ipairs(lists.probing) do
-		bnetProb[#bnetProb + 1] = bnetName(id)
+		bnetProb[#bnetProb + 1] = bnetName(id) .. protoSuffix(id)
 	end
 	for _, id in ipairs(lists.ignored) do
-		bnetIgn[#bnetIgn + 1] = bnetName(id)
+		bnetIgn[#bnetIgn + 1] = bnetName(id) .. protoSuffix(id)
 	end
 	ns.Print(("bnet peers | confirmed: %s | probing: %s | ignored: %s"):format(
 		joined(bnetConf), joined(bnetProb), joined(bnetIgn)))
@@ -299,6 +296,7 @@ end, "Show learned relays/contacts and the pull pipeline state")
 --
 -- Known-answer vectors produced by the vendored LibDeflate before removal.
 -- They pin the wire format so the native codec can be verified in-game.
+-- The CBOR vector is {"k":"v","n":5} encoded -> deflate -> channel escape.
 
 local CODEC_FIXTURE = "FactionRP codec selftest fixture: the quick brown fox jumps over the lazy dog. 1234567890"
 local CODEC_DEFLATE_HEX = "734B4C2EC9CCCF0B0A5048CE4F494D56284ECD492B492D2E5148CBAC28292D4AB55228C94855282CCD4CCE56482ACA2FCF5348CBAF50C82ACD2D2856C82F4B2D024BE72456552AA4E4A7EB29181A199B989A995B581A00FE"
@@ -310,6 +308,8 @@ local CODEC_PROFILE = {
 	clientInfo = { client = "Total RP 3", msp = false },
 }
 local CODEC_PIPELINE_HEX = "63345B949C93999A57E2999796AF66945B5C909104115814925F9298A31014A060DC549C9A5C92999F572CF6293923B12831B924B528B3B82433B9584DC9C7CF292C312F55C9CDCFC83127655241517E5A664EAAA70B504F4E5A496A7109E0"
+local CODEC_CBOR_PROFILE = { k = "v", n = 5 }
+local CODEC_CBOR_PIPELINE_HEX = "5B94989D589698C70A0102"
 
 local function deepEqual(a, b)
 	if a == b then
@@ -333,7 +333,8 @@ end
 
 ns.RegisterCommand("codec", function()
 	local ser = ns.Serializer
-	if not ser then
+	local dial = ns.Dialect
+	if not ser or not dial then
 		return
 	end
 	local all = true
@@ -364,14 +365,24 @@ ns.RegisterCommand("codec", function()
 		and ser.channelEncode(CODEC_RAW) == chanVec
 		and ser.channelDecode(chanVec) == CODEC_RAW)
 
-	-- A real pre-change wire payload decodes end to end.
+	-- A real pre-change wire payload decodes end to end (gen-5 LibSerialize).
 	local payload = C_EncodingUtil.DecodeHex(CODEC_PIPELINE_HEX)
-	check("pre-change payload decodes",
-		payload ~= nil and deepEqual(ser.decodeProfile(payload), CODEC_PROFILE))
+	check("pre-change payload decodes (dialect 5)",
+		payload ~= nil and deepEqual(dial.decodeProfile(payload, 5), CODEC_PROFILE))
 
-	local rt = ser.encodeProfile(CODEC_PROFILE)
-	check("encode/decode round-trip",
-		rt ~= nil and deepEqual(ser.decodeProfile(rt), CODEC_PROFILE))
+	-- A fixed CBOR payload decodes end to end (gen-6 codec).
+	local cborPayload = C_EncodingUtil.DecodeHex(CODEC_CBOR_PIPELINE_HEX)
+	check("CBOR payload decodes (dialect 6)",
+		cborPayload ~= nil and deepEqual(
+			dial.decodeProfile(cborPayload, 6), CODEC_CBOR_PROFILE))
+
+	-- Both dialects round-trip the same profile table.
+	local rt5 = dial.encodeProfile(CODEC_PROFILE, 5)
+	check("encode/decode round-trip (dialect 5)",
+		rt5 ~= nil and deepEqual(dial.decodeProfile(rt5, 5), CODEC_PROFILE))
+	local rt6 = dial.encodeProfile(CODEC_PROFILE, 6)
+	check("encode/decode round-trip (dialect 6)",
+		rt6 ~= nil and deepEqual(dial.decodeProfile(rt6, 6), CODEC_PROFILE))
 
 	ns.Print(all and "codec selftest: all checks passed"
 		or "|cffff5555codec selftest: FAILURES - do not ship|r")
@@ -405,3 +416,238 @@ ns.RegisterCommand("status", function()
 		ns.broadcast and ns.broadcast.topPeerVersion or "none"
 	))
 end, "Show version, cache size, pending sends, adapter and debug state")
+
+-- /factionrp selfx -----------------------------------------------------------
+--
+-- Live loopback: serve a real register profile to ourselves over a whisper
+-- leg at a chosen generation. The payload travels the same pipeline as a
+-- normal serve (encode -> envelope -> chunks -> paced send -> reassembly ->
+-- gates -> data-leg verify -> decode -> cache -> inject), minus peer
+-- discovery. selfx 5 proves we still decode the proto-5 dialect; selfx 6
+-- proves the CBOR path.
+
+--- Render a profile data table as flat "path = value" lines for display.
+-- Sections get bracket headers; nested tables flatten with dotted paths.
+function ns.FormatProfileData(data)
+	if type(data) ~= "table" then
+		return tostring(data)
+	end
+	local out = {}
+	local function flatten(t, prefix)
+		local keys = {}
+		for k in pairs(t) do
+			keys[#keys + 1] = k
+		end
+		table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+		for _, k in ipairs(keys) do
+			local v = t[k]
+			local path = prefix and (prefix .. "." .. tostring(k)) or tostring(k)
+			if type(v) == "table" then
+				flatten(v, path)
+			else
+				out[#out + 1] = path .. " = " .. tostring(v)
+			end
+		end
+	end
+	if data.profileID then
+		out[#out + 1] = "profileID = " .. tostring(data.profileID)
+	end
+	if type(data.sections) == "table" then
+		for name, section in pairs(data.sections) do
+			out[#out + 1] = "[" .. tostring(name) .. "]"
+			flatten(section, nil)
+		end
+	end
+	if type(data.clientInfo) == "table" then
+		out[#out + 1] = "[clientInfo]"
+		flatten(data.clientInfo, nil)
+	end
+	for k, v in pairs(data) do
+		if k ~= "profileID" and k ~= "sections" and k ~= "clientInfo" then
+			if type(v) == "table" then
+				out[#out + 1] = "[" .. tostring(k) .. "]"
+				flatten(v, nil)
+			else
+				out[#out + 1] = tostring(k) .. " = " .. tostring(v)
+			end
+		end
+	end
+	return table.concat(out, "\n")
+end
+
+--- Run a live loopback serve of a real register profile to ourselves over a
+-- whisper leg at generation `gen`. Exercises the whole pipeline minus peer
+-- discovery. Progress lands on ns.selfxRun for the debug UI.
+-- @return table|nil The run state, or nil with a printed reason.
+function ns.RunSelfx(gen, name)
+	local comms, b, dial = ns.comms, ns.broadcast, ns.Dialect
+	if not (comms and b and dial) then
+		return
+	end
+	if ns.selfxRun and not ns.selfxRun.done then
+		ns.Print("selfx: a run is already in progress")
+		return
+	end
+	gen = gen or C.PROTO_MAJOR
+	if not dial.DIALECTS[gen] then
+		ns.Print("selfx: no dialect for gen " .. tostring(gen))
+		return
+	end
+	if ns.Util.isPaused() or ns.Util.commsRestricted() then
+		ns.Print("selfx: comms paused right now, try again")
+		return
+	end
+	local adapter = ns.getAvailableAdapter()
+	if not adapter then
+		ns.Print("selfx: no RP adapter")
+		return
+	end
+	-- Subject: the named unit, else the first directory record the register
+	-- can still serve.
+	local guid, unitID
+	if name then
+		unitID = ns.Util.fullUnitName(name)
+		guid = unitID and ns.Util.resolveGUID(unitID)
+	else
+		-- Reservoir sample: uniform pick among the records the register can
+		-- still serve, without building a candidate list.
+		local n = 0
+		for g, rec in pairs(ns.db and ns.db.seen or {}) do
+			if g ~= UnitGUID("player") and rec.unitID
+				and adapter:canServe(rec.unitID)
+			then
+				n = n + 1
+				if math.random(n) == 1 then
+					guid, unitID = g, rec.unitID
+				end
+			end
+		end
+	end
+	if not (guid and unitID and adapter:canServe(unitID)) then
+		ns.Print("selfx: no servable profile (pass a Name-Realm)")
+		return
+	end
+	local profile = adapter:extract(unitID)
+	if not profile then
+		ns.Print("selfx: extract failed for " .. unitID)
+		return
+	end
+	local snapshot = CopyTable(profile.data)
+	-- Simulate a serve from the subject itself: encode and stamp `gen`.
+	local encoded = dial.encodeProfile(profile.data, gen)
+	if not encoded then
+		ns.Print("selfx: encode failed at gen " .. gen)
+		return
+	end
+	local own = ns.Util.getUnitID("player")
+	if not own then
+		ns.Print("selfx: own unitID unavailable")
+		return
+	end
+	-- Stage the receive: drop our cache copy so the store is NEW, mark the
+	-- subject as requested so the data leg is honoured, open the echo
+	-- window, and clear the per-sender REQ throttle repeat runs would hit.
+	ns.cache.entries[guid] = nil
+	b.recentReqs[guid] = GetTime()
+	b.reqSenderAt[own] = nil
+	-- A selfx REQ must never trigger a register pull: suppress refreshQuery
+	-- for the window so the compare has a still subject.
+	b.selfxNoPull = true
+	comms.selfEchoUntil = GetTime() + 120
+	-- A stamped-N REQ drives the real serve chain: parseCtl(dialect N) ->
+	-- canServe -> ACK + pendingServe. We grant it ourselves with an OK so
+	-- serveData fires encode at min(own, N); sequential pacing orders them.
+	local ctlChunks = {}
+	local function ctl(verb, fields)
+		local data = ns.Dialect.buildCtlData(verb, fields, gen)
+		for _, chunk in ipairs(ns.Serializer.chunk(ns.Serializer.buildMessage({
+			sender = guid, subject = C.CTL_SUBJECT,
+			addon = profile.addon, originTime = 0,
+			contentVersion = "", protoVer = gen, data = data,
+		}))) do
+			ctlChunks[#ctlChunks + 1] = chunk
+		end
+	end
+	ctl("REQ", { guid = guid, unitID = unitID, seenAt = 0 })
+	ctl("OK", { guid = guid })
+	local chunks = ctlChunks
+	-- Below our own gen the serve leg returns stamped-6/payload-N, which
+	-- our decode clamp cannot self-read (that decode is the requester's
+	-- job). A fabricated stamped-N data leg covers the inbound codec.
+	if gen < C.PROTO_MAJOR then
+		local dataChunks = ns.Serializer.chunk(ns.Serializer.buildMessage({
+			sender = guid, subject = guid,
+			unitID = unitID, addon = profile.addon,
+			originTime = b:claimAt(guid, unitID, profile.addon),
+			contentVersion = profile.contentVersion,
+			protoVer = gen, data = encoded,
+		}))
+		for _, chunk in ipairs(dataChunks) do
+			chunks[#chunks + 1] = chunk
+		end
+	end
+	comms:sendChunksAddon(chunks, "WHISPER", own)
+	local run = {
+		gen = gen, guid = guid, unitID = unitID,
+		chunks = #chunks, bytes = #encoded,
+		snapshot = snapshot, senderKey = own,
+		sentText = ns.FormatProfileData(snapshot),
+	}
+	ns.selfxRun = run
+	ns.Print(("selfx: serving %s to self at gen %d, %d ctl chunks"):format(
+		unitID, gen, #ctlChunks))
+	local tries = 0
+	local ticker
+	ticker = C_Timer.NewTicker(1, function()
+		tries = tries + 1
+		-- Any buffered inbound during the window is ours; the raw sender
+		-- string may differ from our unitID by realm formatting.
+		for senderKey in pairs(comms.assembler.buffers) do
+			local got, total = comms.assembler:progress(senderKey)
+			if got and total then
+				run.recvGot, run.recvTotal = got, total
+			end
+		end
+		local entry = ns.cache:get(guid)
+		if entry then
+			ticker:Cancel()
+			b.selfxNoPull = nil
+			-- Snapshot match proves the codec byte-for-byte; a fresh
+			-- re-extract match tolerates register drift from refreshQuery
+			-- (v bumps, volatile fields) that the payload never carried.
+			local vsSnapshot = deepEqual(entry.data, snapshot)
+			local fresh = adapter:extract(unitID)
+			local vsFresh = fresh and deepEqual(entry.data, fresh.data)
+			-- refreshQuery races: a fresher copy can land before we poll,
+			-- replacing what our leg stored. Same profileID is still a
+			-- codec pass, just not a byte-for-byte one.
+			local sameProfile = entry.data
+				and entry.data.profileID == snapshot.profileID
+			run.same = vsSnapshot or vsFresh or sameProfile or false
+			run.receivedText = ns.FormatProfileData(entry.data)
+			run.done = true
+			-- Wire legs we know for sure: staged ctl + the ACK echo, then
+			-- the landed data message's observed chunk count.
+			ns.Print(("selfx: %s | ctl %d, data %s chunks, payload %s")
+				:format(
+					run.same and "PASS" or "FAIL",
+					#ctlChunks + 1,
+					tostring(run.recvTotal or "?"),
+					vsSnapshot and "identical"
+						or (vsFresh and "identical (register drifted)")
+						or (sameProfile and "fresher copy landed")
+						or "DIFFERS"))
+			return
+		end
+		if tries > 120 then
+			ticker:Cancel()
+			b.selfxNoPull = nil
+			run.done = true
+			run.same = false
+			ns.Print(("selfx: FAIL | ctl %d, data never landed")
+				:format(#ctlChunks + 1))
+		end
+	end)
+	return run
+end
+

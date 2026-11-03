@@ -17,7 +17,13 @@ local PRINT_PREFIX = "|cff33ff99" .. C.ADDON_NAME .. "|r: "
 --- Print a chat message prefixed and coloured with the AddOn name.
 -- Accepts any number of values, joined with spaces.
 function ns.Print(...)
-	print(PRINT_PREFIX .. strjoin(" ", tostringall(...)))
+	local msg = strjoin(" ", tostringall(...))
+	local ui = ns.debugUI
+	if ui and ui:IsOpen() then
+		ui:Print(msg)
+	else
+		print(PRINT_PREFIX .. msg)
+	end
 end
 
 -- Event dispatch ------------------------------------------------------------
