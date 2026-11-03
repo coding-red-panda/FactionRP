@@ -61,6 +61,13 @@ local function logPeer(text)
 	ns.Print("|cff66ccff[peers]|r " .. text)
 end
 
+local function logAbout(event, requestID, detail)
+--  tracing the "about" exchange
+	ns.Print("|cff66ccff[about]|r " .. tostring(event)
+		.. (requestID and (" [" .. tostring(requestID) .. "]") or "")
+		.. (detail and (" | " .. tostring(detail)) or ""))
+end
+
 -- [ns.* hook name] = { category, implementation }
 local HOOKS = {
 	debugReceive   = { "receive",   logReceive },
@@ -70,6 +77,7 @@ local HOOKS = {
 	debugFanout    = { "fanout",    logFanout },
 	debugChunk     = { "chunks",    logChunk },
 	debugPeer      = { "peers",     logPeer },
+	debugAbout     = { "peers",     logAbout },
 }
 
 --- Install enabled log hooks onto ns, remove disabled ones, and refresh

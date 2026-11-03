@@ -836,7 +836,7 @@ end
 --- Pop the next live contact across the tier decks into spent. Tier
 -- order is cycle ordering, not exhaustion: once every tier's draw pile
 -- is drained all spent piles reshuffle back for the next cycle.
-function Broadcast:contactNext(now)
+function Broadcast:contactNext(now, excludedKey)
 	for _ = 1, 2 do
 		for tier = 1, 3 do
 			local deck = self.contactDecks[tier]
@@ -844,9 +844,12 @@ function Broadcast:contactNext(now)
 				local entry = table.remove(deck.draw, 1)
 				if self:deckLive(entry, now) then
 					deck.spent[#deck.spent + 1] = entry
-					return entry
+					if entry.key ~= excludedKey then
+						return entry
+					end
+				else
+					deck.have[entry.key] = nil
 				end
-				deck.have[entry.key] = nil
 			end
 		end
 		local any = false
@@ -868,17 +871,20 @@ end
 --- Pick the contact for a unicast REQ. A BNet-reachable subject wins
 -- outright. Otherwise the tier decks hand out BNet peers, then guild
 -- relays, then community relays.
-function Broadcast:reqContact(guid, now)
+function Broadcast:reqContact(guid, now, excluded)
 	local comms = ns.comms
+-- //edit: "about" fallback skip the contact we already tried including deck entry
+	local excludedKey = excluded and (excluded.medium == "BNET" and "bn:" .. excluded.target
+		or Util.normalizeUnitName(excluded.target))
 	if guid then
 		local info = C_BattleNet.GetGameAccountInfoByGUID(guid)
 		local id = info and info.gameAccountID
-		if id and comms:isBNetConfirmed(id, now) then
+		if id and "bn:" .. id ~= excludedKey and comms:isBNetConfirmed(id, now) then
 			return { medium = "BNET", target = id }
 		end
 	end
 	self:deckRefresh(now)
-	local entry = self:contactNext(now)
+	local entry = self:contactNext(now, excludedKey)
 	if entry then
 		return { medium = entry.medium, target = entry.target }
 	end
@@ -2065,6 +2071,14 @@ function Broadcast:onMessage(raw, context)
 		ns.statsCache(result)
 	end
 
+	if ns.about and result ~= ns.Cache.RESULT.REJECTED then
+		local entry = ns.cache:get(msg.subject)
+		local adapter = entry and ns.getAdapter(entry.addon)
+		local profileID = adapter and entry.data and adapter:dataProfileID(entry.data)
+		if entry and entry.addon == C.SOURCE.TRP3 and profileID then
+			ns.about:rememberSource(entry.unitID, profileID, context)
+		end
+	end
 	-- Only genuinely new/changed content reaches the RP AddOn's register.
 	if result ~= ns.Cache.RESULT.NEW and result ~= ns.Cache.RESULT.UPDATED then
 		return
@@ -2167,4 +2181,743 @@ end
 ns.broadcast = Broadcast:new()
 ns.OnLogin(function()
 	ns.broadcast:start()
+end)
+
+-- //edit: keeping the "about" exchange with our profile requests
+local About = ns.Class("About")
+
+local function field(value, limit)
+	return type(value) == "string" and #value > 0 and #value <= limit
+		and not value:find("[|%c]")
+end
+
+local function peer(context)
+	if context.medium == "BNET" and type(context.gameAccountID) == "number" then
+		return { medium = "BNET", target = context.gameAccountID }
+	elseif context.medium == "WHISPER" and field(context.senderName, 128) then
+		return { medium = "WHISPER", target = context.senderName }
+	end
+end
+
+local function samePeer(a, b)
+	if not a or not b or a.medium ~= b.medium then
+		return false
+	end
+	if a.medium == "BNET" then
+		return a.target == b.target
+	end
+	return Util.normalizeUnitName(a.target) == Util.normalizeUnitName(b.target)
+end
+
+local function key(unitID, profileID)
+	return Util.normalizeUnitName(unitID) .. "|" .. profileID
+end
+
+function About:init()
+	self.sources, self.cooldowns, self.outbox = {}, {}, {}
+	self.counter = 0
+	self.lastQueryAt = -math.huge
+end
+
+function About:routeLive(route)
+	if not route or Util.commsRestricted() then
+		return false
+	end
+
+
+	if route.medium == "WHISPER" then
+		return field(route.target, 128) and ns.comms:canWhisper(route.target)
+	elseif route.medium == "BNET" then
+		local entry = ns.comms.bnetPeers[route.target]
+		if not entry or entry.confirmedAt <= 0 or not ns.comms:isBNetConfirmed(route.target, GetTime()) then
+			return false
+		end
+		for _, id in ipairs(ns.comms:bnetAccounts()) do
+			if id == route.target then
+				return true
+			end
+		end
+
+	elseif route.medium == "CHANNEL" then
+		return type(route.target) == "number" and route.target > 0 and ns.comms:channelIndex() ~= nil
+	end
+
+	return false
+end
+
+function About:rememberSource(unitID, profileID, context)
+	local route = peer(context)
+	if not field(unitID, 128) or not field(profileID, 96) or not route then
+		return
+	end
+
+	local count, oldest, oldestAt = 0, nil, math.huge
+	for id, record in pairs(self.sources) do
+		count = count + 1
+		if record.at < oldestAt then
+			oldest, oldestAt = id, record.at
+		end
+	end
+
+	local id = key(unitID, profileID)
+	if not self.sources[id] and count >= C.ABOUT_SOURCE_CAP then
+		self.sources[oldest] = nil
+	end
+
+	self.sources[id] = { route = route, at = GetTime() }
+end
+
+function About:queue(verb, id, body, route, owner)
+	local text = "A2|" .. verb .. "|" .. id .. "|" .. body
+	if #text > 240 or #self.outbox >= 8 then
+		return nil
+	end
+
+
+	local frame = {}
+	self.outbox[#self.outbox + 1] = { text = text, route = route, owner = owner, frame = frame }
+	return frame
+end
+
+function About:notify()
+	if ns.trp3About then
+		ns.trp3About:update()
+	end
+end
+
+function About:finish(reason)
+	local request = self.request
+	if not request then
+		return
+	end
+
+	if ns.debugAbout then
+		ns.debugAbout(reason and "request stopped" or "complete", request.id, reason)
+	end
+
+	request.cancelled = true
+	local count, oldest, oldestAt = 0, nil, math.huge
+	for id, record in pairs(self.cooldowns) do
+		count = count + 1
+		if record.untilAt < oldestAt then
+			oldest, oldestAt = id, record.untilAt
+		end
+	end
+
+	if not self.cooldowns[request.key] and count >= C.ABOUT_SOURCE_CAP then
+		self.cooldowns[oldest] = nil
+	end
+
+	self.cooldowns[request.key] = { untilAt = GetTime() + C.ABOUT_COOLDOWN, reason = reason }
+	self.request = nil
+	self:notify()
+end
+
+function About:requestStatus(unitID, profileID)
+	local id = key(unitID, profileID)
+	local record = self.cooldowns[id]
+	if record and record.untilAt > GetTime() then
+		return "cooldown", record.untilAt, record.reason
+	end
+
+	if self.request then
+		if self.request.key == id then
+			return self.request.phase == "loading" and "loading" or "searching"
+		end
+
+		return "busy"
+	end
+
+	return "idle"
+end
+
+function About:pickContact(request)
+	local source = self.sources[request.key]
+	if source and GetTime() - source.at < C.ABOUT_SOURCE_TTL and self:routeLive(source.route) then
+		return source.route
+	end
+	local route = ns.broadcast:reqContact(request.guid, GetTime())
+	return self:routeLive(route) and route or nil
+end
+
+function About:contactName(route)
+	if route.medium == "WHISPER" then
+		return Util.normalizeUnitName(route.target)
+	end
+
+	if route.medium ~= "BNET" or type(C_BattleNet.GetGameAccountInfoByID) ~= "function" then
+		return nil
+	end
+
+
+	local ok, info = pcall(C_BattleNet.GetGameAccountInfoByID, route.target)
+	if ok and Util.fieldsUsable(info, "characterName", "realmName")
+		and field(info.characterName, 128) and field(info.realmName, 128)
+	then
+		return Util.normalizeUnitName(info.characterName .. "-" .. info.realmName)
+	end
+end
+
+function About:query(request, route)
+	self.counter = self.counter + 1
+	request.id = ("%x-%x"):format(math.random(1, 1073741823), self.counter)
+	request.route, request.phase, request.queuedAt = route, "searching", GetTime()
+	request.contactName = self:contactName(route)
+	request.queryFrame = self:queue("Q", request.id, request.unitID .. "|" .. request.profileID, route, request)
+	
+	if ns.debugAbout then
+		ns.debugAbout(request.queryFrame and "request queued" or "request not queued", request.id,
+			request.unitID .. " -> " .. route.medium .. " " .. tostring(route.target))
+	end
+
+	return request.queryFrame ~= nil
+end
+
+function About:pumpDiscovery(request, now)
+	if now - ns.broadcast.lastChannelReqAt < C.REQ_CHANNEL_INTERVAL then
+		return
+	end
+
+	local index = ns.comms:channelIndex()
+	if not index then
+		return
+	end
+
+	local route = { medium = "CHANNEL", target = index }
+	local frame = self:queue("R", request.id, request.unitID .. "|" .. request.profileID, route, request)
+	
+	if not frame then
+		return
+	end
+
+	request.route, request.queryFrame = route, frame
+	request.phase, request.queuedAt = "discovering", now
+	ns.broadcast.lastChannelReqAt = now
+	
+	if ns.debugAbout then
+		ns.debugAbout("discovery queued", request.id, request.unitID .. " -> CHANNEL " .. index)
+	end
+end
+
+function About:discover(request, reason)
+	if request.discovered then
+		return false
+	end
+--  queued query must not leave if contact comes back later
+	for i = #self.outbox, 1, -1 do
+		if self.outbox[i].owner == request then
+			table.remove(self.outbox, i)
+		end
+	end
+
+	local comms = ns.comms
+	if comms.aboutSend and comms.aboutSend.aboutOwner == request then
+		comms.descRelease(comms.aboutSend)
+		comms.aboutSend = nil
+	end
+
+	request.discovered = true
+	request.failureReason = reason
+	request.failedRoute, request.failedName = request.route, request.contactName
+	self.counter = self.counter + 1
+	request.id = ("%x-%x"):format(math.random(1, 1073741823), self.counter)
+	request.phase, request.waitAt, request.queryFrame = "discovery-wait", GetTime(), nil
+	request.pieces, request.grantFrame, request.strategy = nil, nil, nil
+
+-- searching once through our channel only one sends the "about"
+	if ns.debugAbout then
+		ns.debugAbout("discovery waiting", request.id, "channel and broadcast pacing")
+	end
+	self:pumpDiscovery(request, GetTime())
+	self:notify()
+	return true
+end
+
+function About:requestAbout(unitID, profileID)
+	local restricted = Util.commsRestricted()
+	if restricted or self.request or not field(unitID, 128) or not field(profileID, 96) then
+		if ns.debugAbout then
+			ns.debugAbout("request blocked", nil, restricted and "paused" or (self.request and "busy" or "invalid profile"))
+		end
+
+		return false
+	end
+
+
+	local context, _, currentUnitID = ns.trp3About:getContext()
+
+	if not context or currentUnitID ~= unitID or context.profileID ~= profileID
+		or self:requestStatus(unitID, profileID) ~= "idle"
+	then
+
+		if ns.debugAbout then
+			ns.debugAbout("request blocked", nil, "profile context or cooldown")
+		end
+
+
+		return false
+	end
+
+	local adapter = ns.getAdapter(C.SOURCE.TRP3)
+	local aboutState = adapter and adapter:captureAboutState(unitID, profileID)
+	if not aboutState then
+		if ns.debugAbout then
+			ns.debugAbout("request blocked", nil, "native profile unavailable")
+		end
+		return false
+	end
+
+	local id = key(unitID, profileID)
+	local guid = Util.resolveGUID(unitID)
+	local request = { key = id, unitID = unitID, profileID = profileID, guid = guid, aboutState = aboutState,
+		deadline = GetTime() + C.ABOUT_TIMEOUT, phase = "searching" }
+	self.request = request
+	local route = self:pickContact(request)
+	if route then
+		if not self:query(request, route) then
+			self:finish("busy")
+			return false
+		end
+	else
+		request.phase, request.waitAt = "waiting", GetTime()
+		if ns.debugAbout then
+			ns.debugAbout("waiting for contact", nil, unitID)
+		end
+	end
+
+	self:notify()
+	return true
+end
+
+function About:fallback(request, reason)
+	if ns.debugAbout then
+		ns.debugAbout("fallback", request.id, reason)
+	end
+	return self:discover(request, reason)
+end
+
+
+function About:checkRequestTimeout(request, now)
+	if now > request.deadline then
+		self:finish("timeout")
+		return true
+	end
+	if request.phase == "waiting" then
+		local route = self:pickContact(request)
+		if route then
+			if not self:query(request, route) then
+				self:finish("busy")
+			end
+		elseif now - request.waitAt >= C.REQ_CONTACT_TIMEOUT then
+			self:discover(request)
+		end
+		return true
+	elseif request.phase == "discovery-wait" then
+		if now - request.waitAt > C.REQ_CHANNEL_WAIT_MAX then
+			self:finish(request.failureReason or "no-contact")
+		else
+			self:pumpDiscovery(request, now)
+		end
+		return true
+
+	end
+	local frame = request.phase == "searching" and request.queryFrame or request.grantFrame
+	if request.phase == "discovering" then
+		frame = request.queryFrame
+	end
+	if (request.phase == "searching" or request.phase == "loading")
+		and not frame.sentAt and not self:routeLive(request.route)
+	then
+		if request.discovered or not self:fallback(request, "no-contact") then
+			self:finish("no-contact")
+		end
+		return true
+	end
+
+	if not frame.sentAt and now - request.queuedAt > C.ABOUT_STALL then
+		self:finish("timeout")
+
+	elseif request.phase == "searching" and frame.sentAt and now - frame.sentAt > C.REQ_CONTACT_TIMEOUT then
+		if not self:fallback(request, "no-response") then
+			self:finish("no-response")
+		end
+
+	elseif request.phase == "discovering" and frame.sentAt and now - frame.sentAt > C.ABOUT_STALL then
+		self:finish(request.failureReason == "no-contact" and "no-response" or (request.failureReason or "no-response"))
+	elseif request.phase == "loading" and frame.sentAt and now - math.max(frame.sentAt, request.lastAt) > C.ABOUT_STALL then
+		if request.discovered or not self:fallback(request, "no-response") then
+			self:finish("timeout")
+		end
+	else
+		return false
+	end
+
+	return true
+end
+
+function About:checkServeTimeout(serve, now)
+
+	if serve.frame and serve.frame.sentAt then
+		serve.lastAt = serve.frame.sentAt
+	end
+
+	if now > serve.deadline or not self:routeLive(serve.route)
+		or now - (serve.lastAt or serve.offerFrame.sentAt or serve.offeredAt) > C.ABOUT_STALL
+	then
+		if ns.debugAbout then
+			ns.debugAbout("serve stopped", serve.id, "timeout or contact unavailable")
+		end
+		serve.cancelled, self.serve = true, nil
+		return true
+	end
+
+	return false
+
+end
+
+function About:pause()
+	if self.request then
+		self:finish("paused")
+	end
+
+	if self.serve then
+		if ns.debugAbout then
+			ns.debugAbout("serve stopped", self.serve.id, "paused")
+		end
+
+		self.serve.cancelled = true
+		self.serve = nil
+	end
+
+	for _, item in ipairs(self.outbox) do
+		item.owner.cancelled = true
+	end
+
+	wipe(self.outbox)
+	if ns.comms.aboutSend then
+		ns.comms.descRelease(ns.comms.aboutSend)
+		ns.comms.aboutSend = nil
+	end
+end
+
+function About:offer(id, body, route, discovery)
+	local unitID, profileID = body:match("^([^|]+)|([^|]+)$")
+	if not field(unitID, 128) or not field(profileID, 96) then
+		return
+	end
+
+	if GetTime() - self.lastQueryAt < 2 then
+		return
+	end
+
+	self.lastQueryAt = GetTime()
+
+	local owner = { deadline = GetTime() + C.ABOUT_STALL }
+	if self.serve then
+		if discovery then
+			return
+		end
+
+		if ns.debugAbout then
+			ns.debugAbout("offer rejected", id, "busy")
+		end
+		self:queue("N", id, "busy", route, owner)
+		return
+	end
+
+	local adapter = ns.getAdapter(C.SOURCE.TRP3)
+	local about, reason
+
+	if adapter then
+		about, reason = adapter:extractAbout(unitID, profileID)
+	end
+
+	local ok, encoded, rawSize
+	if about then
+		ok, encoded, rawSize = pcall(ns.Serializer.encodeProfile, { profileID = profileID, about = about })
+	end
+	if not about or not ok or not encoded or not rawSize
+		or rawSize > C.ABOUT_MAX_RAW or #encoded > C.ABOUT_MAX_ENCODED
+	then
+
+		local tooLarge = reason == "about-too-large" or (encoded and #encoded > C.ABOUT_MAX_ENCODED)
+			or (rawSize and rawSize > C.ABOUT_MAX_RAW)
+		if discovery then
+			return
+		end
+
+		if ns.debugAbout then
+			ns.debugAbout("offer rejected", id, tooLarge and "too-large" or "missing")
+		end
+
+		self:queue("N", id, tooLarge and "too-large" or "missing", route, owner)
+		return
+	end
+
+	local total = math.ceil(#encoded / C.ABOUT_BLOCK_BYTES)
+-- the sender decides depending on the needed transfer size. Only blocks need an assembly count
+	local strategy = total == 1 and "single" or "blocks"
+	local serve = { id = id, route = route, encoded = encoded, strategy = strategy, total = total,
+		index = 1, deadline = GetTime() + C.ABOUT_TIMEOUT, offeredAt = GetTime() }
+	self.serve = serve
+	serve.offerFrame = self:queue("O", id,
+		profileID .. "|" .. (strategy == "single" and "S" or "B|" .. total), route, serve)
+
+	if ns.debugAbout then
+		ns.debugAbout(serve.offerFrame and "offer queued" or "offer not queued", id,
+			strategy == "single" and "single" or ("blocks " .. total))
+	end
+
+	if not serve.offerFrame then
+		self.serve = nil
+	end
+end
+
+function About:onMessage(text, context)
+	if Util.commsRestricted() or type(text) ~= "string" or #text > 240 or text:find("%z") then
+		return
+	end
+
+	local verb, id, body = text:match("^A2|([RQOGDNC])|([%x%-]+)|(.*)$")
+	if not verb or #id > 32 then
+		return
+	end
+
+	if verb == "R" then
+		if context.medium ~= "CHANNEL" or not ns.comms:channelIndex() then
+			return
+		end
+		local response = peer({ medium = "WHISPER", senderName = context.senderName })
+		if self:routeLive(response) then
+			if ns.debugAbout then
+				ns.debugAbout("in R", id, "CHANNEL " .. response.target)
+			end
+			if ns.debugChunk then
+				ns.debugChunk("in", "CHANNEL", response.target, #text)
+			end
+			self:offer(id, body, response, true)
+		end
+		return
+	end
+
+	local route = peer(context)
+	if not self:routeLive(route) then
+		return
+	end
+	if ns.debugChunk then
+		ns.debugChunk("in", route.medium, route.target, #text)
+	end
+
+	if ns.debugAbout and verb ~= "D" then
+		ns.debugAbout("in " .. verb, id, route.medium .. " " .. tostring(route.target))
+	end
+
+	if verb == "Q" then
+		self:offer(id, body, route)
+		return
+	end
+
+	local serve = self.serve
+	if serve and serve.id == id and samePeer(serve.route, route)
+		and not self:checkServeTimeout(serve, GetTime())
+
+	then
+		if verb == "G" and body == "" and serve.offerFrame.sentAt and not serve.granted then
+			serve.granted = true
+			serve.lastAt = GetTime()
+			if ns.debugAbout then
+				ns.debugAbout("serve granted", id)
+			end
+
+		elseif verb == "C" then
+			serve.cancelled, self.serve = true, nil
+		end
+	end
+
+	local request = self.request
+	local discovering = request and request.phase == "discovering" and request.queryFrame.sentAt and route.medium == "WHISPER"
+	if not request or request.id ~= id or (not discovering and not samePeer(request.route, route)) then
+		return
+	end
+--  delayed packets can arrive before the next tick. Checking its time limits here
+	if self:checkRequestTimeout(request, GetTime()) then
+		return
+	end
+--  the contact that failed must not be the fallback again
+
+	if discovering and verb == "O" and (samePeer(request.failedRoute, route)
+		or (request.failedName and Util.normalizeUnitName(route.target) == request.failedName))
+	then
+		if ns.debugAbout then
+			ns.debugAbout("offer ignored", id, "previous contact")
+		end
+		return
+	end
+
+	if verb == "N" and request.phase == "searching" then
+		local reason = body == "too-large" and "too-large" or (body == "missing" and "missing" or "no-response")
+		if not self:fallback(request, reason) then
+			self:finish(reason)
+		end
+
+	elseif verb == "O" and (request.phase == "searching" or discovering) and request.queryFrame.sentAt then
+		local profileID, total = body:match("^([^|]+)|B|(%d+)$")
+		local strategy = "blocks"
+		if profileID then
+			total = tonumber(total)
+		else
+			profileID = body:match("^([^|]+)|S$")
+			strategy, total = "single", 1
+		end
+
+		if profileID ~= request.profileID or not total or (strategy == "blocks" and total < 2) then
+			if discovering then
+				return
+			end
+			self:finish("invalid")
+			return
+		end
+
+		if total > math.ceil(C.ABOUT_MAX_ENCODED / C.ABOUT_BLOCK_BYTES) then
+			if discovering then
+				return
+			end
+			self:finish("too-large")
+			return
+		end
+
+		request.route, request.strategy, request.total = route, strategy, total
+		request.pieces = strategy == "blocks" and {} or nil
+		request.count, request.lastAt, request.phase = 0, GetTime(), "loading"
+		if ns.debugAbout then
+			ns.debugAbout("strategy accepted", id, strategy == "single" and "single" or ("blocks " .. total))
+		end
+
+		request.grantFrame = self:queue("G", id, "", route, request)
+		if not request.grantFrame then
+			self:finish("busy")
+		end
+
+		self:notify()
+
+	elseif verb == "D" and request.phase == "loading" and request.grantFrame.sentAt then
+		local encoded
+		if request.strategy == "single" then
+			if #body < 1 or #body > C.ABOUT_BLOCK_BYTES then
+				self:finish("invalid")
+				return
+			end
+			encoded = body
+			if ns.debugAbout then
+				ns.debugAbout("data received", id, "single")
+			end
+
+		else
+			local index, piece = body:match("^(%d+)|(.*)$")
+			index = tonumber(index)
+			if not index or index < 1 or index > request.total or #piece < 1 or #piece > C.ABOUT_BLOCK_BYTES
+				or (index < request.total and #piece ~= C.ABOUT_BLOCK_BYTES)
+				or (index == request.total and (request.total - 1) * C.ABOUT_BLOCK_BYTES + #piece > C.ABOUT_MAX_ENCODED)
+			then
+				self:finish("invalid")
+				return
+			end
+
+			if request.pieces[index] then
+				if request.pieces[index] ~= piece then
+					self:finish("invalid")
+				end
+				return
+			end
+
+			request.pieces[index] = piece
+			request.count, request.lastAt = request.count + 1, GetTime()
+			if ns.debugAbout then
+				ns.debugAbout("block received", id, request.count .. "/" .. request.total)
+			end
+
+			if request.count == request.total then
+				encoded = table.concat(request.pieces)
+			end
+		end
+
+		if encoded then
+			local data = ns.Serializer.decodeProfile(encoded, C.ABOUT_MAX_RAW)
+			local adapter = ns.getAdapter(C.SOURCE.TRP3)
+			if type(data) ~= "table" or data.profileID ~= request.profileID or type(data.about) ~= "table"
+				or not adapter or not adapter:injectAbout(request.unitID, request.profileID, data.about, request.aboutState)
+			then
+				self:finish("invalid")
+				return
+			end
+
+			self:rememberSource(request.unitID, request.profileID, context)
+			self:finish(nil)
+		end
+	end
+end
+
+function About:tick()
+	if Util.commsRestricted() then
+		self:pause()
+		return
+	end
+
+	local now = GetTime()
+	for id, record in pairs(self.cooldowns) do
+		if record.untilAt <= now then
+			self.cooldowns[id] = nil
+		end
+	end
+
+	local request = self.request
+	if request then
+		self:checkRequestTimeout(request, now)
+	end
+
+	local serve = self.serve
+	if serve then
+		self:checkServeTimeout(serve, now)
+	end
+
+	if not ns.comms.aboutSend then
+		while #self.outbox > 0 do
+			local item = table.remove(self.outbox, 1)
+			if not item.owner.cancelled and now <= item.owner.deadline
+				and ns.comms:queueAbout(item.text, item.route, item.owner, item.frame)
+			then
+				return
+			end
+		end
+
+		serve = self.serve
+		if serve and serve.granted then
+			if serve.frame and not serve.frame.sentAt then
+				return
+			end
+			if serve.index > serve.total then
+				self.serve = nil
+				return
+			end
+			local piece = serve.encoded:sub((serve.index - 1) * C.ABOUT_BLOCK_BYTES + 1, serve.index * C.ABOUT_BLOCK_BYTES)
+			local body = serve.strategy == "single" and piece or serve.index .. "|" .. piece
+			local frame = {}
+			if ns.comms:queueAbout("A2|D|" .. serve.id .. "|" .. body, serve.route, serve, frame) then
+				serve.frame, serve.index = frame, serve.index + 1
+			end
+		end
+	end
+end
+
+function About:start()
+	ns.trp3About:setRequestHandler(function(unitID, profileID)
+		return self:requestAbout(unitID, profileID)
+	end, function(unitID, profileID)
+		return self:requestStatus(unitID, profileID)
+	end)
+end
+
+ns.about = About:new()
+ns.OnLogin(function()
+	ns.about:start()
 end)

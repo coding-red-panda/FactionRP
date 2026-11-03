@@ -39,6 +39,7 @@ end
 -- string. Returns nil if the value cannot be serialized.
 -- @param data table
 -- @return string|nil
+-- @return number|nil Serialized byte count for size checks
 function Serializer.encodeProfile(data)
 	-- pcall keeps a single unserializable profile from erroring the caller.
 	local ok, serialized = pcall(function()
@@ -52,13 +53,15 @@ function Serializer.encodeProfile(data)
 	if not compressed then
 		return nil
 	end
-	return Serializer.channelEncode(compressed)
+	return Serializer.channelEncode(compressed), #serialized
 end
 
 --- Reverse of encodeProfile. Returns nil on any decode/integrity failure.
 -- @param encoded string
+-- @param maxBytes number? Maximum serialized size before deserialization
 -- @return table|nil
-function Serializer.decodeProfile(encoded)
+-- @return number|nil Serialized byte count when decoding succeeds
+function Serializer.decodeProfile(encoded, maxBytes)
 	local compressed = Serializer.channelDecode(encoded)
 	if not compressed then
 		return nil
@@ -69,11 +72,14 @@ function Serializer.decodeProfile(encoded)
 	if not okD or not serialized then
 		return nil
 	end
+	if maxBytes and #serialized > maxBytes then
+		return nil
+	end
 	local ok, value = LibSerialize:Deserialize(serialized)
 	if not ok then
 		return nil
 	end
-	return value
+	return value, #serialized
 end
 
 -- Envelope codec ------------------------------------------------------------

@@ -21,6 +21,17 @@ C.PROTO_MAJOR = 5
 -- Addon-message prefix registered with the client; max 16 characters.
 C.MSG_PREFIX = "FactionRP"
 
+-- "about" uses its own on demand exchange
+C.ABOUT_PREFIX = "FactionRPAbout"
+C.ABOUT_MAX_RAW = 131072
+C.ABOUT_MAX_ENCODED = 32768
+C.ABOUT_BLOCK_BYTES = 160
+C.ABOUT_TIMEOUT = 600
+C.ABOUT_STALL = 30
+C.ABOUT_COOLDOWN = 60
+C.ABOUT_SOURCE_TTL = 600
+C.ABOUT_SOURCE_CAP = 64
+
 -- Hidden channel for same-faction traffic. Carries the protocol generation
 -- so older clients sit on a disjoint channel.
 C.COMM_CHANNEL = "frp" .. C.PROTO_MAJOR .. "comms" -- e.g. "frp5comms"
