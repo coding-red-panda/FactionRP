@@ -2,6 +2,10 @@
 
 ## 0.5.0
 
+### Added
+- Elixir of Tongues reminder, restored from CrossRP: warns once per buff when less than three minutes remain, and the pop-up's Refresh button consumes an elixir to renew it.
+- `/frp elixir` opens the reminder pop-up on demand, so the Refresh button can be tried without waiting for the buff to run down.
+
 ### Changed
 - Protocol generation 6. Each supported generation is now described by a
   frozen dialect table (control schemas + profile codec), so older
@@ -19,9 +23,6 @@
 
 ## 0.4.7
 
-### Added
-- Elixir of Tongues reminder, restored from CrossRP: warns once per buff when less than three minutes remain, and the pop-up's Refresh button consumes an elixir to renew it.
-- `/frp elixir` opens the reminder pop-up on demand, so the Refresh button can be tried without waiting for the buff to run down.
 
 ### Changes
 - Mouseover fetching now has a short grace period where you're not immediately interrupted if someone walks across your mouse.
