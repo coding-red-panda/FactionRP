@@ -43,7 +43,9 @@ local function setDialogText(dialog, text)
 	end
 end
 
-local function dialogButton1(dialog)
+--- The dialog's own first button (labelled Refresh), which the secure
+-- refresh button is laid over. Blizzard exposes it as button1 / GetButton1().
+local function dialogRefreshButton(dialog)
 	return dialog.GetButton1 and dialog:GetButton1() or dialog.button1
 end
 
@@ -161,43 +163,43 @@ function ElixirNotice:createPopup()
 	local Me = self
 
 	-- A secure button is required for the cast; a plain button cannot use the
-	-- item. It sits on top of the popup's normal accept button.
-	local button = CreateFrame("Button", nil, UIParent,
+	-- item. It sits on top of the dialog's own Refresh button.
+	local refreshButton = CreateFrame("Button", nil, UIParent,
 		"StaticPopupButtonTemplate, InsecureActionButtonTemplate")
 	-- The secure action only fires on the mouse-up click the button is
 	-- registered for when it is told not to follow ActionButtonUseKeyDown
 	-- (which is on by default and would make it fire on mouse-down only).
-	button:RegisterForClicks("AnyUp")
-	button:SetAttribute("useOnKeyDown", false)
+	refreshButton:RegisterForClicks("AnyUp")
+	refreshButton:SetAttribute("useOnKeyDown", false)
 	-- Dedicated item action rather than macrotext: it consumes one elixir
 	-- straight from the bags, by item ID so it is locale-independent.
-	button:SetAttribute("type", "item")
-	button:SetAttribute("item", "item:" .. C.ELIXIR_ITEM_ID)
-	button:SetText(REFRESH)
-	button:Hide() -- parented to the popup only while it is shown
+	refreshButton:SetAttribute("type", "item")
+	refreshButton:SetAttribute("item", "item:" .. C.ELIXIR_ITEM_ID)
+	refreshButton:SetText(REFRESH)
+	refreshButton:Hide() -- parented to the popup only while it is shown
 	-- PreClick runs before the secure action consumes an elixir, so this is
 	-- the only point where the bag count still reflects the pre-click state.
-	button:HookScript("PreClick", function()
+	refreshButton:HookScript("PreClick", function()
 		Me.hasElixir = elixirCount() > 0
 	end)
-	button:HookScript("OnClick", function()
+	refreshButton:HookScript("OnClick", function()
 		Me:onRefreshClicked()
 	end)
-	self.refreshButton = button
+	self.refreshButton = refreshButton
 
 	StaticPopupDialogs[POPUP] = {
 		text = "",
-		button1 = REFRESH,
-		button2 = IGNORE,
+		button1 = REFRESH, -- Blizzard key: the dialog's first (Refresh) button
+		button2 = IGNORE, -- Blizzard key: the dialog's second (Ignore) button
 		timeout = 0,
 		OnShow = function(dialog)
 			-- The popup is only shown out of combat, so reparenting this
 			-- protected frame is safe here.
-			local accept = dialogButton1(dialog)
-			button:SetParent(dialog)
-			button:SetAllPoints(accept)
-			button:SetFrameLevel(accept:GetFrameLevel() + 1)
-			button:Show()
+			local nativeRefresh = dialogRefreshButton(dialog)
+			refreshButton:SetParent(dialog)
+			refreshButton:SetAllPoints(nativeRefresh)
+			refreshButton:SetFrameLevel(nativeRefresh:GetFrameLevel() + 1)
+			refreshButton:Show()
 			dialog.lastText = nil
 			local text = Me:text()
 			if text then
@@ -206,7 +208,7 @@ function ElixirNotice:createPopup()
 			end
 		end,
 		OnHide = function(dialog)
-			button:Hide()
+			refreshButton:Hide()
 			dialog.lastText = nil
 			Me.manual = false
 		end,
