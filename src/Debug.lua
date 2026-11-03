@@ -307,7 +307,6 @@ local CODEC_PROFILE = {
 	sections = { characteristics = { FN = "Ald", LN = "Vane" } },
 	clientInfo = { client = "Total RP 3", msp = false },
 }
-local CODEC_PIPELINE_HEX = "63345B949C93999A57E2999796AF66945B5C909104115814925F9298A31014A060DC549C9A5C92999F572CF6293923B12831B924B528B3B82433B9584DC9C7CF292C312F55C9CDCFC83127655241517E5A664EAAA70B504F4E5A496A7109E0"
 local CODEC_CBOR_PROFILE = { k = "v", n = 5 }
 local CODEC_CBOR_PIPELINE_HEX = "5B94989D589698C70A0102"
 
@@ -365,21 +364,13 @@ ns.RegisterCommand("codec", function()
 		and ser.channelEncode(CODEC_RAW) == chanVec
 		and ser.channelDecode(chanVec) == CODEC_RAW)
 
-	-- A real pre-change wire payload decodes end to end (gen-5 LibSerialize).
-	local payload = C_EncodingUtil.DecodeHex(CODEC_PIPELINE_HEX)
-	check("pre-change payload decodes (dialect 5)",
-		payload ~= nil and deepEqual(dial.decodeProfile(payload, 5), CODEC_PROFILE))
-
 	-- A fixed CBOR payload decodes end to end (gen-6 codec).
 	local cborPayload = C_EncodingUtil.DecodeHex(CODEC_CBOR_PIPELINE_HEX)
 	check("CBOR payload decodes (dialect 6)",
 		cborPayload ~= nil and deepEqual(
 			dial.decodeProfile(cborPayload, 6), CODEC_CBOR_PROFILE))
 
-	-- Both dialects round-trip the same profile table.
-	local rt5 = dial.encodeProfile(CODEC_PROFILE, 5)
-	check("encode/decode round-trip (dialect 5)",
-		rt5 ~= nil and deepEqual(dial.decodeProfile(rt5, 5), CODEC_PROFILE))
+	-- The dialect round-trips a profile table.
 	local rt6 = dial.encodeProfile(CODEC_PROFILE, 6)
 	check("encode/decode round-trip (dialect 6)",
 		rt6 ~= nil and deepEqual(dial.decodeProfile(rt6, 6), CODEC_PROFILE))
@@ -423,8 +414,8 @@ end, "Show version, cache size, pending sends, adapter and debug state")
 -- leg at a chosen generation. The payload travels the same pipeline as a
 -- normal serve (encode -> envelope -> chunks -> paced send -> reassembly ->
 -- gates -> data-leg verify -> decode -> cache -> inject), minus peer
--- discovery. selfx 5 proves we still decode the proto-5 dialect; selfx 6
--- proves the CBOR path.
+-- discovery. The selectable generations are the supported dialects — only
+-- generation 6 today, exercising the CBOR path.
 
 --- Render a profile data table as flat "path = value" lines for display.
 -- Sections get bracket headers; nested tables flatten with dotted paths.

@@ -17,8 +17,6 @@ local _, ns = ...
 local C = ns.Const
 local Serializer = ns.Serializer
 
-local LibSerialize = LibStub("LibSerialize")
-
 local Dialect = {}
 ns.Dialect = Dialect
 
@@ -51,28 +49,6 @@ local function unpackWire(encoded)
 	if ok then
 		return serialized
 	end
-end
-
--- Generation 5: LibSerialize payloads -----------------------------------------
-
-local function encodeProfile5(data)
-	local ok, serialized = pcall(LibSerialize.Serialize, LibSerialize, data)
-	if not ok then
-		return nil
-	end
-	return packWire(serialized)
-end
-
-local function decodeProfile5(encoded)
-	local serialized = unpackWire(encoded)
-	if not serialized then
-		return nil
-	end
-	local ok, value = LibSerialize:Deserialize(serialized)
-	if not ok or type(value) ~= "table" then
-		return nil
-	end
-	return value
 end
 
 -- Generation 6: native CBOR payloads ------------------------------------------
@@ -125,17 +101,6 @@ local GUID_SCHEMA = {
 }
 
 Dialect.DIALECTS = {
-	[5] = {
-		ctlProto = "FRP1",
-		verbs = {
-			REQ = REQ_SCHEMA,
-			ACK = ACK_SCHEMA,
-			OK = GUID_SCHEMA,
-			NOK = GUID_SCHEMA,
-		},
-		encodeProfile = encodeProfile5,
-		decodeProfile = decodeProfile5,
-	},
 	[6] = {
 		ctlProto = "FRP1",
 		verbs = {
