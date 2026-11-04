@@ -277,6 +277,19 @@ C.STATS_RECENT = 50     -- per-message records kept in the recent ring buffer
 C.STATS_RATE_WINDOW = 60 -- seconds covered by the rolling rate window
 C.STATS_RATE_BUCKETS = 12 -- buckets the window is divided into
 
+-- Elixir of Tongues reminder ------------------------------------------------
+--
+-- While the player's Elixir of Tongues buff is within ELIXIR_NOTICE_LEAD
+-- seconds of expiring, a pop-up offers to consume another elixir or to
+-- ignore it. The reminder fires once per application of the buff; ignoring
+-- it leaves that application warned, refreshing it re-arms the reminder.
+-- None of this state is persisted.
+C.ELIXIR_ITEM_ID = 2460
+C.ELIXIR_SPELL_ID = 2336
+C.ELIXIR_NOTICE_LEAD = 180 -- three minutes left
+C.ELIXIR_NOTICE_INTERVAL = 1
+C.ELIXIR_NOTICE_GRACE = 3 -- pause after a refresh before polling again
+
 -- Profiles ------------------------------------------------------------------
 
 -- Identifiers for the AddOn a profile originated from; sent on the wire so
