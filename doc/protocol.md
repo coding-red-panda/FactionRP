@@ -74,7 +74,7 @@ sender || subject || unitID || addon || originTime || contentVersion || protoMaj
 | `originTime`     | freshness claim: `time()` for self-serves; the holder's last-seen "as of" stamp otherwise |
 | `contentVersion` | opaque version string (`c#:k#:m#` section versions)              |
 | `protoMajor`     | the sender's wire-protocol generation (`C.PROTO_MAJOR`, now 6)    |
-| `data`           | payload; may itself contain `||` — it is always the last field   |
+| `data`           | payload; may itself contain `\|\|` — it is always the last field   |
 
 A message is malformed unless all seven separators are present and
 `originTime` parses as a number.
