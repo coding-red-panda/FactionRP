@@ -16,6 +16,12 @@ local C = ns.Const
 local Serializer = {}
 ns.Serializer = Serializer
 
+local LibSerialize = LibStub("LibSerialize")
+
+-- I got sick of writing Enum.Compressionwhatever
+local DEFLATE = Enum.CompressionMethod.Deflate
+local MAX_SIZE = Enum.CompressionLevel.OptimizeForSize
+
 -- NUL-escaper for the addon channel; byte-identical to the old codec
 -- (\000 -> \001\002, \001 -> \001\003). NUL must be %z in patterns.
 function Serializer.channelEncode(s)
@@ -23,6 +29,58 @@ function Serializer.channelEncode(s)
 end
 function Serializer.channelDecode(s)
 	return (s:gsub("\001\002", "\000"):gsub("\001\003", "\001"))
+end
+
+-- About-exchange codec ------------------------------------------------------
+-- The proto-5 table codec, kept for the on-demand ABOUT exchange which runs
+-- outside the per-generation dialect pipeline. Slated for CBOR migration
+-- in 0.5.2; see encodeProfile6 in Dialects.lua for the target pipeline.
+
+--- Serialize+compress+encode an (opaque) profile data table into a wire-safe
+-- string. Returns nil if the value cannot be serialized.
+-- @param data table
+-- @return string|nil
+-- @return number|nil Serialized byte count for size checks
+function Serializer.encodeProfile(data)
+	-- pcall keeps a single unserializable profile from erroring the caller.
+	local ok, serialized = pcall(function()
+		return LibSerialize:Serialize(data)
+	end)
+	if not ok or not serialized then
+		return nil
+	end
+	local compressed = C_EncodingUtil.CompressString(serialized,
+		DEFLATE, MAX_SIZE)
+	if not compressed then
+		return nil
+	end
+	return Serializer.channelEncode(compressed), #serialized
+end
+
+--- Reverse of encodeProfile. Returns nil on any decode/integrity failure.
+-- @param encoded string
+-- @param maxBytes number? Maximum serialized size before deserialization
+-- @return table|nil
+-- @return number|nil Serialized byte count when decoding succeeds
+function Serializer.decodeProfile(encoded, maxBytes)
+	local compressed = Serializer.channelDecode(encoded)
+	if not compressed then
+		return nil
+	end
+	-- pcall: malformed wire input may error rather than return nil.
+	local okD, serialized = pcall(C_EncodingUtil.DecompressString,
+		compressed, DEFLATE)
+	if not okD or not serialized then
+		return nil
+	end
+	if maxBytes and #serialized > maxBytes then
+		return nil
+	end
+	local ok, value = LibSerialize:Deserialize(serialized)
+	if not ok then
+		return nil
+	end
+	return value, #serialized
 end
 
 -- Envelope codec ------------------------------------------------------------

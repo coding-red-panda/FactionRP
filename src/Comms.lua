@@ -86,6 +86,7 @@ function Comms:start()
 	end
 
 	C_ChatInfo.RegisterAddonMessagePrefix(self.prefix)
+	C_ChatInfo.RegisterAddonMessagePrefix(C.ABOUT_PREFIX)
 
 	ns.RegisterEvent("CHAT_MSG_ADDON", function(_, prefix, text, channel, sender)
 		self:onChatMsgAddon(prefix, text, channel, sender)
@@ -191,6 +192,13 @@ function Comms:pauseForLoading()
 end
 
 function Comms:clearTransfers()
+	if ns.about then
+		ns.about:pause()
+	end
+	if self.aboutSend then
+		self.descRelease(self.aboutSend)
+		self.aboutSend = nil
+	end
 -- //edit: Old transfered data should not start sending after we finish the teleport
 	local q = self.queue
 	for i = q.head, q.tail do
@@ -495,6 +503,11 @@ function Comms:sendDescriptor(desc)
 	if ns.Util.isPaused() then
 		return
 	end
+	if desc.aboutOwner and (desc.aboutOwner.cancelled or GetTime() > desc.aboutOwner.deadline
+		or not ns.about or not ns.about:routeLive(desc.aboutRoute))
+	then
+		return
+	end
 
 	local request = desc.contactRequest
 
@@ -556,23 +569,34 @@ function Comms:sendDescriptor(desc)
 	end
 
 	local chomp = AddOn_Chomp
+	local prefix = desc.prefix or self.prefix
+	if desc.aboutFrame then
+		desc.aboutFrame.sentAt = GetTime()
+		if ns.debugAbout then
+			local verb, id = text:match("^A2|([RQOGDNC])|([%x%-]+)|")
+
+			if verb then
+				ns.debugAbout("handoff " .. verb, id, desc.kind .. " " .. tostring(desc.target))
+			end
+		end
+	end
 	if desc.mode == "bnet" then
 		-- BNet sends share ChatThrottleLib's queue via Chomp when present.
 		if chomp and chomp.BNSendGameData then
-			chomp.BNSendGameData(desc.target, self.prefix, text, "LOW")
+			chomp.BNSendGameData(desc.target, prefix, text, "LOW")
 			return
 		end
-		C_BattleNet.SendGameData(desc.target, self.prefix, text)
+		C_BattleNet.SendGameData(desc.target, prefix, text)
 		return
 	end
 	-- Chomp coalesces our sends into ChatThrottleLib's global queues. Raw
 	-- SendAddonMessage bursts can stall other addons' CHANNEL sends
 	-- (TRP3's unthrottled C_SCAN map-scan requests, notably).
 	if chomp and chomp.SendAddonMessage then
-		chomp.SendAddonMessage(self.prefix, text, desc.kind, desc.target, "LOW")
+		chomp.SendAddonMessage(prefix, text, desc.kind, desc.target, "LOW")
 		return
 	end
-	C_ChatInfo.SendAddonMessage(self.prefix, text, desc.kind, desc.target)
+	C_ChatInfo.SendAddonMessage(prefix, text, desc.kind, desc.target)
 end
 
 --- Release queued sends at C.SEND_RATE chunks/second via a fractional
@@ -580,6 +604,9 @@ end
 -- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
 function Comms:flushQueue()
 	self:updateActivityState()
+	if ns.about then
+		ns.about:tick()
+	end
 	-- Hold all sends while restricted; the queue drains after. On entry,
 	-- drop partial inbound buffers: their missing chunks can never arrive.
 	if ns.Util.commsRestricted() then
@@ -599,10 +626,17 @@ function Comms:flushQueue()
 	local head = q.head
 	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))
 	local sent = 0
-	while (self.sendCredit - sent) >= (1 - 1e-6) and head <= q.tail do
-		local desc = q[head]
-		q[head] = nil
-		head = head + 1
+	while (self.sendCredit - sent) >= (1 - 1e-6) and (head <= q.tail or self.aboutSend) do
+		local desc
+-- //edit: "about" may use idle slots, so normal profiles always go first
+		if head <= q.tail then
+			desc = q[head]
+			q[head] = nil
+			head = head + 1
+		else
+			desc = self.aboutSend
+			self.aboutSend = nil
+		end
 		self:sendDescriptor(desc)
 		self.descRelease(desc)
 		sent = sent + 1
@@ -613,6 +647,29 @@ function Comms:flushQueue()
 		-- Queue drained: reset indices to keep the array small.
 		q.head, q.tail = 1, 0
 	end
+end
+
+function Comms:queueAbout(text, route, owner, frame)
+
+	if ns.Util.commsRestricted() or self.aboutSend or type(text) ~= "string"
+		or #text > 240 or text:find("%z") or not ns.about:routeLive(route)
+		or (route.medium == "CHANNEL" and not text:match("^A2|R|[%x%-]+|"))
+	then
+		return false
+	end
+
+	local desc = self.descAcquire()
+	desc.mode = route.medium == "BNET" and "bnet" or "addon"
+	desc.kind = route.medium
+	desc.target = route.target
+	desc.channelName = route.medium == "CHANNEL" and C.COMM_CHANNEL or nil
+	desc.prefix = C.ABOUT_PREFIX
+	desc.text = text
+	desc.enqueuedAt = GetTime()
+	desc.aboutOwner, desc.aboutRoute, desc.aboutFrame = owner, route, frame
+	self.aboutSend = desc
+
+	return true
 end
 
 -- Send primitives (all paced via the queue) ---------------------------------
@@ -957,12 +1014,19 @@ end
 -- Inbound -------------------------------------------------------------------
 
 function Comms:onChatMsgAddon(prefix, text, channel, sender)
-	if prefix ~= self.prefix then
+	if prefix ~= self.prefix and (prefix ~= C.ABOUT_PREFIX or not ns.about) then
 		return
 	end
 	if ns.Util.commsRestricted() then
 		noteRestrictedResponses()
 		return
+	end
+
+	if not self.ownName then
+		local ownName = ns.Util.getUnitID("player")
+		if ns.Util.canWeUse(ownName) then
+			self.ownName = ns.Util.normalizeUnitName(ownName)
+		end
 	end
 
 	-- Our own channel/group echo does not need to be read. selfEchoUntil is
@@ -980,11 +1044,15 @@ function Comms:onChatMsgAddon(prefix, text, channel, sender)
 	ctx.senderName = sender
 	ctx.senderKey = sender
 	ctx.gameAccountID = nil
-	self:handleIncoming(text, ctx)
+	if prefix == C.ABOUT_PREFIX then
+		ns.about:onMessage(text, ctx)
+	else
+		self:handleIncoming(text, ctx)
+	end
 end
 
 function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
-	if prefix ~= self.prefix then
+	if prefix ~= self.prefix and (prefix ~= C.ABOUT_PREFIX or not ns.about) then
 		return
 	end
 	if ns.Util.commsRestricted() then
@@ -1004,7 +1072,11 @@ function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
 	ctx.senderName = nil
 	ctx.senderKey = key
 	ctx.gameAccountID = bnetIDGameAccount
-	self:handleIncoming(text, ctx)
+	if prefix == C.ABOUT_PREFIX then
+		ns.about:onMessage(text, ctx)
+	else
+		self:handleIncoming(text, ctx)
+	end
 end
 
 --- Drop `senderKey`'s chunks before reassembly for REJECTED_SENDER_TTL.

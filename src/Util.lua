@@ -810,7 +810,7 @@ function Util.fixChompChannelTargets(channelInx)
 		for _, pipe in pairs(prio.ByName or {}) do
 			for i = 1, #pipe do
 				local msg = pipe[i]
-				if type(msg) == "table" and msg[1] == C.MSG_PREFIX and msg[3] == "CHANNEL" then
+				if type(msg) == "table" and (msg[1] == C.MSG_PREFIX or msg[1] == C.ABOUT_PREFIX) and msg[3] == "CHANNEL" then
 					rewritten = rewritten + 1
 					if debug then
 						currentId[#currentId + 1] =  msg[4] or 0
