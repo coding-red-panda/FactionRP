@@ -86,7 +86,6 @@ function Comms:start()
 	end
 
 	C_ChatInfo.RegisterAddonMessagePrefix(self.prefix)
-	C_ChatInfo.RegisterAddonMessagePrefix(C.ABOUT_PREFIX)
 
 	ns.RegisterEvent("CHAT_MSG_ADDON", function(_, prefix, text, channel, sender)
 		self:onChatMsgAddon(prefix, text, channel, sender)
@@ -194,10 +193,6 @@ end
 function Comms:clearTransfers()
 	if ns.about then
 		ns.about:pause()
-	end
-	if self.aboutSend then
-		self.descRelease(self.aboutSend)
-		self.aboutSend = nil
 	end
 -- //edit: Old transfered data should not start sending after we finish the teleport
 	local q = self.queue
@@ -500,7 +495,7 @@ end
 --- Dispatch a queued descriptor through Chomp (or the raw fallback),
 -- recording stats hooks. The descriptor is released after dispatch.
 function Comms:sendDescriptor(desc)
-	if ns.Util.isPaused() then
+	if not desc or ns.Util.isPaused() then
 		return
 	end
 	if desc.aboutOwner and (desc.aboutOwner.cancelled or GetTime() > desc.aboutOwner.deadline
@@ -572,12 +567,9 @@ function Comms:sendDescriptor(desc)
 	local prefix = desc.prefix or self.prefix
 	if desc.aboutFrame then
 		desc.aboutFrame.sentAt = GetTime()
-		if ns.debugAbout then
-			local verb, id = text:match("^A2|([RQOGDNC])|([%x%-]+)|")
-
-			if verb then
-				ns.debugAbout("handoff " .. verb, id, desc.kind .. " " .. tostring(desc.target))
-			end
+		if ns.debugAbout and desc.aboutVerb then
+			ns.debugAbout("handoff " .. desc.aboutVerb, desc.aboutId,
+				desc.kind .. " " .. tostring(desc.target))
 		end
 	end
 	if desc.mode == "bnet" then
@@ -626,18 +618,21 @@ function Comms:flushQueue()
 	local head = q.head
 	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))
 	local sent = 0
-	while (self.sendCredit - sent) >= (1 - 1e-6) and (head <= q.tail or self.aboutSend) do
-		local desc
--- //edit: "about" may use idle slots, so normal profiles always go first
-		if head <= q.tail then
-			desc = q[head]
-			q[head] = nil
-			head = head + 1
-		else
-			desc = self.aboutSend
-			self.aboutSend = nil
+	while (self.sendCredit - sent) >= (1 - 1e-6) and head <= q.tail do
+		local desc = q[head]
+		q[head] = nil
+		head = head + 1
+		-- Dispatch must never throw past this point: with the slot already
+		-- popped, an uncaught error leaves head pointing at a hole and the
+		-- queue spins nil descriptors on every later tick. Report through
+		-- the normal error channel, then keep draining.
+		local ok, err = pcall(self.sendDescriptor, self, desc)
+		if not ok then
+			local handler = geterrorhandler and geterrorhandler()
+			if handler then
+				handler(err)
+			end
 		end
-		self:sendDescriptor(desc)
 		self.descRelease(desc)
 		sent = sent + 1
 	end
@@ -649,37 +644,15 @@ function Comms:flushQueue()
 	end
 end
 
-function Comms:queueAbout(text, route, owner, frame)
-
-	if ns.Util.commsRestricted() or self.aboutSend or type(text) ~= "string"
-		or #text > 240 or text:find("%z") or not ns.about:routeLive(route)
-		or (route.medium == "CHANNEL" and not text:match("^A2|R|[%x%-]+|"))
-	then
-		return false
-	end
-
-	local desc = self.descAcquire()
-	desc.mode = route.medium == "BNET" and "bnet" or "addon"
-	desc.kind = route.medium
-	desc.target = route.target
-	desc.channelName = route.medium == "CHANNEL" and C.COMM_CHANNEL or nil
-	desc.prefix = C.ABOUT_PREFIX
-	desc.text = text
-	desc.enqueuedAt = GetTime()
-	desc.aboutOwner, desc.aboutRoute, desc.aboutFrame = owner, route, frame
-	self.aboutSend = desc
-
-	return true
-end
-
 -- Send primitives (all paced via the queue) ---------------------------------
 
 --- Send one raw chunk over an in-game addon channel.
 -- @param text   string The chunk.
 -- @param kind   string "CHANNEL" | "PARTY" | "RAID" | "INSTANCE_CHAT" | "WHISPER".
 -- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
+-- @param meta   table? About leg bookkeeping { owner, route, frame, verb, id }.
 -- @return table The queued descriptor (callers may stamp leg-completion fields).
-function Comms:sendAddon(text, kind, target)
+function Comms:sendAddon(text, kind, target, meta)
 
 	if ns.Util.isPaused() then
 		return
@@ -692,12 +665,17 @@ function Comms:sendAddon(text, kind, target)
 	desc.target = target
 	desc.channelName = nil
 	desc.enqueuedAt = GetTime()
+	if meta then
+		desc.aboutOwner, desc.aboutRoute, desc.aboutFrame =
+			meta.owner, meta.route, meta.frame
+		desc.aboutVerb, desc.aboutId = meta.verb, meta.id
+	end
 	self:enqueue(desc)
 	return desc
 end
 
 --- Send one raw chunk to a Battle.net game account.
-function Comms:sendBNet(text, gameAccountID)
+function Comms:sendBNet(text, gameAccountID, meta)
 	if ns.Util.isPaused() then
 		return
 
@@ -708,6 +686,11 @@ function Comms:sendBNet(text, gameAccountID)
 	desc.kind = "BNET"
 	desc.target = gameAccountID
 	desc.enqueuedAt = GetTime()
+	if meta then
+		desc.aboutOwner, desc.aboutRoute, desc.aboutFrame =
+			meta.owner, meta.route, meta.frame
+		desc.aboutVerb, desc.aboutId = meta.verb, meta.id
+	end
 	self:enqueue(desc)
 	return desc
 end
@@ -723,7 +706,7 @@ end
 
 -- @return number|false Chunk count queued, or false when the whole leg was
 --   dropped for capacity. Callers must not mark work as sent on false.
-function Comms:sendChunksAddon(chunks, kind, target)
+function Comms:sendChunksAddon(chunks, kind, target, meta)
 	if ns.Util.isPaused() or (kind == "WHISPER" and not self:canWhisper(target)) then
 		return false
 	end
@@ -740,7 +723,7 @@ function Comms:sendChunksAddon(chunks, kind, target)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendAddon(chunks[i], kind, target)
+		local desc = self:sendAddon(chunks[i], kind, target, meta)
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes
@@ -752,7 +735,7 @@ end
 
 --- Send a chunk list over a named custom channel (e.g. a previous-generation
 -- channel for the version announcement). Resolves to an index at dispatch.
-function Comms:sendChunksChannel(chunks, channelName)
+function Comms:sendChunksChannel(chunks, channelName, meta)
 	if ns.Util.isPaused() then
 		return false
 	end
@@ -769,7 +752,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendAddon(chunks[i], "CHANNEL", nil)
+		local desc = self:sendAddon(chunks[i], "CHANNEL", nil, meta)
 		desc.channelName = channelName
 		if i == n then
 			desc.legStartedAt = startedAt
@@ -780,7 +763,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 	return n
 end
 
-function Comms:sendChunksBNet(chunks, gameAccountID)
+function Comms:sendChunksBNet(chunks, gameAccountID, meta)
 	if ns.Util.isPaused() then
 		return false
 
@@ -797,7 +780,7 @@ function Comms:sendChunksBNet(chunks, gameAccountID)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendBNet(chunks[i], gameAccountID)
+		local desc = self:sendBNet(chunks[i], gameAccountID, meta)
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes
@@ -1014,7 +997,7 @@ end
 -- Inbound -------------------------------------------------------------------
 
 function Comms:onChatMsgAddon(prefix, text, channel, sender)
-	if prefix ~= self.prefix and (prefix ~= C.ABOUT_PREFIX or not ns.about) then
+	if prefix ~= self.prefix then
 		return
 	end
 	if ns.Util.commsRestricted() then
@@ -1044,15 +1027,11 @@ function Comms:onChatMsgAddon(prefix, text, channel, sender)
 	ctx.senderName = sender
 	ctx.senderKey = sender
 	ctx.gameAccountID = nil
-	if prefix == C.ABOUT_PREFIX then
-		ns.about:onMessage(text, ctx)
-	else
-		self:handleIncoming(text, ctx)
-	end
+	self:handleIncoming(text, ctx)
 end
 
 function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
-	if prefix ~= self.prefix and (prefix ~= C.ABOUT_PREFIX or not ns.about) then
+	if prefix ~= self.prefix then
 		return
 	end
 	if ns.Util.commsRestricted() then
@@ -1072,11 +1051,7 @@ function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
 	ctx.senderName = nil
 	ctx.senderKey = key
 	ctx.gameAccountID = bnetIDGameAccount
-	if prefix == C.ABOUT_PREFIX then
-		ns.about:onMessage(text, ctx)
-	else
-		self:handleIncoming(text, ctx)
-	end
+	self:handleIncoming(text, ctx)
 end
 
 --- Drop `senderKey`'s chunks before reassembly for REJECTED_SENDER_TTL.
