@@ -259,6 +259,8 @@ local failureHints = {
 	["too-large"] = "The description is too large for this transfer.",
 	timeout = "The description transfer timed out.",
 	invalid = "The description could not be loaded.",
+	busy = "The description service is busy; try again shortly.",
+	cached = "Description was loaded recently.",
 }
 
 local function readContext(cachedFaction)
@@ -332,7 +334,7 @@ local function readContext(cachedFaction)
 	if not Util.canWeUse(faction, ownFaction)
 		or (faction ~= "Alliance" and faction ~= "Horde")
 		or (ownFaction ~= "Alliance" and ownFaction ~= "Horde")
-		or faction == ownFaction
+		or (faction == ownFaction and not ns.debugAboutBtn)
 	then
 		return
 	end
@@ -476,7 +478,7 @@ end
 
 function TRP3About:update()
 	local context, group, unitID, loaded, restricted = self:getContext()
-	if not context then
+	if not context or not group then
 		if self.button then
 			self.button:Hide()
 		end
