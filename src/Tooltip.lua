@@ -334,7 +334,7 @@ local function readContext(cachedFaction)
 	if not Util.canWeUse(faction, ownFaction)
 		or (faction ~= "Alliance" and faction ~= "Horde")
 		or (ownFaction ~= "Alliance" and ownFaction ~= "Horde")
-		or faction == ownFaction
+		or (faction == ownFaction and not ns.debugAboutBtn)
 	then
 		return
 	end

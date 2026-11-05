@@ -1159,3 +1159,12 @@ ns.RegisterCommand("echotest", function()
 	return run
 end, "Probe which AD-leg variants echo over a self whisper")
 
+
+ns.RegisterCommand("aboutbtn", function()
+	ns.debugAboutBtn = not ns.debugAboutBtn
+	ns.Print("aboutbtn: same-faction gate "
+		.. (ns.debugAboutBtn and "bypassed (button can show)" or "restored"))
+	if ns.trp3About then
+		ns.trp3About:update()
+	end
+end, "Toggle the About pull button on same-faction profiles for UI testing")
