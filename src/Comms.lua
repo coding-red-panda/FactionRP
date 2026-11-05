@@ -30,6 +30,9 @@ function Comms:init()
 	-- The queue holds pooled descriptor records, not closures, so a send at
 	-- steady state allocates nothing.
 	self.queue = { head = 1, tail = 0 }
+	-- Slot for About data chunks.
+	-- Only consumed while queue is empty.
+	self.aboutSend = nil
 	self.sendCredit = 0 -- token bucket: chunks release at C.SEND_RATE/sec
 	self.descAcquire, self.descRelease = ns.Util.newPool(C.POOL_SEND_DESC)
 	self.messageHandler = nil -- set by Broadcast: fn(rawMessage, context)
@@ -499,6 +502,7 @@ function Comms:sendDescriptor(desc)
 		return
 	end
 	if desc.aboutOwner and (desc.aboutOwner.cancelled or GetTime() > desc.aboutOwner.deadline
+		or (desc.aboutId and desc.aboutOwner.id ~= desc.aboutId)
 		or not ns.about or not ns.about:routeLive(desc.aboutRoute))
 	then
 		return
@@ -618,10 +622,20 @@ function Comms:flushQueue()
 	local head = q.head
 	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))
 	local sent = 0
-	while (self.sendCredit - sent) >= (1 - 1e-6) and head <= q.tail do
-		local desc = q[head]
-		q[head] = nil
-		head = head + 1
+	while (self.sendCredit - sent) >= (1 - 1e-6) do
+		local desc
+		if head <= q.tail then
+			desc = q[head]
+			q[head] = nil
+			head = head + 1
+		else
+			-- "about" may use idle slots, so normal profiles always go first.
+			desc = self.aboutSend
+			self.aboutSend = nil
+		end
+		if not desc then
+			break
+		end
 		-- Dispatch must never throw past this point: with the slot already
 		-- popped, an uncaught error leaves head pointing at a hole and the
 		-- queue spins nil descriptors on every later tick. Report through
@@ -649,24 +663,30 @@ end
 -- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
 -- @param meta   table? About leg bookkeeping { owner, route, frame, verb, id }.
 -- @return table The queued descriptor (callers may stamp leg-completion fields).
-function Comms:sendAddon(text, kind, target, meta)
-
-	if ns.Util.isPaused() then
-		return
-	end
-
+--- Build a pooled send descriptor without queueing it.
+function Comms:makeDesc(text, mode, kind, target, meta)
 	local desc = self.descAcquire()
-	desc.mode = "addon"
+	desc.mode = mode
 	desc.text = text
 	desc.kind = kind
 	desc.target = target
-	desc.channelName = nil
 	desc.enqueuedAt = GetTime()
 	if meta then
 		desc.aboutOwner, desc.aboutRoute, desc.aboutFrame =
 			meta.owner, meta.route, meta.frame
 		desc.aboutVerb, desc.aboutId = meta.verb, meta.id
 	end
+	return desc
+end
+
+function Comms:sendAddon(text, kind, target, meta)
+
+	if ns.Util.isPaused() then
+		return
+	end
+
+	local desc = self:makeDesc(text, "addon", kind, target, meta)
+	desc.channelName = nil
 	self:enqueue(desc)
 	return desc
 end
@@ -677,17 +697,7 @@ function Comms:sendBNet(text, gameAccountID, meta)
 		return
 
 	end
-	local desc = self.descAcquire()
-	desc.mode = "bnet"
-	desc.text = text
-	desc.kind = "BNET"
-	desc.target = gameAccountID
-	desc.enqueuedAt = GetTime()
-	if meta then
-		desc.aboutOwner, desc.aboutRoute, desc.aboutFrame =
-			meta.owner, meta.route, meta.frame
-		desc.aboutVerb, desc.aboutId = meta.verb, meta.id
-	end
+	local desc = self:makeDesc(text, "bnet", "BNET", gameAccountID, meta)
 	self:enqueue(desc)
 	return desc
 end

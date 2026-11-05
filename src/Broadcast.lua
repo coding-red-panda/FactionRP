@@ -2378,7 +2378,9 @@ function About:rememberSource(unitID, profileID, context)
 	self.sources[id] = { route = route, at = GetTime() }
 end
 
-function About:queue(verb, fields, route, owner)
+--- Encode an About leg's envelope chunks and shared send frame, or nil
+-- when the route, dialect, or size bound rejects it.
+function About:buildLeg(verb, fields, route)
 	if not self:routeLive(route) then
 		return nil
 	end
@@ -2389,7 +2391,6 @@ function About:queue(verb, fields, route, owner)
 		return nil
 	end
 
-	local frame = {}
 	local message = Serializer.buildMessage({
 		sender = ns.broadcast:senderGUID(),
 		subject = C.ABOUT_SUBJECT,
@@ -2399,7 +2400,15 @@ function About:queue(verb, fields, route, owner)
 		contentVersion = "0",
 		data = text,
 	})
-	local sent = sendAboutChunks(Serializer.chunk(message), route,
+	return Serializer.chunk(message), {}
+end
+
+function About:queue(verb, fields, route, owner)
+	local chunks, frame = self:buildLeg(verb, fields, route)
+	if not chunks then
+		return nil
+	end
+	local sent = sendAboutChunks(chunks, route,
 		{ owner = owner, route = route, frame = frame,
 			verb = verb, id = fields.id })
 	if not sent then
@@ -2408,22 +2417,24 @@ function About:queue(verb, fields, route, owner)
 	return frame
 end
 
---- Queue the data leg for a granted serve. A leg that cannot fit the send
--- queue drops whole; N is a 1-chunk leg that still fits in that window, so
--- the requester fails fast instead of waiting out the stall.
+--- Feed the data leg for a granted serve through the idle send slot, i.e.
+--- currently not serving a profile.
 function About:sendData(serve)
-	local frame = self:queue("AD", { id = serve.id, data = serve.encoded },
-		serve.route, serve)
-	if not frame then
+	local chunks, frame = self:buildLeg("AD", { id = serve.id, data = serve.encoded },
+		serve.route)
+	if not chunks then
 		self:queue("AN", { id = serve.id, reason = "busy" }, serve.route,
 			{ deadline = GetTime() + C.ABOUT_STALL })
-		-- The serve is dead; holding it would busy-reject later offers
-		-- for nothing.
 		serve.cancelled, self.serve = true, nil
 		return
 	end
+	local bytes = 0
+	for i = 1, #chunks do
+		bytes = bytes + #chunks[i]
+	end
+	serve.chunks, serve.chunkPos = chunks, 1
+	serve.legBytes, serve.legStartedAt = bytes, GetTime()
 	serve.frame, serve.lastAt = frame, GetTime()
-	serve.drainPos = ns.comms.queue.tail
 end
 
 function About:notify()
@@ -2698,6 +2709,19 @@ function About:requestAbout(unitID, profileID)
 	return true
 end
 
+--- Drop the current contact and return to sampling.
+function About:dropContact(request, reason, now)
+	request.tried = request.tried or {}
+	if request.route then
+		request.tried[contactKey(request.route)] = true
+	end
+	request.failedRoute, request.failedName = request.route, request.contactName
+	request.failureReason = reason
+	request.phase, request.waitAt = "waiting", now
+	request.queryFrame, request.grantFrame = nil, nil
+	request.encodedLen, request.loadUntil = nil, nil
+end
+
 function About:checkRequestTimeout(request, now)
 	if now > request.deadline then
 		self:finish("timeout")
@@ -2744,11 +2768,7 @@ function About:checkRequestTimeout(request, now)
 		-- A holder's silence says nothing about other holders. Sample the
 		-- next contact; the channel broadcast stays the cold-start answer
 		-- for a mesh with nothing left to ask.
-		request.tried = request.tried or {}
-		request.tried[contactKey(request.route)] = true
-		request.failedRoute, request.failedName = request.route, request.contactName
-		request.failureReason = "no-response"
-		request.phase, request.waitAt, request.queryFrame = "waiting", now, nil
+		self:dropContact(request, "no-response", now)
 
 	elseif request.phase == "discovering" and frame.sentAt and now - frame.sentAt > C.ABOUT_STALL then
 		self:finish(request.failureReason == "no-contact" and "no-response" or (request.failureReason or "no-response"))
@@ -2976,14 +2996,14 @@ function About:onMessage(ctl, msg, context)
 		local reason = args.reason == "too-large" and "too-large"
 			or (args.reason == "missing" and "missing"
 			or (args.reason == "busy" and "busy" or "no-response"))
-		self:finish(reason)
+		self:dropContact(request, reason, GetTime())
 		return
 	end
 
 	if verb == "AO" and (request.phase == "searching" or discovering) and request.queryFrame.sentAt then
 		-- num args keep the raw token when tonumber fails; normalize here.
 		local profileID, encodedLen = args.pid, tonumber(args.size)
-		if profileID ~= request.profileID or not encodedLen then
+		if profileID ~= request.profileID or not encodedLen or encodedLen <= 0 then
 			if discovering then
 				return
 			end
@@ -3083,12 +3103,38 @@ function About:tick()
 		self:checkServeTimeout(serve, now)
 	end
 
-	-- The serve lives until its last queued chunk dispatches so a C cancel
-	-- can still cut the drain mid-flight. head resets when the queue empties.
+	-- Fill idle slots one descriptor at a time.
 	serve = self.serve
-	if serve and serve.drainPos
-		and (ns.comms.queue.head > serve.drainPos or ns.comms:queueDepth() == 0)
-	then
+	if serve and serve.chunks and not ns.comms.aboutSend and not Util.isPaused() then
+		local i = serve.chunkPos
+		local meta = { owner = serve, route = serve.route, frame = serve.frame,
+			verb = "AD", id = serve.id }
+		local desc
+		if serve.route.medium == "BNET" then
+			desc = ns.comms:makeDesc(serve.chunks[i], "bnet", "BNET",
+				serve.route.target, meta)
+		elseif serve.route.medium == "CHANNEL" then
+			desc = ns.comms:makeDesc(serve.chunks[i], "addon", "CHANNEL",
+				nil, meta)
+			desc.channelName = C.COMM_CHANNEL
+		else
+			desc = ns.comms:makeDesc(serve.chunks[i], "addon", "WHISPER",
+				serve.route.target, meta)
+		end
+		if i == #serve.chunks then
+			desc.legStartedAt, desc.legBytes, desc.legTotal =
+				serve.legStartedAt, serve.legBytes, i
+		end
+		ns.comms.aboutSend = desc
+		serve.chunkPos = i + 1
+		if i == #serve.chunks then
+			serve.chunks = nil
+		end
+	end
+
+	-- Serve lives until last slot dispatched, or canceled.
+	serve = self.serve
+	if serve and serve.chunkPos and not serve.chunks and not ns.comms.aboutSend then
 		self.serve = nil
 	end
 end
