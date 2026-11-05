@@ -2424,7 +2424,7 @@ function About:sendData(serve)
 		serve.route)
 	if not chunks then
 		self:queue("AN", { id = serve.id, reason = "busy" }, serve.route,
-			{ deadline = GetTime() + C.ABOUT_STALL })
+			{ deadline = GetTime() + C.ABOUT_STALL, id = serve.id })
 		serve.cancelled, self.serve = true, nil
 		return
 	end
@@ -2734,7 +2734,9 @@ function About:checkRequestTimeout(request, now)
 				self:finish("busy")
 			end
 		elseif now - request.waitAt >= C.REQ_CONTACT_TIMEOUT then
-			self:discover(request, request.failureReason)
+			if not self:discover(request, request.failureReason) then
+				self:finish(request.failureReason or "no-contact")
+			end
 		end
 		return true
 	elseif request.phase == "discovery-wait" then
@@ -2842,7 +2844,7 @@ function About:offer(id, unitID, profileID, route, discovery)
 
 	self.lastQueryAt = GetTime()
 
-	local owner = { deadline = GetTime() + C.ABOUT_STALL }
+	local owner = { deadline = GetTime() + C.ABOUT_STALL, id = id }
 	if self.serve then
 		if discovery then
 			return
