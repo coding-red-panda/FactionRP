@@ -2498,12 +2498,62 @@ function About:requestStatus(unitID, profileID)
 	return "idle"
 end
 
+local function contactKey(route)
+	return route.medium == "BNET" and "bn:" .. route.target
+		or Util.normalizeUnitName(route.target)
+end
+
 function About:pickContact(request)
+	local now = GetTime()
+	local tried = request.tried
 	local source = self.sources[request.key]
-	if source and GetTime() - source.at < C.ABOUT_SOURCE_TTL and self:routeLive(source.route) then
+	if source and now - source.at < C.ABOUT_SOURCE_TTL and self:routeLive(source.route)
+		and not (tried and tried[contactKey(source.route)])
+	then
 		return source.route
 	end
-	local route = ns.broadcast:reqContact(request.guid, GetTime())
+	local route = ns.broadcast:reqContact(request.guid, now, request.failedRoute)
+	if route and route.medium == "BNET" then
+		-- reqContact's BNet leg only ever returns the subject themselves.
+		if self:routeLive(route) and not (tried and tried[contactKey(route)]) then
+			return route
+		end
+		route = nil
+	end
+
+	-- Owner path: the subject may itself be a confirmed club relay. conf is
+	-- the live-FRP marker, proto gates peers whose dialect lacks the verbs.
+	local ownerKey = Util.normalizeUnitName(request.unitID)
+	local p = ownerKey and ns.broadcast.relays[ownerKey]
+	if p and p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
+		and (p.proto or 0) >= C.PROTO_MAJOR
+		and ns.comms:canWhisper(p.name)
+		and Util.isClubMemberOnline(p.name)
+		and (Util.isGuildClubMember(p.name) or Util.isCommunityClubMember(p.name))
+		and not (tried and tried[ownerKey])
+	then
+		return { medium = "WHISPER", target = p.name }
+	end
+
+	-- Sample the deck until an untried contact comes up. A re-yielded key
+	-- means the draw pile emptied, so every live contact was already asked.
+	local excluded = request.failedRoute
+	for _ = 1, 24 do
+		if not route then
+			route = ns.broadcast:reqContact(request.guid, now, excluded)
+		end
+		if not route then
+			break
+		end
+		local k = contactKey(route)
+		if not (tried and tried[k]) then
+			break
+		end
+		excluded, route = route, nil
+		if k:sub(1, 3) == "bn:" then
+			break
+		end
+	end
 	return self:routeLive(route) and route or nil
 end
 
@@ -2660,7 +2710,7 @@ function About:checkRequestTimeout(request, now)
 				self:finish("busy")
 			end
 		elseif now - request.waitAt >= C.REQ_CONTACT_TIMEOUT then
-			self:discover(request)
+			self:discover(request, request.failureReason)
 		end
 		return true
 	elseif request.phase == "discovery-wait" then
@@ -2691,9 +2741,14 @@ function About:checkRequestTimeout(request, now)
 		self:finish("timeout")
 
 	elseif request.phase == "searching" and frame.sentAt and now - frame.sentAt > C.REQ_CONTACT_TIMEOUT then
-		-- A confirmed contact's silence is a genuine answer; the mesh is
-		-- only for requests that never reached one.
-		self:finish("no-response")
+		-- A holder's silence says nothing about other holders. Sample the
+		-- next contact; the channel broadcast stays the cold-start answer
+		-- for a mesh with nothing left to ask.
+		request.tried = request.tried or {}
+		request.tried[contactKey(request.route)] = true
+		request.failedRoute, request.failedName = request.route, request.contactName
+		request.failureReason = "no-response"
+		request.phase, request.waitAt, request.queryFrame = "waiting", now, nil
 
 	elseif request.phase == "discovering" and frame.sentAt and now - frame.sentAt > C.ABOUT_STALL then
 		self:finish(request.failureReason == "no-contact" and "no-response" or (request.failureReason or "no-response"))
