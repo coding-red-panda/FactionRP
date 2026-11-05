@@ -628,10 +628,7 @@ function Comms:flushQueue()
 		-- the normal error channel, then keep draining.
 		local ok, err = pcall(self.sendDescriptor, self, desc)
 		if not ok then
-			local handler = geterrorhandler and geterrorhandler()
-			if handler then
-				handler(err)
-			end
+			geterrorhandler()(err)
 		end
 		self.descRelease(desc)
 		sent = sent + 1
