@@ -30,6 +30,9 @@ function Comms:init()
 	-- The queue holds pooled descriptor records, not closures, so a send at
 	-- steady state allocates nothing.
 	self.queue = { head = 1, tail = 0 }
+	-- Slot for About data chunks.
+	-- Only consumed while queue is empty.
+	self.aboutSend = nil
 	self.sendCredit = 0 -- token bucket: chunks release at C.SEND_RATE/sec
 	self.descAcquire, self.descRelease = ns.Util.newPool(C.POOL_SEND_DESC)
 	self.messageHandler = nil -- set by Broadcast: fn(rawMessage, context)
@@ -191,6 +194,9 @@ function Comms:pauseForLoading()
 end
 
 function Comms:clearTransfers()
+	if ns.about then
+		ns.about:pause()
+	end
 -- //edit: Old transfered data should not start sending after we finish the teleport
 	local q = self.queue
 	for i = q.head, q.tail do
@@ -492,7 +498,13 @@ end
 --- Dispatch a queued descriptor through Chomp (or the raw fallback),
 -- recording stats hooks. The descriptor is released after dispatch.
 function Comms:sendDescriptor(desc)
-	if ns.Util.isPaused() then
+	if not desc or ns.Util.isPaused() then
+		return
+	end
+	if desc.aboutOwner and (desc.aboutOwner.cancelled or GetTime() > desc.aboutOwner.deadline
+		or (desc.aboutId and desc.aboutOwner.id ~= desc.aboutId)
+		or not ns.about or not ns.about:routeLive(desc.aboutRoute))
+	then
 		return
 	end
 
@@ -556,23 +568,31 @@ function Comms:sendDescriptor(desc)
 	end
 
 	local chomp = AddOn_Chomp
+	local prefix = desc.prefix or self.prefix
+	if desc.aboutFrame then
+		desc.aboutFrame.sentAt = GetTime()
+		if ns.debugAbout and desc.aboutVerb then
+			ns.debugAbout("handoff " .. desc.aboutVerb, desc.aboutId,
+				desc.kind .. " " .. tostring(desc.target))
+		end
+	end
 	if desc.mode == "bnet" then
 		-- BNet sends share ChatThrottleLib's queue via Chomp when present.
 		if chomp and chomp.BNSendGameData then
-			chomp.BNSendGameData(desc.target, self.prefix, text, "LOW")
+			chomp.BNSendGameData(desc.target, prefix, text, "LOW")
 			return
 		end
-		C_BattleNet.SendGameData(desc.target, self.prefix, text)
+		C_BattleNet.SendGameData(desc.target, prefix, text)
 		return
 	end
 	-- Chomp coalesces our sends into ChatThrottleLib's global queues. Raw
 	-- SendAddonMessage bursts can stall other addons' CHANNEL sends
 	-- (TRP3's unthrottled C_SCAN map-scan requests, notably).
 	if chomp and chomp.SendAddonMessage then
-		chomp.SendAddonMessage(self.prefix, text, desc.kind, desc.target, "LOW")
+		chomp.SendAddonMessage(prefix, text, desc.kind, desc.target, "LOW")
 		return
 	end
-	C_ChatInfo.SendAddonMessage(self.prefix, text, desc.kind, desc.target)
+	C_ChatInfo.SendAddonMessage(prefix, text, desc.kind, desc.target)
 end
 
 --- Release queued sends at C.SEND_RATE chunks/second via a fractional
@@ -580,6 +600,9 @@ end
 -- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
 function Comms:flushQueue()
 	self:updateActivityState()
+	if ns.about then
+		ns.about:tick()
+	end
 	-- Hold all sends while restricted; the queue drains after. On entry,
 	-- drop partial inbound buffers: their missing chunks can never arrive.
 	if ns.Util.commsRestricted() then
@@ -599,11 +622,28 @@ function Comms:flushQueue()
 	local head = q.head
 	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))
 	local sent = 0
-	while (self.sendCredit - sent) >= (1 - 1e-6) and head <= q.tail do
-		local desc = q[head]
-		q[head] = nil
-		head = head + 1
-		self:sendDescriptor(desc)
+	while (self.sendCredit - sent) >= (1 - 1e-6) do
+		local desc
+		if head <= q.tail then
+			desc = q[head]
+			q[head] = nil
+			head = head + 1
+		else
+			-- "about" may use idle slots, so normal profiles always go first.
+			desc = self.aboutSend
+			self.aboutSend = nil
+		end
+		if not desc then
+			break
+		end
+		-- Dispatch must never throw past this point: with the slot already
+		-- popped, an uncaught error leaves head pointing at a hole and the
+		-- queue spins nil descriptors on every later tick. Report through
+		-- the normal error channel, then keep draining.
+		local ok, err = pcall(self.sendDescriptor, self, desc)
+		if not ok then
+			geterrorhandler()(err)
+		end
 		self.descRelease(desc)
 		sent = sent + 1
 	end
@@ -621,36 +661,43 @@ end
 -- @param text   string The chunk.
 -- @param kind   string "CHANNEL" | "PARTY" | "RAID" | "INSTANCE_CHAT" | "WHISPER".
 -- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
+-- @param meta   table? About leg bookkeeping { owner, route, frame, verb, id }.
 -- @return table The queued descriptor (callers may stamp leg-completion fields).
-function Comms:sendAddon(text, kind, target)
+--- Build a pooled send descriptor without queueing it.
+function Comms:makeDesc(text, mode, kind, target, meta)
+	local desc = self.descAcquire()
+	desc.mode = mode
+	desc.text = text
+	desc.kind = kind
+	desc.target = target
+	desc.enqueuedAt = GetTime()
+	if meta then
+		desc.aboutOwner, desc.aboutRoute, desc.aboutFrame =
+			meta.owner, meta.route, meta.frame
+		desc.aboutVerb, desc.aboutId = meta.verb, meta.id
+	end
+	return desc
+end
+
+function Comms:sendAddon(text, kind, target, meta)
 
 	if ns.Util.isPaused() then
 		return
 	end
 
-	local desc = self.descAcquire()
-	desc.mode = "addon"
-	desc.text = text
-	desc.kind = kind
-	desc.target = target
+	local desc = self:makeDesc(text, "addon", kind, target, meta)
 	desc.channelName = nil
-	desc.enqueuedAt = GetTime()
 	self:enqueue(desc)
 	return desc
 end
 
 --- Send one raw chunk to a Battle.net game account.
-function Comms:sendBNet(text, gameAccountID)
+function Comms:sendBNet(text, gameAccountID, meta)
 	if ns.Util.isPaused() then
 		return
 
 	end
-	local desc = self.descAcquire()
-	desc.mode = "bnet"
-	desc.text = text
-	desc.kind = "BNET"
-	desc.target = gameAccountID
-	desc.enqueuedAt = GetTime()
+	local desc = self:makeDesc(text, "bnet", "BNET", gameAccountID, meta)
 	self:enqueue(desc)
 	return desc
 end
@@ -666,7 +713,7 @@ end
 
 -- @return number|false Chunk count queued, or false when the whole leg was
 --   dropped for capacity. Callers must not mark work as sent on false.
-function Comms:sendChunksAddon(chunks, kind, target)
+function Comms:sendChunksAddon(chunks, kind, target, meta)
 	if ns.Util.isPaused() or (kind == "WHISPER" and not self:canWhisper(target)) then
 		return false
 	end
@@ -683,7 +730,7 @@ function Comms:sendChunksAddon(chunks, kind, target)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendAddon(chunks[i], kind, target)
+		local desc = self:sendAddon(chunks[i], kind, target, meta)
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes
@@ -695,7 +742,7 @@ end
 
 --- Send a chunk list over a named custom channel (e.g. a previous-generation
 -- channel for the version announcement). Resolves to an index at dispatch.
-function Comms:sendChunksChannel(chunks, channelName)
+function Comms:sendChunksChannel(chunks, channelName, meta)
 	if ns.Util.isPaused() then
 		return false
 	end
@@ -712,7 +759,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendAddon(chunks[i], "CHANNEL", nil)
+		local desc = self:sendAddon(chunks[i], "CHANNEL", nil, meta)
 		desc.channelName = channelName
 		if i == n then
 			desc.legStartedAt = startedAt
@@ -723,7 +770,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 	return n
 end
 
-function Comms:sendChunksBNet(chunks, gameAccountID)
+function Comms:sendChunksBNet(chunks, gameAccountID, meta)
 	if ns.Util.isPaused() then
 		return false
 
@@ -740,7 +787,7 @@ function Comms:sendChunksBNet(chunks, gameAccountID)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendBNet(chunks[i], gameAccountID)
+		local desc = self:sendBNet(chunks[i], gameAccountID, meta)
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes
@@ -963,6 +1010,13 @@ function Comms:onChatMsgAddon(prefix, text, channel, sender)
 	if ns.Util.commsRestricted() then
 		noteRestrictedResponses()
 		return
+	end
+
+	if not self.ownName then
+		local ownName = ns.Util.getUnitID("player")
+		if ns.Util.canWeUse(ownName) then
+			self.ownName = ns.Util.normalizeUnitName(ownName)
+		end
 	end
 
 	-- Our own channel/group echo does not need to be read. selfEchoUntil is

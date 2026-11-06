@@ -1,5 +1,24 @@
 ﻿# FactionRP Changelog
 
+## 0.5.1
+
+### Added
+- About section pull, by Duschgell, modified by Symphicat (TenaarFeiri):
+  the TRP3 tooltip's About button fetches a profile's biography on
+  demand. It asks the profile's owner when they are reachable, then a
+  known contact, preferring whoever sent the profile, and only calls out
+  on the faction channel when no contact answers. Missing or oversized Abouts get a clear answer instead of
+  silence, and successful pulls are remembered for a while so repeat
+  clicks do not re-request them.
+
+### Changed
+- About pulls now travel over the same delivery system as profile
+  updates instead of a private channel, and that system now supports
+  carrying arbitrary data for future features.
+
+### Fixed
+- A failed send no longer stalls all outgoing comms until reload.
+
 ## 0.5.0
 
 ### Added
