@@ -19,6 +19,8 @@
 ### Fixed
 - A failed send no longer stalls all outgoing comms until reload.
 
+## 0.5.0
+
 ### Added
 - Elixir of Tongues reminder, restored from CrossRP: warns once per buff when less than three minutes remain, and the pop-up's Refresh button consumes an elixir to renew it.
 - `/frp elixir` opens the reminder pop-up on demand, so the Refresh button can be tried without waiting for the buff to run down.
