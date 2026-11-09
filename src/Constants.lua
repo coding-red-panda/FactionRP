@@ -50,10 +50,10 @@ C.ABOUT_CACHE_CAP = 64
 C.COMM_CHANNEL = "frpcomms"
 -- Transitional bridge: channels of still-supported generations join beside
 -- the unified one. Delete an entry when its dialect is dropped.
-C.LEGACY_CHANNELS = { [5] = "frp5comms" }
+C.LEGACY_CHANNELS = {}
 -- A fully amputated generation's channel, briefly joined to announce VER
 -- there (stragglers still parse a newer-stamped FRP1 VER). Repoint on bumps.
-C.VER_STRAY_CHANNEL = "frp3comms"
+C.VER_STRAY_CHANNEL = "frp5comms"
 
 -- Field separator inside a message payload; virtually never appears in data.
 C.SEPARATOR = "||"
