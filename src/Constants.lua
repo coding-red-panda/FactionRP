@@ -10,7 +10,7 @@ ns.Const = C
 -- Identity -----------------------------------------------------------------
 
 C.ADDON_NAME = "FactionRP"
-C.VERSION = "0.5.0"
+C.VERSION = "0.5.1"
 
 -- Wire-protocol generation, stamped into every envelope. Peers below the
 -- supported dialect floor are rejected; bump on breaking changes.
