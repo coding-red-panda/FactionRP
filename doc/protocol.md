@@ -24,7 +24,7 @@ nothing uses them — group comms are TRP3's domain.
 generation travels inside the envelope now, so all future generations
 share one channel instead of minting a fresh `frp<N>comms` per bump.
 While a previous generation's dialect is still supported, its old channel
-is also joined (`C.LEGACY_CHANNELS`, currently empty) — channel
+is also joined (`C.LEGACY_CHANNELS`, currently `frp5comms`) — channel
 REQs broadcast there in the matching dialect so the older fleet keeps
 serving and being served during the transition. Deleting a dialect's
 entry retires its bridge.
@@ -52,9 +52,9 @@ anything on behalf of another. `REQ`s are broadcast only as a fallback,
 once per request and only for stranger subjects (see "The pull exchange");
 a channel answer can only be a faction-mate's cached copy.
 
-Sends are routed through the embedded Chomp's
-`SendAddonMessage`/`BNSendGameData` (raw ChatThrottleLib passthrough — the
-prefix and text reach receivers unwrapped).
+Sends are routed through AddOn_Chomp's `SendAddonMessage`/`BNSendGameData`
+when available (raw ChatThrottleLib passthrough — the prefix and text reach
+receivers unwrapped), falling back to the raw APIs.
 
 ## Message envelope
 
@@ -126,7 +126,8 @@ still counted in inbound byte stats, it just never reaches the assembler.
 
 - **Data envelopes**: `data` is the dialect-serialized, deflate-compressed,
   NUL-escaped profile table `{ profileID, sections, clientInfo }` —
-  native `C_EncodingUtil` CBOR under dialect 6.
+  LibSerialize under dialect 5, native `C_EncodingUtil` CBOR under
+  dialect 6.
 - **Control envelopes**: `subject` is `_frp`; `data` is plain text
   `FRP1 <verb> <args>` per the negotiated dialect's verb schema.
 
@@ -297,13 +298,13 @@ version — a `VER <addonVer>` control chunk (addonVer read from the
 .toc's `## Version:` via `C_AddOns.GetAddOnMetadata`) on every channel it
 sits on (no BNet/whisper legs): the unified `frpcomms` plus each joined
 legacy channel, so every still-supported generation hears it in the
-frozen handshake form. The most recently amputated generation gets one
-courtesy notice too:
+frozen handshake form. Amputated generations get one courtesy notice too:
 the broadcast joins the pinned stray channel
-(`C.VER_STRAY_CHANNEL`, currently `frp5comms`) just long enough to
+(`C.VER_STRAY_CHANNEL`, currently `frp3comms`) just long enough to
 launch the chunk there — membership is dropped `VER_PREV_CHANNEL_HOLD`
-later. Generations older than the pinned one get no notice at all.
-Stray-generation clients accept a higher-generation `VER`
+later. The pin targets proto-3 stragglers specifically: proto-4 was
+deliberately starved, not just superseded, so its channel is never
+revisited. Stray-generation clients accept a higher-generation `VER`
 (their gate only rejects *lower* generations), so the notice still
 reaches them. Repoint `VER_STRAY_CHANNEL` on every `PROTO_MAJOR` bump
 that strands a channel. A receiver that hears a newer version
@@ -399,8 +400,8 @@ listeners                                channel requester (fallback)
 The broadcast is spent at most once per request (`channeled` flag): a
 channel-granted serve that stalls drops the subject to cooldown. A server
 whose grant already failed us is excluded from a rebroadcast. The extra
-`dirSeenAt` ACK field is optional on the wire — senders may omit it and
-receivers tolerate its absence. Broadcast `REQ`s from
+`dirSeenAt` ACK field is optional on the wire — older proto-5 ACKs simply
+arrive without it, and older requesters ignore it. Broadcast `REQ`s from
 fanout-era builds are still answered with the same freshness and serve
 rules (they just hit the per-requester channel throttle harder).
 

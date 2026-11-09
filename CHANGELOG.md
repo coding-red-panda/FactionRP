@@ -1,20 +1,5 @@
 ﻿# FactionRP Changelog
 
-## 0.5.2
-
-### Added
-- Chomp is now embedded (with ChatThrottleLib and CallbackHandler-1.0), so
-  throttled sends no longer depend on another add-on shipping it. The raw
-  `SendAddonMessage`/`SendGameData` fallbacks are gone with it.
-
-### Removed
-- Protocol generation 5 support dropped. The LibSerialize dialect and the
-  `frp5comms` legacy bridge are gone, and LibSerialize is no longer bundled.
-  Generation-5 envelopes are now rejected at the protocol floor like any
-  other amputated generation.
-- The stray-channel version announcement moved from `frp3comms` to
-  `frp5comms`.
-
 ## 0.5.1
 
 ### Added

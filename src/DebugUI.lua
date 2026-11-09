@@ -299,20 +299,9 @@ function UI:build()
 
 	-- selfx section.
 	makeLabel(f, "selfx loopback", 300, -230, 300, "GameFontNormal")
-	-- The gen selector cycles the supported dialects (one today).
-	local gens = {}
-	for gen in pairs(ns.Dialect.DIALECTS) do
-		gens[#gens + 1] = gen
-	end
-	table.sort(gens)
 	self.genBtn = makeButton(f, "gen " .. self.genSel, 300, -246, 60,
 		function()
-			for i, gen in ipairs(gens) do
-				if gen == self.genSel then
-					self.genSel = gens[i % #gens + 1]
-					break
-				end
-			end
+			self.genSel = (self.genSel == 6) and 5 or 6
 			self.genBtn:SetText("gen " .. self.genSel)
 		end)
 	self.lockable[#self.lockable + 1] = self.genBtn
