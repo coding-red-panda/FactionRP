@@ -11,9 +11,9 @@ local _, ns = ...
 local C = ns.Const
 
 --- Whether a debug category is enabled (directly or via `all`). The flag
--- query for non-hook call sites (Broadcast's `targets` gate, Stats).
--- @param category string One of Const.DEBUG_CATEGORIES keys.
--- @return boolean
+--- query for non-hook call sites (Broadcast's `targets` gate, Stats).
+--- @param category string One of Const.DEBUG_CATEGORIES keys.
+--- @return boolean
 function ns.debugEnabled(category)
 	local d = ns.db and ns.db.debug
 	return d ~= nil and (d.all or d[category]) == true
@@ -81,7 +81,7 @@ local HOOKS = {
 }
 
 --- Install enabled log hooks onto ns, remove disabled ones, and refresh
--- the stats collector. Safe before saved variables load.
+--- the stats collector. Safe before saved variables load.
 function ns.refreshDebugHooks()
 	for name, hook in pairs(HOOKS) do
 		ns[name] = ns.debugEnabled(hook[1]) and hook[2] or nil
@@ -475,7 +475,7 @@ end, "Show version, cache size, pending sends, adapter and debug state")
 -- proves the CBOR path.
 
 --- Render a profile data table as flat "path = value" lines for display.
--- Sections get bracket headers; nested tables flatten with dotted paths.
+--- Sections get bracket headers; nested tables flatten with dotted paths.
 function ns.FormatProfileData(data)
 	if type(data) ~= "table" then
 		return tostring(data)
@@ -524,9 +524,9 @@ function ns.FormatProfileData(data)
 end
 
 --- Run a live loopback serve of a real register profile to ourselves over a
--- whisper leg at generation `gen`. Exercises the whole pipeline minus peer
--- discovery. Progress lands on ns.selfxRun for the debug UI.
--- @return table|nil The run state, or nil with a printed reason.
+--- whisper leg at generation `gen`. Exercises the whole pipeline minus peer
+--- discovery. Progress lands on ns.selfxRun for the debug UI.
+--- @return table|nil The run state, or nil with a printed reason.
 function ns.RunSelfx(gen, name)
 	local comms, b, dial = ns.comms, ns.broadcast, ns.Dialect
 	if not (comms and b and dial) then
@@ -707,7 +707,7 @@ end
 -- channel discovery and BNet, which cannot echo to self. No tooltip needed.
 
 --- Drop remembered sources that point back at ourselves; a stale self
--- source would route real pulls to a peer that never answers.
+--- source would route real pulls to a peer that never answers.
 local function selfaboutClearSources(about, ownKey)
 	for id, record in pairs(about.sources) do
 		if record.route and record.route.medium == "WHISPER"
@@ -737,9 +737,9 @@ local function selfaboutHasAbout(unitID)
 end
 
 --- Compact state dump for a failed run: whether the holder's AD leg ever
--- queued, the last inbound chunk age under our sender key (a stale stamp
--- means the echo never came back), rejectedSenders and stale reassembly
--- buffers — the three "invisible drop" states — plus queue and serve.
+--- queued, the last inbound chunk age under our sender key (a stale stamp
+--- means the echo never came back), rejectedSenders and stale reassembly
+--- buffers — the three "invisible drop" states — plus queue and serve.
 local function selfaboutDiag(about, comms, run, own)
 	local key = comms:senderKeyFor("WHISPER", own)
 	local last = comms.lastChunkFrom[key]
@@ -758,9 +758,9 @@ local function selfaboutDiag(about, comms, run, own)
 end
 
 --- Post-run verification: decode the wire payload the holder actually sent
--- (captured at the serve grant) and compare it against what the holder read
--- before the pull and what the register holds after. A PASS means the About
--- page crossed the wire byte-exact, not just that finish() reported cached.
+--- (captured at the serve grant) and compare it against what the holder read
+--- before the pull and what the register holds after. A PASS means the About
+--- page crossed the wire byte-exact, not just that finish() reported cached.
 local function selfaboutVerify(adapter, run, unitID, profileID)
 	if type(run.encoded) ~= "string" then
 		return " | WARN no wire payload captured"
@@ -783,11 +783,11 @@ local function selfaboutVerify(adapter, run, unitID, profileID)
 end
 
 --- Run a live loopback About pull against a directory profile. Progress
--- lands on ns.selfaboutRun; the verdict is requestStatus's terminal reason.
--- @param arg string? "Name-Realm", plus keywords "fixture" (inject a test
---   About first), "reset" (clear cooldown/cache/self-sources) and "big"
---   (lift the size bounds for the run).
--- @return table|nil The run state, or nil with a printed reason.
+--- lands on ns.selfaboutRun; the verdict is requestStatus's terminal reason.
+--- @param arg string? "Name-Realm", plus keywords "fixture" (inject a test
+---   About first), "reset" (clear cooldown/cache/self-sources) and "big"
+---   (lift the size bounds for the run).
+--- @return table|nil The run state, or nil with a printed reason.
 function ns.RunSelfabout(arg)
 	local comms, about = ns.comms, ns.about
 	if not (comms and about) then

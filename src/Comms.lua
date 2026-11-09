@@ -71,7 +71,7 @@ end
 -- Lifecycle -----------------------------------------------------------------
 
 --- Begin transport: register prefix, hook receive events, join the channel,
--- and start the paced sender. Safe to call once.
+--- and start the paced sender. Safe to call once.
 function Comms:start()
 	if self.started then
 		return
@@ -365,7 +365,7 @@ function Comms:onWhisperError(message)
 end
 
 --- Set the callback that receives fully-reassembled messages.
--- @param fn function Invoked as fn(rawMessage, context).
+--- @param fn function Invoked as fn(rawMessage, context).
 function Comms:setMessageHandler(fn)
 	self.messageHandler = fn
 end
@@ -373,8 +373,8 @@ end
 -- Channel -------------------------------------------------------------------
 
 --- Leave any FactionRP channel outside our join set. Channel membership
--- survives /reload, so stale-generation channels would otherwise keep
--- streaming their traffic for the session.
+--- survives /reload, so stale-generation channels would otherwise keep
+--- streaming their traffic for the session.
 function Comms:leaveForeignChannels()
 	local keep = { [C.COMM_CHANNEL:lower()] = true }
 	for _, name in pairs(C.LEGACY_CHANNELS) do
@@ -401,8 +401,8 @@ function Comms:leaveForeignChannels()
 end
 
 --- Join the hidden same-faction channels: the unified channel plus every
--- supported legacy channel. Joining fires CHANNEL_UI_UPDATE churn in the
--- client even when already joined, so skip the ones we are in.
+--- supported legacy channel. Joining fires CHANNEL_UI_UPDATE churn in the
+--- client even when already joined, so skip the ones we are in.
 function Comms:joinChannel()
 	if ns.Util.isPaused() then
 		return
@@ -434,7 +434,7 @@ function Comms:channelIndex()
 end
 
 --- Live member count of the comms channel: 0 while not joined, and until
--- the first CHANNEL_COUNT_UPDATE arrives after a join.
+--- the first CHANNEL_COUNT_UPDATE arrives after a join.
 function Comms:meshCount()
 	if not self:channelIndex() then
 		return 0
@@ -443,7 +443,7 @@ function Comms:meshCount()
 end
 
 --- Member names of the comms channel for REQ sampling, or nil while not
--- joined. May be partial while the roster streams.
+--- joined. May be partial while the roster streams.
 function Comms:meshRoster()
 	if ns.Util.isPaused() then
 		return nil -- member names are unreliable mid-transition
@@ -496,7 +496,7 @@ function Comms:enqueue(desc)
 end
 
 --- Dispatch a queued descriptor through Chomp (or the raw fallback),
--- recording stats hooks. The descriptor is released after dispatch.
+--- recording stats hooks. The descriptor is released after dispatch.
 function Comms:sendDescriptor(desc)
 	if not desc or ns.Util.isPaused() then
 		return
@@ -596,8 +596,8 @@ function Comms:sendDescriptor(desc)
 end
 
 --- Release queued sends at C.SEND_RATE chunks/second via a fractional
--- token bucket. Credit caps at one send's worth so an idle queue cannot
--- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
+--- token bucket. Credit caps at one send's worth so an idle queue cannot
+--- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
 function Comms:flushQueue()
 	self:updateActivityState()
 	if ns.about then
@@ -658,11 +658,11 @@ end
 -- Send primitives (all paced via the queue) ---------------------------------
 
 --- Send one raw chunk over an in-game addon channel.
--- @param text   string The chunk.
--- @param kind   string "CHANNEL" | "PARTY" | "RAID" | "INSTANCE_CHAT" | "WHISPER".
--- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
--- @param meta   table? About leg bookkeeping { owner, route, frame, verb, id }.
--- @return table The queued descriptor (callers may stamp leg-completion fields).
+--- @param text   string The chunk.
+--- @param kind   string "CHANNEL" | "PARTY" | "RAID" | "INSTANCE_CHAT" | "WHISPER".
+--- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
+--- @param meta   table? About leg bookkeeping { owner, route, frame, verb, id }.
+--- @return table The queued descriptor (callers may stamp leg-completion fields).
 --- Build a pooled send descriptor without queueing it.
 function Comms:makeDesc(text, mode, kind, target, meta)
 	local desc = self.descAcquire()
@@ -706,13 +706,13 @@ end
 -- The final chunk's descriptor carries leg-completion fields for stats.
 
 --- Whether a leg of `n` chunks fits the queue bound. Legs drop whole: a
--- partial send is an incomplete at the far end plus wasted siblings.
+--- partial send is an incomplete at the far end plus wasted siblings.
 local function legFits(comms, n)
 	return comms:queueDepth() + n <= C.SEND_QUEUE_CAP
 end
 
--- @return number|false Chunk count queued, or false when the whole leg was
---   dropped for capacity. Callers must not mark work as sent on false.
+--- @return number|false Chunk count queued, or false when the whole leg was
+---   dropped for capacity. Callers must not mark work as sent on false.
 function Comms:sendChunksAddon(chunks, kind, target, meta)
 	if ns.Util.isPaused() or (kind == "WHISPER" and not self:canWhisper(target)) then
 		return false
@@ -741,7 +741,7 @@ function Comms:sendChunksAddon(chunks, kind, target, meta)
 end
 
 --- Send a chunk list over a named custom channel (e.g. a previous-generation
--- channel for the version announcement). Resolves to an index at dispatch.
+--- channel for the version announcement). Resolves to an index at dispatch.
 function Comms:sendChunksChannel(chunks, channelName, meta)
 	if ns.Util.isPaused() then
 		return false
@@ -800,9 +800,9 @@ end
 -- Peer enumeration ----------------------------------------------------------
 
 --- Whether a BNet game account's character is our own faction. A
--- same-faction friend is reachable on the comm channel already — the BNet
--- leg exists to bridge factions, so they are not a valid relay. Unknown
--- or unreadable factions stay candidates.
+--- same-faction friend is reachable on the comm channel already — the BNet
+--- leg exists to bridge factions, so they are not a valid relay. Unknown
+--- or unreadable factions stay candidates.
 local function sameFactionAccount(acct)
 	local fname = acct.factionName
 	if not ns.Util.canWeUse(fname) or not fname then
@@ -816,8 +816,8 @@ local function sameFactionAccount(acct)
 end
 
 --- Invoke callback(gameAccountID) for every online WoW Battle.net friend in
--- the current region whose character is opposite-faction. These are our
--- cross-faction relays.
+--- the current region whose character is opposite-faction. These are our
+--- cross-faction relays.
 function Comms:eachBNetGameAccount(callback)
 	if ns.Util.isPaused() then
 		return
@@ -851,8 +851,8 @@ function Comms:eachBNetGameAccount(callback)
 end
 
 --- Online WoW Battle.net game account ids, memoized for C.BNET_MEMO
--- seconds; enumeration allocates client tables per account.
--- @return table List of gameAccountIDs (do not mutate, shared reference).
+--- seconds; enumeration allocates client tables per account.
+--- @return table List of gameAccountIDs (do not mutate, shared reference).
 function Comms:bnetAccounts()
 	local memo = self.bnetAcctMemo
 	if ns.Util.isPaused() then
@@ -888,7 +888,7 @@ local function peerEntry(peers, id)
 end
 
 --- Stamp `id` as confirmed: it sent us a parseable FRP message. Records
--- the remote addon version and protocol generation when they are carried.
+--- the remote addon version and protocol generation when they are carried.
 function Comms:bnetPeerSeen(id, version, proto)
 	if not id then
 		return
@@ -918,8 +918,8 @@ function Comms:isBNetConfirmed(id, now)
 end
 
 --- Pick the next online account due for a HELLO probe, round-robin over the
--- memoized list. Does not stamp; the caller marks the probe if it queued.
--- @return number|nil gameAccountID
+--- memoized list. Does not stamp; the caller marks the probe if it queued.
+--- @return number|nil gameAccountID
 function Comms:probeTarget(now)
 	local ids = self:bnetAccounts()
 	local n = #ids
@@ -964,7 +964,7 @@ function Comms:probeTarget(now)
 end
 
 --- Record that a HELLO probe was queued to `id`; the account is awaiting
--- an answer until BNET_PROBE_DEADLINE benches it.
+--- an answer until BNET_PROBE_DEADLINE benches it.
 function Comms:markAwaiting(id, now)
 	peerEntry(self.bnetPeers, id).probeSentAt = now
 end
@@ -1062,8 +1062,8 @@ function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
 end
 
 --- Drop `senderKey`'s chunks before reassembly for REJECTED_SENDER_TTL.
--- The protocol version lives inside the envelope, so version-rejected
--- senders need this marker to stop their chunk stream early.
+--- The protocol version lives inside the envelope, so version-rejected
+--- senders need this marker to stop their chunk stream early.
 function Comms:blockSender(senderKey)
 	if self.rejectedSenders[senderKey] then
 		return
@@ -1075,9 +1075,9 @@ function Comms:blockSender(senderKey)
 end
 
 --- Reassemble a chunk; hand full messages to the message handler with
--- `context` (a shared scratch table, valid only for this call chain).
+--- `context` (a shared scratch table, valid only for this call chain).
 --- The reassembly senderKey for a (medium, target) pair: BNet accounts
--- key as "bn:<id>", chat media key by raw sender name.
+--- key as "bn:<id>", chat media key by raw sender name.
 function Comms:senderKeyFor(medium, target)
 	if medium == "BNET" then
 		return "bn:" .. tostring(target)

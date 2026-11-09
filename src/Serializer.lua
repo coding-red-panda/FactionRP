@@ -16,8 +16,8 @@ local C = ns.Const
 local Serializer = {}
 ns.Serializer = Serializer
 
--- NUL-escaper for the addon channel; byte-identical to the old codec
--- (\000 -> \001\002, \001 -> \001\003). NUL must be %z in patterns.
+--- NUL-escaper for the addon channel; byte-identical to the old codec
+--- (\000 -> \001\002, \001 -> \001\003). NUL must be %z in patterns.
 function Serializer.channelEncode(s)
 	return (s:gsub("\001", "\001\003"):gsub("%z", "\001\002"))
 end
@@ -37,9 +37,9 @@ end
 local SEP_LEN = #C.SEPARATOR
 
 --- Build the envelope string from a message table.
--- @param msg table { sender, subject, unitID, addon, originTime, contentVersion, data }
---   where `data` is the already-encoded profile string.
--- @return string
+--- @param msg table { sender, subject, unitID, addon, originTime, contentVersion, data }
+---   where `data` is the already-encoded profile string.
+--- @return string
 function Serializer.buildMessage(msg)
 	local sep = C.SEPARATOR
 	-- unitID is optional on the wire; "" means "not asserted". Our own unitID
@@ -51,10 +51,10 @@ function Serializer.buildMessage(msg)
 end
 
 --- Parse an envelope string back into a message table. Returns nil if the
--- field count is wrong. Parsed positionally (seven separator finds, no split
--- table) to keep the inbound path allocation-light.
--- @param str string
--- @return table|nil
+--- field count is wrong. Parsed positionally (seven separator finds, no split
+--- table) to keep the inbound path allocation-light.
+--- @param str string
+--- @return table|nil
 function Serializer.parseMessage(str)
 	local sep = C.SEPARATOR
 	local s1 = str:find(sep, 1, true)
@@ -91,9 +91,9 @@ end
 local chunkCounter = 0 -- per-session id, unique together with the sender
 
 --- Split a full message string into wire chunks (each <= ~255 bytes including
--- its header). Always returns at least one chunk.
--- @param message string
--- @return table A list of chunk strings ready to send.
+--- its header). Always returns at least one chunk.
+--- @param message string
+--- @return table A list of chunk strings ready to send.
 function Serializer.chunk(message)
 	chunkCounter = chunkCounter + 1
 	local msgId = chunkCounter
@@ -121,11 +121,11 @@ function ChunkReassembler:init()
 end
 
 --- Feed one received chunk. On the final missing chunk, returns the full
--- message plus chunk count, first->last elapsed seconds, and dupe count;
--- otherwise nil.
--- @param sender      string A stable identifier for the sender.
--- @param chunkString string The raw chunk as received.
--- @return string|nil, number|nil, number|nil, number|nil
+--- message plus chunk count, first->last elapsed seconds, and dupe count;
+--- otherwise nil.
+--- @param sender      string A stable identifier for the sender.
+--- @param chunkString string The raw chunk as received.
+--- @return string|nil, number|nil, number|nil, number|nil
 function ChunkReassembler:add(sender, chunkString)
 	-- Manual header parse ("MSGID:INDEX:TOTAL:PIECE"): three colon finds,
 	-- no split-table allocation on the hottest inbound path.
@@ -214,7 +214,7 @@ function ChunkReassembler:add(sender, chunkString)
 end
 
 --- Progress of the newest in-flight message from `sender`, for UI.
--- @return number|nil received chunk count, number|nil total chunk count
+--- @return number|nil received chunk count, number|nil total chunk count
 function ChunkReassembler:progress(sender)
 	local perSender = self.buffers[sender]
 	if not perSender then
@@ -233,7 +233,7 @@ function ChunkReassembler:progress(sender)
 end
 
 --- Drop every partial buffer for one sender (e.g. a serve that stalled).
--- @return number How many buffers were dropped.
+--- @return number How many buffers were dropped.
 function ChunkReassembler:drop(sender)
 	local perSender = self.buffers[sender]
 	if not perSender then
@@ -251,9 +251,9 @@ function ChunkReassembler:drop(sender)
 end
 
 --- Drop partially-received messages older than `maxAge` seconds, so a lost
--- chunk cannot leak its buffer forever. Call periodically.
--- @param maxAge number Seconds.
--- @return number How many partial buffers were dropped.
+--- chunk cannot leak its buffer forever. Call periodically.
+--- @param maxAge number Seconds.
+--- @return number How many partial buffers were dropped.
 function ChunkReassembler:prune(maxAge)
 	local now = GetTime()
 	local dropped = 0
