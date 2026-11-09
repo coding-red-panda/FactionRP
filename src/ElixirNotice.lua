@@ -24,16 +24,16 @@ local TEXT_EXPIRED = "Elixir of Tongues has expired."
 local TEXT_INACTIVE = "Elixir of Tongues is not active."
 
 --- Number of elixirs in the player's bags.
--- No existence check on the item API: if it disappears, this should error
--- loudly rather than quietly stop reminding people.
+--- No existence check on the item API: if it disappears, this should error
+--- loudly rather than quietly stop reminding people.
 local function elixirCount()
 	-- Bags only: the item action cannot consume one from the bank.
 	return C_Item.GetItemCount(C.ELIXIR_ITEM_ID, false, false, false)
 end
 
 --- Replace the dialog's body text and let the dialog grow or shrink to fit.
--- The dialog frame exposes its text through GetTextFontString(); the plain
--- field is kept as a fallback for older clients.
+--- The dialog frame exposes its text through GetTextFontString(); the plain
+--- field is kept as a fallback for older clients.
 local function setDialogText(dialog, text)
 	local fontString = dialog.GetTextFontString and dialog:GetTextFontString() or dialog.text
 	fontString:SetText(text)
@@ -43,7 +43,7 @@ local function setDialogText(dialog, text)
 end
 
 --- The dialog's own first button (labelled Refresh), which the secure
--- refresh button is laid over.
+--- refresh button is laid over.
 local function dialogRefreshButton(dialog)
 	return dialog:GetButton1()
 end
@@ -64,9 +64,9 @@ function ElixirNotice:init()
 end
 
 --- Time left on the player's Elixir of Tongues buff.
--- @return number seconds left, plus the aura's expiration timestamp.
--- @return nil when the player has no such buff.
--- @return false when the aura cannot be read safely (combat / secret data).
+--- @return number seconds left, plus the aura's expiration timestamp.
+--- @return nil when the player has no such buff.
+--- @return false when the aura cannot be read safely (combat / secret data).
 function ElixirNotice:remaining()
 	-- Returning false (not nil) keeps callers from mistaking "unknown" for
 	-- "no buff": the warning state must survive combat untouched.
@@ -122,8 +122,8 @@ function ElixirNotice:update()
 end
 
 --- Show the reminder pop-up.
--- @param manual boolean? True when opened by hand; the pop-up then stays up
---                        even when the buff is fresh or absent.
+--- @param manual boolean? True when opened by hand; the pop-up then stays up
+---                        even when the buff is fresh or absent.
 function ElixirNotice:show(manual)
 	if InCombatLockdown() then
 		-- The Refresh button is a protected frame and gets reparented on
@@ -137,8 +137,8 @@ end
 
 -- Pop-up ---------------------------------------------------------------------
 
--- The countdown refreshes once a second; only rewrite the text when the
--- rounded label actually changes.
+--- The countdown refreshes once a second; only rewrite the text when the
+--- rounded label actually changes.
 function ElixirNotice:label(left)
 	if left < 60 then
 		return ("%d %s"):format(math.ceil(left), SECONDS:lower())

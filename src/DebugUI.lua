@@ -354,7 +354,7 @@ function UI:build()
 end
 
 --- Disable every interactive control while a selfx run is live; nothing
--- in the panel may toggle mid-test.
+--- in the panel may toggle mid-test.
 function UI:updateLockState()
 	if not self.lockable then
 		return
