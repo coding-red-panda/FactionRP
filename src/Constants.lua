@@ -65,7 +65,7 @@ C.CHUNK_SIZE = 220
 -- Outbound pacing: SEND_RATE chunks per second released on a SEND_INTERVAL
 -- tick via a fractional token bucket (credit capped at SEND_RATE).
 C.SEND_INTERVAL = 0.2
-C.SEND_RATE = 1
+C.SEND_RATE = 2
 
 -- Cap on the reusable send-descriptor pool; sends beyond it just allocate.
 C.POOL_SEND_DESC = 256
