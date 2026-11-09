@@ -51,9 +51,9 @@ local function isExpired(entry, now)
 end
 
 --- The freshness floor for a subject: the persisted record's as-of claim,
--- else the register's last-seen stamp. The record wins because TRP3
--- re-stamps profile.time on every bind, including our own injections.
--- @return number Epoch seconds; 0 when nothing is known.
+--- else the register's last-seen stamp. The record wins because TRP3
+--- re-stamps profile.time on every bind, including our own injections.
+--- @return number Epoch seconds; 0 when nothing is known.
 function Cache:freshnessFloor(guid, unitID, addonName)
 	local rec = ns.db and ns.db.seen and ns.db.seen[guid]
 	if rec and rec.at and rec.at > 0 then
@@ -66,7 +66,7 @@ function Cache:freshnessFloor(guid, unitID, addonName)
 end
 
 --- Advance the persisted freshness record for a subject. Called on NEW,
--- UPDATED and REFRESHED results; never on rejects.
+--- UPDATED and REFRESHED results; never on rejects.
 function Cache:noteSeen(candidate)
 	local db = ns.db
 	if not db or not candidate.guid then
@@ -99,16 +99,16 @@ function Cache:noteSeen(candidate)
 end
 
 --- Attempt to store a candidate profile, applying the de-dup rules.
---
--- Rules (see doc/protocol.md):
---   * No existing entry            -> store (NEW), unless under the floor.
---   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED).
---   * Incoming ORIGIN-TIME older   -> ignore (REJECTED); the persisted
---                                    floor applies the rule across sessions.
---   * Otherwise (changed & newer)  -> store (UPDATED).
---
--- @param candidate table An entry table WITHOUT `added` (we stamp it here).
--- @return string One of Cache.RESULT.*
+---
+--- Rules (see doc/protocol.md):
+---   * No existing entry            -> store (NEW), unless under the floor.
+---   * Same CONTENT-VERSION         -> extend TTL only (REFRESHED).
+---   * Incoming ORIGIN-TIME older   -> ignore (REJECTED); the persisted
+---                                    floor applies the rule across sessions.
+---   * Otherwise (changed & newer)  -> store (UPDATED).
+---
+--- @param candidate table An entry table WITHOUT `added` (we stamp it here).
+--- @return string One of Cache.RESULT.*
 function Cache:tryStore(candidate)
 	local now = GetTime()
 
@@ -157,12 +157,12 @@ function Cache:tryStore(candidate)
 end
 
 --- Resolve the store decision for a candidate WITHOUT its `data` payload:
--- REFRESHED/REJECTED, or nil when the caller must decode data and call
--- :tryStore. Lets the receive path skip payload decoding for duplicates.
--- MUST stay in lockstep with :tryStore.
---
--- @param candidate table An entry table WITHOUT `data` or `added`.
--- @return string|nil Cache.RESULT.REFRESHED / Cache.RESULT.REJECTED, or nil.
+--- REFRESHED/REJECTED, or nil when the caller must decode data and call
+--- :tryStore. Lets the receive path skip payload decoding for duplicates.
+--- MUST stay in lockstep with :tryStore.
+---
+--- @param candidate table An entry table WITHOUT `data` or `added`.
+--- @return string|nil Cache.RESULT.REFRESHED / Cache.RESULT.REJECTED, or nil.
 function Cache:peek(candidate)
 	local now = GetTime()
 	local existing = self.entries[candidate.guid]
@@ -191,9 +191,9 @@ function Cache:peek(candidate)
 end
 
 --- Look up a live (non-expired) entry by GUID. Expired entries are removed
--- lazily on access and treated as absent.
--- @param guid string
--- @return table|nil The entry, or nil if missing/expired.
+--- lazily on access and treated as absent.
+--- @param guid string
+--- @return table|nil The entry, or nil if missing/expired.
 function Cache:get(guid)
 	local entry = self.entries[guid]
 	if not entry then
@@ -212,7 +212,7 @@ function Cache:fresh(guid)
 end
 
 --- Drop every entry regardless of expiry. Testing aid (/frp purge).
--- @return number Entries dropped.
+--- @return number Entries dropped.
 function Cache:clear()
 	local n = 0
 	for _ in pairs(self.entries) do
@@ -223,9 +223,9 @@ function Cache:clear()
 end
 
 --- Drop freshness records whose unit the register no longer holds a profile
--- for, so they follow the user's purges. Records with no loaded adapter are
--- kept: no adapter is not proof of absence. A changed register profileID
--- means the subject switched profiles; the record re-anchors to its stamp.
+--- for, so they follow the user's purges. Records with no loaded adapter are
+--- kept: no adapter is not proof of absence. A changed register profileID
+--- means the subject switched profiles; the record re-anchors to its stamp.
 function Cache:sweepSeen()
 	if ns.Util.isPaused() then
 		return
@@ -268,7 +268,7 @@ function Cache:sweep()
 end
 
 --- Number of live (non-expired) entries currently held.
--- @return number
+--- @return number
 function Cache:count()
 	local n = 0
 	local now = GetTime()

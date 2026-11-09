@@ -56,7 +56,7 @@ function TRP3Adapter:getUnitID(unit)
 end
 
 --- TRP3 keys the local player by its own globals.player_id; use it so the
--- self-extraction branch and update events line up exactly.
+--- self-extraction branch and update events line up exactly.
 function TRP3Adapter:getPlayerUnitID()
 	if self:isAvailable() and TRP3_API.globals then
 		return TRP3_API.globals.player_id
@@ -154,7 +154,7 @@ end
 
 
 
--- Gather the three sections for the LOCAL player via TRP3's exchange getters.
+--- Gather the three sections for the LOCAL player via TRP3's exchange getters.
 local function getLocalSections()
 	local reg = TRP3_API.register
 	return {
@@ -164,8 +164,8 @@ local function getLocalSections()
 	}
 end
 
--- Gather the three sections for a known unit plus the profile's mspver
--- table (nil for non-MSP profiles) for the content version.
+--- Gather the three sections for a known unit plus the profile's mspver
+--- table (nil for non-MSP profiles) for the content version.
 local function getRegisteredSections(unitID)
 	local profile = TRP3_API.register.getUnitIDProfile(unitID)
 	if not profile then
@@ -252,8 +252,8 @@ local function getClientInfo(unitID)
 end
 
 --- Extract a profile for `unitID` from TRP3's own data, deep-copying so we
--- never alias (and later serialize) TRP3's live tables.
--- @return table|nil A profile object, or nil if TRP3 has no data for the unit.
+--- never alias (and later serialize) TRP3's live tables.
+--- @return table|nil A profile object, or nil if TRP3 has no data for the unit.
 function TRP3Adapter:extract(unitID)
 	if ns.Util.isPaused() then
 		return nil
@@ -632,7 +632,7 @@ function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
 end
 
 --- Cheap "could we serve this unit's profile" check: true when TRP3 holds
--- a profile for the unit (or it is us). Does not extract.
+--- a profile for the unit (or it is us). Does not extract.
 function TRP3Adapter:canServe(unitID)
 	if not unitID or not self:isAvailable() then
 		return false
@@ -647,8 +647,8 @@ function TRP3Adapter:canServe(unitID)
 end
 
 --- Freshness metadata for the register's current copy: profile.time, the
--- bound profileID, and the held sections' content version. Reads live tables.
--- @return table|nil { at, pid, cv }, or nil for self/unknown/profileless units.
+--- bound profileID, and the held sections' content version. Reads live tables.
+--- @return table|nil { at, pid, cv }, or nil for self/unknown/profileless units.
 function TRP3Adapter:profileMeta(unitID)
 	if not self:isAvailable() then
 		return nil
@@ -676,7 +676,7 @@ function TRP3Adapter:dataProfileID(data)
 end
 
 --- TRP3 marks auto-generated default profiles with a trailing "*" on the
--- profileID; isDefaultProfile wraps that marker.
+--- profileID; isDefaultProfile wraps that marker.
 local function isDefaultPid(pid)
 	return pid ~= nil and TRP3_API.profile.isDefaultProfile(pid)
 end
@@ -701,17 +701,17 @@ function TRP3Adapter:dataIsDefault(data)
 end
 
 --- Whether the subject's profile is pullable from its author. Matches
--- /trp3 open: sendQuery/sendMSPQuery are directed queries on a name-realm
--- string, TRP3 creates the register entry when the author responds, so
--- any resolved unitID is fair game. Only self is pointless.
+--- /trp3 open: sendQuery/sendMSPQuery are directed queries on a name-realm
+--- string, TRP3 creates the register entry when the author responds, so
+--- any resolved unitID is fair game. Only self is pointless.
 function TRP3Adapter:canPull(unitID)
 	return unitID ~= nil and self:isAvailable()
 		and unitID ~= TRP3_API.globals.player_id
 end
 
 --- Ask TRP3 to refresh our held copy via the same headless vernum and MSP
--- queries /trp3 open makes. Missing or failing API raises one error per
--- session and disables the feature; callers then serve without a refresh.
+--- queries /trp3 open makes. Missing or failing API raises one error per
+--- session and disables the feature; callers then serve without a refresh.
 function TRP3Adapter:refreshQuery(unitID)
 
 	if ns.Util.isPaused() then
@@ -766,8 +766,8 @@ function TRP3Adapter:refreshQuery(unitID)
 end
 
 --- Inject a received profile into TRP3's register so TRP3 renders it.
--- Mirrors the sequence TRP3 itself uses when receiving a profile.
--- @return boolean Whether anything was injected.
+--- Mirrors the sequence TRP3 itself uses when receiving a profile.
+--- @return boolean Whether anything was injected.
 function TRP3Adapter:inject(unitID, data, classID)
 	if ns.Util.isPaused() then
 		return false
@@ -894,8 +894,8 @@ function TRP3Adapter:inject(unitID, data, classID)
 end
 
 --- Hook TRP3's internal "register data updated" callback so the Scanner can
--- react when a same-faction profile arrives/changes asynchronously.
--- @param callback function Invoked as callback(unitID).
+--- react when a same-faction profile arrives/changes asynchronously.
+--- @param callback function Invoked as callback(unitID).
 function TRP3Adapter:registerUpdateListener(callback)
 	if not self:isAvailable() or not TRP3_Addon or not TRP3_API.RegisterCallback then
 		return
@@ -909,10 +909,10 @@ function TRP3Adapter:registerUpdateListener(callback)
 end
 
 --- Hook TRP3's profile-receipt signals so the Scanner can re-publish data
--- that arrived over TRP3's own channels. Sources: REGISTER_DATA_RECEIVED
--- (TRP3 exchange) and msp.callback.received (MSP merges). Neither fires for
--- FactionRP's own injections, so this is loop-safe.
--- @param callback function Invoked as callback(unitID).
+--- that arrived over TRP3's own channels. Sources: REGISTER_DATA_RECEIVED
+--- (TRP3 exchange) and msp.callback.received (MSP merges). Neither fires for
+--- FactionRP's own injections, so this is loop-safe.
+--- @param callback function Invoked as callback(unitID).
 function TRP3Adapter:registerReceivedListener(callback)
 	if not self:isAvailable() then
 		return

@@ -141,8 +141,8 @@ function Scanner:onSelect(unit)
 end
 
 --- Pull an xfac profile now. Shared-club subjects are whisper-reachable
--- and TRP3 already sends its own vernum query on selection, so we skip
--- our pull for them.
+--- and TRP3 already sends its own vernum query on selection, so we skip
+--- our pull for them.
 function Scanner:xfacRequest(guid, unitID)
 	if ns.Util.commsRestricted() then
 		return
@@ -166,7 +166,7 @@ function Scanner:xfacRequest(guid, unitID)
 end
 
 --- REQ an xfac mouseover after actual hover time
---//edit: tiny interruptions pauses the countdown for the same player
+---//edit: tiny interruptions pauses the countdown for the same player
 function Scanner:hoverRequest(guid, unitID)
 	if ns.broadcast:profileFresh(guid) then
 		return
@@ -293,8 +293,8 @@ function Scanner:pauseForActivity()
 end
 
 --- Fraction (0..1) of MOUSEOVER_REQ_DELAY elapsed while hovering `guid`,
--- or nil when no hover REQ is pending for them. Drives the tooltip
--- indicator's countdown fill.
+--- or nil when no hover REQ is pending for them. Drives the tooltip
+--- indicator's countdown fill.
 function Scanner:hoverProgress(guid)
 	if guid and self.hoverTimer and self.hoverGuid == guid then
 		local now = GetTime()
@@ -307,9 +307,9 @@ function Scanner:hoverProgress(guid)
 end
 
 --- Handle an asynchronous profile update from an adapter.
--- Fires for ALL register writes including our own injections, so only
--- re-publish user-selected units; an unchanged content version collapses
--- the feedback to a no-op.
+--- Fires for ALL register writes including our own injections, so only
+--- re-publish user-selected units; an unchanged content version collapses
+--- the feedback to a no-op.
 function Scanner:onAdapterUpdate(adapter, unitID)
 	if ns.Util.isPaused() then
 		return
@@ -330,8 +330,8 @@ function Scanner:onAdapterUpdate(adapter, unitID)
 end
 
 --- Handle an adapter's "profile data received" signal. Receipts fire per
--- section, so we queue a jittered ready time that collapses the burst into
--- one extraction and keeps simultaneous receipts off the same tick.
+--- section, so we queue a jittered ready time that collapses the burst into
+--- one extraction and keeps simultaneous receipts off the same tick.
 function Scanner:onAdapterReceived(adapter, unitID)
 	if ns.Util.isPaused() then
 		return
@@ -423,8 +423,8 @@ function Scanner:drainReceived()
 end
 
 --- Extract the profile and hand it to Broadcast:publish (which de-dups).
--- Repeated publishes would only extend the TTL at an extraction per tick,
--- so we also stop early when the version matches our last publish.
+--- Repeated publishes would only extend the TTL at an extraction per tick,
+--- so we also stop early when the version matches our last publish.
 function Scanner:share(adapter, unitID, guid)
 	if ns.Util.isPaused() then
 		return

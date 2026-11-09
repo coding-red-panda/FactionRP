@@ -173,7 +173,7 @@ local function bumpMedium(t, medium, msgs, bytes, chunks)
 end
 
 --- Write a record into the recent ring, reusing the slot's entry table so
--- recording allocates nothing once the ring has wrapped once.
+--- recording allocates nothing once the ring has wrapped once.
 local function pushRecent(dir, medium, peer, bytes, chunks, ms)
 	local r = stats.recent
 	local cap = r.cap
@@ -246,7 +246,7 @@ local function recChunkOut(medium, bytes, dwell)
 end
 
 --- A full message finished draining to one leg (last chunk dequeued).
--- @param elapsed number Seconds from first enqueue to last-chunk send.
+--- @param elapsed number Seconds from first enqueue to last-chunk send.
 local function recOutLeg(medium, target, bytes, chunks, elapsed)
 	stats.outSends = stats.outSends + 1
 	bumpMedium(stats.mediumsOut, medium, 1, bytes, chunks)
@@ -341,7 +341,7 @@ end
 ns.Stats = {}
 
 --- Computed read-only summary for inspection (slash output now, UI later).
--- @return table
+--- @return table
 function ns.Stats.snapshot()
 	local now = GetTime()
 	local uptime = now - stats.startedAt

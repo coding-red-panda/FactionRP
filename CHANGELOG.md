@@ -18,18 +18,23 @@
 ## 0.5.1
 
 ### Added
-- About section pull, by Duschgell, modified by Symphicat (TenaarFeiri):
-  the TRP3 tooltip's About button fetches a profile's biography on
-  demand. It asks the profile's owner when they are reachable, then a
-  known contact, preferring whoever sent the profile, and only calls out
-  on the faction channel when no contact answers. Missing or oversized Abouts get a clear answer instead of
-  silence, and successful pulls are remembered for a while so repeat
-  clicks do not re-request them.
+
+- EXPERIMENTAL About pull feature by Duschgell, modified for protocol 6 by Symphicat (Tenaar Feiri):
+  Added a button to the About tabs of x-fac profiles which you can click to request a person's About page.
+  This is a very experimental feature, and it will not pull someone's profile if it's too large.
+  If you pull someone's About page, it will be remembered for a while and you will not be able to
+  pull it again for a while.
+  There are a bazillion reasons why this would fail, **MOST OF THEM INTENDED,** so failure to pull
+  is not necessarily a bug.
 
 ### Changed
 - About pulls now travel over the same delivery system as profile
   updates instead of a private channel, and that system now supports
   carrying arbitrary data for future features.
+- Whisper probes now favour proven cross-faction contacts, i.e people
+  whose profiles were pulled by TRP3 over Clubs/BNet. They get probed
+  for FRP sooner.
+- Outbound send rate doubled to 2 chunks/sec.
 
 ### Fixed
 - A failed send no longer stalls all outgoing comms until reload.

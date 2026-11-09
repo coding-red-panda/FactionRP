@@ -173,9 +173,9 @@ function Dialect.floor()
 end
 
 --- Generation a `stamp`-stamped payload decodes in: min(stamp, own), when a
--- dialect exists for it. Senders encode min(their gen, ours) and stamp their
--- true gen, so the clamp recovers exactly what they wrote.
--- @return number|nil
+--- dialect exists for it. Senders encode min(their gen, ours) and stamp their
+--- true gen, so the clamp recovers exactly what they wrote.
+--- @return number|nil
 function Dialect.decodeGen(stamp)
 	local gen = math.min(stamp or 0, C.PROTO_MAJOR)
 	if Dialect.DIALECTS[gen] then
@@ -184,9 +184,9 @@ function Dialect.decodeGen(stamp)
 end
 
 --- Generation to encode a leg for a peer of known generation: min(own,
--- peerGen). nil peerGen means no information (channel send, unrecorded
--- peer): own gen. Returns nil when no dialect can carry the leg.
--- @return number|nil
+--- peerGen). nil peerGen means no information (channel send, unrecorded
+--- peer): own gen. Returns nil when no dialect can carry the leg.
+--- @return number|nil
 function Dialect.sendGen(peerGen)
 	local gen = math.min(C.PROTO_MAJOR, peerGen or C.PROTO_MAJOR)
 	if Dialect.DIALECTS[gen] then
@@ -197,9 +197,9 @@ end
 -- Control codec -----------------------------------------------------------------
 
 --- Serialize a control verb + named fields into the wire `data` string for
--- generation `gen`. Handshake verbs always emit the frozen FRP1 form.
--- @return string|nil nil when the dialect or verb is unknown, or a required
---   field is absent.
+--- generation `gen`. Handshake verbs always emit the frozen FRP1 form.
+--- @return string|nil nil when the dialect or verb is unknown, or a required
+---   field is absent.
 function Dialect.buildCtlData(verb, fields, gen)
 	if HANDSHAKE_VERBS[verb] then
 		if fields.version and fields.version ~= "" then
@@ -237,10 +237,10 @@ function Dialect.buildCtlData(verb, fields, gen)
 end
 
 --- Parse a control envelope's data field into a canonical record.
--- Handshake verbs parse under the frozen FRP1 rule; negotiated verbs parse
--- via the dialect selected by min(msg.protoVer, own).
--- @return table|nil { proto, verb, args = { <named fields> }, gen, handshake }
---   gen is the inbound decode generation: the dialect for replying.
+--- Handshake verbs parse under the frozen FRP1 rule; negotiated verbs parse
+--- via the dialect selected by min(msg.protoVer, own).
+--- @return table|nil { proto, verb, args = { <named fields> }, gen, handshake }
+---   gen is the inbound decode generation: the dialect for replying.
 function Dialect.parseCtl(msg)
 	local proto, verb, rest = msg.data:match("^(%S+)%s+(%S+)%s*(.*)$")
 	if not verb then
@@ -297,8 +297,8 @@ end
 -- Profile codec -----------------------------------------------------------------
 
 --- Encode a profile table into a wire-safe string for generation `gen`.
--- @return string|nil
--- @return number|nil Serialized byte count for size checks
+--- @return string|nil
+--- @return number|nil Serialized byte count for size checks
 function Dialect.encodeProfile(data, gen)
 	local dialect = Dialect.DIALECTS[gen]
 	if dialect then
@@ -307,9 +307,9 @@ function Dialect.encodeProfile(data, gen)
 end
 
 --- Decode a wire payload stamped `stamp`: clamps to min(stamp, own) and
--- dispatches to that dialect's codec.
--- @param maxBytes number? Maximum serialized size before deserialization
--- @return table|nil
+--- dispatches to that dialect's codec.
+--- @param maxBytes number? Maximum serialized size before deserialization
+--- @return table|nil
 function Dialect.decodeProfile(encoded, stamp, maxBytes)
 	local gen = Dialect.decodeGen(stamp)
 	if gen then

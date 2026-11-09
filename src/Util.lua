@@ -9,8 +9,8 @@ local Util = {}
 ns.Util = Util
 
 --- A tiny table pool. Returns acquire (wiped table or fresh), release, size.
--- @param cap number Maximum tables retained in the pool.
--- @return acquire, release, size
+--- @param cap number Maximum tables retained in the pool.
+--- @return acquire, release, size
 function Util.newPool(cap)
 	local pool, n = {}, 0
 	return function()
@@ -32,8 +32,8 @@ function Util.newPool(cap)
 end
 
 --- Trim leading/trailing whitespace.
--- @param s string
--- @return string
+--- @param s string
+--- @return string
 function Util.trim(s)
 	return (s:gsub("^%s*(.-)%s*$", "%1"))
 end
@@ -71,8 +71,8 @@ function Util.getUnitID(unit)
 end
 
 --- Whether `unit` is a player belonging to the faction opposite the viewer.
--- @param unit string A unit token.
--- @return boolean
+--- @param unit string A unit token.
+--- @return boolean
 function Util.isOppositeFaction(unit)
 	if not Util.canWeUse(unit) then
 		return false
@@ -109,9 +109,9 @@ for i = 1, 5 do
 end
 
 --- Normalize a name to lowercase "Name-Realm" for comparison; a missing
--- realm defaults to ours.
--- @param name string "Name" or "Name-Realm".
--- @return string|nil
+--- realm defaults to ours.
+--- @param name string "Name" or "Name-Realm".
+--- @return string|nil
 local function normalizeUnitName(name)
 	if not Util.canWeUse(name) or not name or name == "" then
 		return nil
@@ -190,7 +190,7 @@ local buildSeenXfac, buildSeenGuild = {}, {}
 -- client that never populates `faction` does not retry the build forever.
 local suspectBuilds = 0
 
--- ClubMemberInfo.faction is a PvPFaction (0 = Horde, 1 = Alliance, NeverSecret).
+--- ClubMemberInfo.faction is a PvPFaction (0 = Horde, 1 = Alliance, NeverSecret).
 local function selfFaction()
 	local f = UnitFactionGroup("player")
 	return Util.canWeUse(f) and f == "Alliance" and 1 or 0
@@ -279,7 +279,7 @@ end
 -- Forward declaration: stepRosterBuild reschedules via stepCurrentBuild.
 local stepCurrentBuild
 
--- Process up to ROSTER_SLICE member lookups, then reschedule.
+--- Process up to ROSTER_SLICE member lookups, then reschedule.
 local function stepRosterBuild(build)
 	if build ~= rosterBuild then
 		return -- superseded
@@ -416,9 +416,9 @@ local function stepRosterBuild(build)
 	build.timer = C_Timer.NewTimer(0, stepCurrentBuild)
 end
 
--- Hoisted reschedule closure so the timer allocates nothing per slice.
--- A slice that throws would otherwise die inside the timer callback and
--- strand rosterBuild non-nil — every future build would NOOP forever.
+--- Hoisted reschedule closure so the timer allocates nothing per slice.
+--- A slice that throws would otherwise die inside the timer callback and
+--- strand rosterBuild non-nil — every future build would NOOP forever.
 stepCurrentBuild = function()
 	if not rosterBuild then
 		return
@@ -547,8 +547,8 @@ function Util.pauseForLoading()
 end
 
 --- Kick a roster rebuild immediately, ignoring the memo window (unless a
--- build is already in flight). Used when the Communities UI opens and on
--- CLUB_MEMBERS_UPDATED.
+--- build is already in flight). Used when the Communities UI opens and on
+--- CLUB_MEMBERS_UPDATED.
 function Util.refreshClubRoster()
 	local now = GetTime()
 	if (now - lastUiRosterRefresh) < C.ROSTER_UI_REFRESH then
@@ -560,7 +560,7 @@ function Util.refreshClubRoster()
 end
 
 --- Online opposite-faction club members we can reach by addon whisper.
--- @return table List of "Name-Realm" strings, deduplicated by GUID.
+--- @return table List of "Name-Realm" strings, deduplicated by GUID.
 function Util.xfacClubMembers()
 
 	local roster = clubRoster()
@@ -576,7 +576,7 @@ function Util.isXfacClubMember(unitID)
 end
 
 --- Online opposite-faction members of our own guild (cross-faction guilds).
--- @return table List of "Name-Realm" strings, deduplicated by GUID.
+--- @return table List of "Name-Realm" strings, deduplicated by GUID.
 function Util.xfacGuildMembers()
 
 	local roster = clubRoster()
@@ -591,7 +591,7 @@ function Util.isGuildClubMember(unitID)
 end
 
 --- Whether a "Name-Realm" is a club member currently logged in.
--- Mobile-app presences count as offline.
+--- Mobile-app presences count as offline.
 function Util.isClubMemberOnline(unitID)
 	local key = normalizeUnitName(unitID)
 
@@ -599,7 +599,7 @@ function Util.isClubMemberOnline(unitID)
 	return rosterReady and key ~= nil and roster.onlineByName[key] == true
 end
 
--- //edit: missing data doesnt mean that someone is offline
+--- //edit: missing data doesnt mean that someone is offline
 function Util.isClubMemberOffline(unitID)
 	local key = normalizeUnitName(unitID)
 	local roster = clubRoster()
@@ -614,8 +614,8 @@ function Util.isCommunityClubMember(unitID)
 end
 
 --- Whether `guid` belongs to a member of our current group. Party and raid
--- unit tokens cover home and instance groups alike; cross-faction groupmates
--- have their own native profile exchange, so the mesh never pulls for them.
+--- unit tokens cover home and instance groups alike; cross-faction groupmates
+--- have their own native profile exchange, so the mesh never pulls for them.
 function Util.isGroupGuid(guid)
 	if not Util.canWeUse(guid) or not guid then
 		return false
@@ -641,8 +641,8 @@ function Util.unitForGuid(guid)
 end
 
 --- Reverse lookup via the client's own player-info cache.
--- @param guid string
--- @return string|nil "Name-Realm", or nil if unknown to the client.
+--- @param guid string
+--- @return string|nil "Name-Realm", or nil if unknown to the client.
 function Util.unitForGuidFromClient(guid)
 	if not guid then
 		return nil
@@ -658,8 +658,8 @@ function Util.unitForGuidFromClient(guid)
 end
 
 --- Debug display for a GUID: best known "Name-Realm" or a short tail.
--- @param guid string
--- @return string Never nil; falls back to the guid's last 6 chars.
+--- @param guid string
+--- @return string Never nil; falls back to the guid's last 6 chars.
 function Util.nameForGuid(guid)
 	if not guid then
 		return "?"
@@ -720,9 +720,9 @@ local guidMemo = {} -- [lowered unitID] = { guid = guid|false, expires = GetTime
 local memoPruneCounter = 0
 
 --- Best-effort resolution of a "Name-Realm" unitID to a real player GUID.
--- Results (including misses) are memoized for C.GUID_RESOLVE_MEMO seconds.
--- @param unitID string "Name-Realm".
--- @return string|nil The GUID, or nil if it cannot be resolved.
+--- Results (including misses) are memoized for C.GUID_RESOLVE_MEMO seconds.
+--- @param unitID string "Name-Realm".
+--- @return string|nil The GUID, or nil if it cannot be resolved.
 function Util.resolveGUID(unitID)
 	if Util.isPaused() then
 		return nil
@@ -766,7 +766,7 @@ function Util.resolveGUID(unitID)
 	return guid
 end
 
--- Diagnostics accessors for "/frp mem census" (read-only views of internals).
+--- Diagnostics accessors for "/frp mem census" (read-only views of internals).
 function Util._roster()
 	return clubRoster()
 end
@@ -830,10 +830,10 @@ function Util.fixChompChannelTargets(channelInx)
 end
 
 --- Compare two dot-separated version strings numerically. Non-numeric
--- suffixes are ignored; short versions pad with zeros.
--- @param a string First version.
--- @param b string Second version.
--- @return number -1 when a < b, 1 when a > b, 0 when equal.
+--- suffixes are ignored; short versions pad with zeros.
+--- @param a string First version.
+--- @param b string Second version.
+--- @return number -1 when a < b, 1 when a > b, 0 when equal.
 function Util.versionCompare(a, b)
 	if a == b then
 		return 0
@@ -859,9 +859,9 @@ function Util.versionCompare(a, b)
 end
 
 --- Deterministic 32-bit hash of a string, as 8 hex chars. Used to compare
--- content versions without shipping the string.
--- @param s string
--- @return string
+--- content versions without shipping the string.
+--- @param s string
+--- @return string
 function Util.hashStr(s)
 	local h = 5381
 	for i = 1, #s do
@@ -871,8 +871,8 @@ function Util.hashStr(s)
 end
 
 --- False (+ offender index) if any supplied value is secret or
--- inaccessible. Tables only certify indexability; use fieldsUsable for
--- secret fields.
+--- inaccessible. Tables only certify indexability; use fieldsUsable for
+--- secret fields.
 function Util.canWeUse(...)
 	for i = 1, select("#", ...) do
 		local v = select(i, ...)
@@ -911,7 +911,7 @@ function Util.isPaused()
 end
 
 --- Whether comms must stay silent: combat lockdown, a chat-messaging
--- lockdown (encounters, M+), or an active challenge-mode run.
+--- lockdown (encounters, M+), or an active challenge-mode run.
 function Util.commsRestricted()
 	return Util.isPaused()
 		or InCombatLockdown()
