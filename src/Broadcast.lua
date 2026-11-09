@@ -29,7 +29,7 @@ function Broadcast:init()
 	--     proto   peer's protocol generation (latest envelope stamp)
 	--   }
 	--   xfacContacts: proven cross-faction reachable RP-AddOn users, not
-	--     necessarily FRP.
+	--     necessarily FRP. Receipts also seed the probe rotation.
 	self.relays = {}
 	self.xfacContacts = {}
 
@@ -96,6 +96,8 @@ function Broadcast:init()
 	self.fanoutInFlight = {} -- queue tail positions of issued probes
 	self.relayProbeAt = 0 -- last whisper probe burst
 	self.probeCursor = 0 -- rotating index into the flattened probe rosters
+	self.probeSeeds = {} -- xfac contacts queued for priority probing
+	self.probeSeedOrder = { head = 1, tail = 0 } -- FIFO of seeded keys
 
 	-- Channel serve cooldown: while serveDrainPos tracks queued serve
 	-- chunks we ACK no broadcast REQs; once a mesh serve's last chunk
@@ -220,9 +222,58 @@ function Broadcast:relay(key, name)
 	return p
 end
 
---- Next probe target via a rotating cursor over both rosters. One probe
--- per target; an unanswered one past RELAY_PROBE_COOLDOWN gets ignored.
+--- Whether relay `p` is due a probe at `now` (nil = unprobed, due).
+-- Expired silent members are marked ignored as a side effect.
+function Broadcast:probeDue(p, target, now)
+	if not p then
+		return true
+	end
+	if p.ign ~= 0
+		or (p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL)
+	then
+		return false
+	end
+	if p.pr >= C.RELAY_PROBE_MAX then
+		-- Was quiet too long; get ignored.
+		if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
+			p.ign = now
+			if ns.debugPeer then
+				ns.debugPeer("whisper " .. target
+					.. " ignored (unanswered probe)")
+			end
+		end
+		return false
+	end
+	return p.lp == 0 or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
+end
+
+--- Next queued xfac contact due a probe, drained ahead of the cursor.
+-- Each seed is examined once and drops out either way.
+function Broadcast:seedProbeTarget(now)
+	local o = self.probeSeedOrder
+	while o.head <= o.tail do
+		local key = o[o.head]
+		o[o.head] = nil
+		o.head = o.head + 1
+		self.probeSeeds[key] = nil
+		local unitID = self.xfacContacts[key]
+		local target = unitID and Util.fullUnitName(unitID)
+		if target and target:sub(-1) ~= "-" and ns.comms:canWhisper(target)
+			and self:probeDue(self.relays[key], target, now)
+		then
+			return key, target
+		end
+	end
+	o.head, o.tail = 1, 0
+end
+
+--- Next probe target: queued seeds first, then the rotating cursor
+-- over both rosters.
 function Broadcast:whisperProbeTarget(now)
+	local skey, starget = self:seedProbeTarget(now)
+	if skey then
+		return skey, starget
+	end
 	local guildRoster = Util.xfacGuildMembers()
 	local commRoster = Util.xfacClubMembers()
 	local gn = #guildRoster
@@ -236,32 +287,11 @@ function Broadcast:whisperProbeTarget(now)
 		local key = Util.normalizeUnitName(name)
 		local target = Util.fullUnitName(name)
 		-- Realms can fail to resolve entirely mid-transition. Move on.
-		if key and target and target:sub(-1) ~= "-" and ns.comms:canWhisper(target) then
-			local p = self.relays[key]
-			if p and p.ign == 0 then
-				local fresh = p.conf ~= 0
-					and (now - p.conf) < C.RELAY_CONFIRM_TTL
-				if not fresh then
-					if p.pr >= C.RELAY_PROBE_MAX then
-						-- Was quiet too long; get ignored.
-						if (now - p.lp) >= C.RELAY_PROBE_COOLDOWN then
-							p.ign = now
-							if ns.debugPeer then
-								ns.debugPeer("whisper " .. target
-									.. " ignored (unanswered probe)")
-							end
-						end
-					elseif p.lp == 0
-						or (now - p.lp) >= C.RELAY_PROBE_COOLDOWN
-					then
-						self.probeCursor = idx
-						return key, target
-					end
-				end
-			elseif not p then
-				self.probeCursor = idx
-				return key, target
-			end
+		if key and target and target:sub(-1) ~= "-" and ns.comms:canWhisper(target)
+			and self:probeDue(self.relays[key], target, now)
+		then
+			self.probeCursor = idx
+			return key, target
 		end
 	end
 end
@@ -2267,12 +2297,21 @@ function Broadcast:clearForcedTargets()
 end
 
 --- Record an xfac club member whose profile reached us over the RP
--- AddOn's own comms. Informational only: unicast picks FRP-confirmed
--- contacts.
+-- AddOn's own comms and queue it for a priority probe.
 function Broadcast:noteXfacContact(unitID)
 	local key = unitID and Util.normalizeUnitName(unitID)
-	if key then
-		self.xfacContacts[key] = unitID
+	if not key then
+		return
+	end
+	self.xfacContacts[key] = unitID
+	local p = self.relays[key]
+	local fresh = p and p.conf ~= 0
+		and (GetTime() - p.conf) < C.RELAY_CONFIRM_TTL
+	if not self.probeSeeds[key] and (not p or (p.ign == 0 and not fresh)) then
+		local o = self.probeSeedOrder
+		o.tail = o.tail + 1
+		o[o.tail] = key
+		self.probeSeeds[key] = true
 	end
 end
 
