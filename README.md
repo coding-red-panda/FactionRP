@@ -49,9 +49,12 @@ When a player is "selected" (mouseover or target), two things can happen:
   exchange"). While a held profile *is* fresh the whole trigger is suspended:
   no unitID resolution, no REQ scheduling, no hover countdown. The countdown
   only arms after `MOUSEOVER_REQ_DELAY` of sustained hover, and cancels
-  mid-hover if the profile lands through another exchange. The tooltip shows
-  the request state: "Requesting profile in Ns", "Please wait... N%" while a
-  serve is in flight, or "No response. Try again in Ns" after a failed pull.
+  mid-hover if the profile lands through another exchange. Pulls only run
+  while the player is in character: requested while out of character,
+  entries queue and drain on going IC. The tooltip shows the request
+  state: "Requesting profile in Ns", "Please wait... N%" while a serve is
+  in flight, "No response. Try again in Ns" after a failed pull, or "Go
+  IC to request the profile." while out of character.
 
 A player is also "selected" indirectly: whenever the RP AddOn itself receives
 profile data over its own comm channels — like TRP3's exchange protocol, or MSP
@@ -77,9 +80,10 @@ We can also use the same GUID to look up a profile, allowing the AddOn to displa
 Profile data never floods. It travels exactly once — server to requester —
 after a granted request, using single-chunk FRP1 control messages
 (`subject = "_frp"`, `data = "FRP1 <verb> <arg>"`; see `doc/protocol.md`).
-Requests are **serial**: one subject at a time, each tried against exactly
-one contact picked from per-tier shuffled decks — confirmed Battle.net
-peers first, then guild relays, then community relays. Every contact
+Requests are **serial** and gated on the player being in character: one
+subject at a time, each tried against exactly one contact picked from
+per-tier shuffled decks — confirmed Battle.net peers first, then guild
+relays, then community relays. Every contact
 serves at most one request per cycle, then the spent pile reshuffles back
 into the deck. The scrambled order also decorrelates picks across clients,
 so the same members do not absorb everyone's first requests.
@@ -445,11 +449,10 @@ internal table that could plausibly grow.
 
 These points are to be kept in consideration, but will not be part of the current release:
 
-* Ability to load/store additional data such as TRP3 about pages
-
 Already done since this list was written: per-message sender tracking (the
-`stats last` ring records medium + peer) and on-demand profile fetching (the
-pull exchange does exactly this).
+`stats last` ring records medium + peer), on-demand profile fetching (the
+pull exchange does exactly this), and additional-data services (the About
+exchange carries TRP3 about pages over the same envelope pipeline).
 
 ### AddOn documentation
 

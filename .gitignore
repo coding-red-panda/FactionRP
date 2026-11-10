@@ -3,4 +3,8 @@
 FactionRP.iml
 /.freebuff
 .staging/
-.devin/
+.devin/*
+!.devin/rules/
+!.devin/skills/
+.windsurf/*
+!.windsurf/rules/
