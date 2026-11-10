@@ -9,7 +9,9 @@
 
 # --- Embedded libraries ---
 Libs\LibStub\LibStub.lua
-Libs\LibSerialize\LibSerialize.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+Libs\ChatThrottleLib\ChatThrottleLib.xml
+Libs\Chomp\Chomp.xml
 
 # --- Foundation (Phase 1) ---
 src\Class.lua

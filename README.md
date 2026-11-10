@@ -154,9 +154,9 @@ SENDER-PLAYER-GUID||SUBJECT-PLAYER-GUID||SUBJECT-NAME-REALM||SOURCE-ADDON||ORIGI
   `ORIGIN-TIME` provides the actual ordering. Together they de-duplicate received copies
   and prevent stale and fresh copies from flapping between peers.
 * `PROTO-VERSION` is the wire-protocol generation (`C.PROTO_MAJOR`). Receivers reject
-  any envelope advertising a lower generation *before* touching peer state, and the
-  comm channel carries the generation in its name (`frp5comms`) — older-protocol
-  clients, including modified ones, can neither interop nor confirm themselves.
+  any envelope stamped below the supported dialect floor *before* touching peer
+  state — older-protocol clients, including modified ones, can neither interop
+  nor confirm themselves.
   A sender whose completed message fails this gate (or fails to parse at all) is
   additionally placed on a short blocklist (`REJECTED_SENDER_TTL`), so a hostile or
   legacy peer's chunks stop reaching the reassembler entirely.
@@ -193,8 +193,8 @@ except checking Curse, every client announces its addon version once per
 session: shortly after logging in it broadcasts a single version message on
 our hidden comm channel (see "Request pipeline"). The announcement also goes
 to a pinned legacy channel: old-protocol peers are on a
-disjoint channel by design, so we briefly join `frp3comms` (the stranded
-proto-3 fleet — proto-4 was starved on purpose), launch the
+disjoint channel by design, so we briefly join `frp5comms` (the stranded
+proto-5 fleet — older generations get no notice), launch the
 announcement, and leave again. Since that channel is
 faction-scoped, every faction-mate running FactionRP hears the announcement
 the moment someone logs in with a newer build.
@@ -228,7 +228,7 @@ previously pulled the same subject is a holder. A `REQ` therefore goes to:
   *deliverable* cross-faction, and the roster only enumerates those
   targets. If the subject themselves is a confirmed BNet peer they are
   picked first — a self-serve is authoritative.
-* **The hidden same-faction comm channel** — `frp5comms`, an ordinary
+* **The hidden same-faction comm channel** — `frpcomms`, an ordinary
   custom chat channel (like `/1`) joined via `JoinTemporaryChannel` — as
   the last resort when the contact stays silent or none exist. Custom
   channels are faction-scoped, so one chunk reaches *every* same-faction
@@ -251,9 +251,8 @@ whose profile arrived from another exchange while it waited never sends.
 All chunk sends go through a paced internal queue — `C.SEND_RATE` chunks per
 second is the single outbound rate dial, released via a token bucket on the
 `SEND_INTERVAL` tick — and each primitive is additionally routed through **Chomp** —
-the ChatThrottleLib wrapper TRP3 already ships — on the `LOW` priority queue,
-falling back to the raw `C_ChatInfo.SendAddonMessage` / `BNSendGameData` calls
-when Chomp is unavailable. This coalesces our outbound traffic into the same
+the ChatThrottleLib wrapper TRP3 ships, vendored here along with its
+dependencies — on the `LOW` priority queue. This coalesces our outbound traffic into the same
 global throttle queues every addon shares, so FactionRP cannot starve another
 addon's sends (notably TRP3's unthrottled map-scan `C_SCAN` requests, which are
 sensitive to chat-frame send backoff — see issue #1). The comm channel join is

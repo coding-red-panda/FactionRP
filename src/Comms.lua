@@ -567,7 +567,6 @@ function Comms:sendDescriptor(desc)
 		request.at = request.sentAt
 	end
 
-	local chomp = AddOn_Chomp
 	local prefix = desc.prefix or self.prefix
 	if desc.aboutFrame then
 		desc.aboutFrame.sentAt = GetTime()
@@ -577,22 +576,14 @@ function Comms:sendDescriptor(desc)
 		end
 	end
 	if desc.mode == "bnet" then
-		-- BNet sends share ChatThrottleLib's queue via Chomp when present.
-		if chomp and chomp.BNSendGameData then
-			chomp.BNSendGameData(desc.target, prefix, text, "LOW")
-			return
-		end
-		C_BattleNet.SendGameData(desc.target, prefix, text)
+		-- BNet sends share ChatThrottleLib's queue via Chomp.
+		AddOn_Chomp.BNSendGameData(desc.target, prefix, text, "LOW")
 		return
 	end
 	-- Chomp coalesces our sends into ChatThrottleLib's global queues. Raw
 	-- SendAddonMessage bursts can stall other addons' CHANNEL sends
 	-- (TRP3's unthrottled C_SCAN map-scan requests, notably).
-	if chomp and chomp.SendAddonMessage then
-		chomp.SendAddonMessage(prefix, text, desc.kind, desc.target, "LOW")
-		return
-	end
-	C_ChatInfo.SendAddonMessage(prefix, text, desc.kind, desc.target)
+	AddOn_Chomp.SendAddonMessage(prefix, text, desc.kind, desc.target, "LOW")
 end
 
 --- Release queued sends at C.SEND_RATE chunks/second via a fractional
