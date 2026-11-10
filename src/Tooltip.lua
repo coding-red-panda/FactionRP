@@ -223,6 +223,10 @@ function Tooltip:updateIndicator()
 		ind.fill:Show()
 		ind.text:SetText("Requesting profile in " .. retry .. "s")
 		ind.text:SetTextColor(0.8, 0.95, 0.85)
+	elseif status == "ooc" then
+		ind.fill:Hide()
+		ind.text:SetText("Go IC to request the profile.")
+		ind.text:SetTextColor(0.95, 0.85, 0.6)
 	else
 		ind.fill:Hide()
 		ind.text:SetText("Please wait...")
@@ -252,6 +256,7 @@ local loadingHint = "Loading the description..."
 local cooldownHint = "Try again in %d s."
 local pausedHint = "Loading is currently paused."
 local busyHint = "Another description is still loading."
+local oocHint = "Go IC to request the description."
 local failureHints = {
 	missing = "Description not found at the available contacts.",
 	["no-contact"] = "No FactionRP contact or channel is available.",
@@ -422,6 +427,8 @@ function TRP3About:status(context, unitID, restricted)
 			return status, false
 		elseif status == "cooldown" and type(retryAt) == "number" and retryAt ~= math.huge and retryAt > GetTime() then
 			return status, false, math.ceil(retryAt - GetTime()), retryAt, reason
+		elseif status == "ooc" then
+			return "ooc", false
 		end
 		return "unavailable", false
 	end
@@ -470,6 +477,8 @@ function TRP3About:showTooltip(button)
 			tooltip:AddNormalLine(pausedHint)
 		elseif status == "busy" then
 			tooltip:AddNormalLine(busyHint)
+		elseif status == "ooc" then
+			tooltip:AddNormalLine(oocHint)
 		else
 			tooltip:AddNormalLine(status == "unavailable" and unavailable or requestHint)
 		end

@@ -806,6 +806,10 @@ function ns.RunSelfabout(arg)
 		ns.Print("selfabout: no TRP3 adapter")
 		return
 	end
+	if adapter:isPlayerIC() ~= true then
+		ns.Print("selfabout: go IC first; pulls are gated on IC")
+		return
+	end
 	local own = ns.Util.getUnitID("player")
 	local ownKey = own and ns.Util.normalizeUnitName(own)
 	if not ownKey then
