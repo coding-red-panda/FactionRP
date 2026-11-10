@@ -10,3 +10,5 @@ ignore:
     - .gitignore
     - tools/
     - .devin/
+    - .windsurf/
+    - AGENTS.md

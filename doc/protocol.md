@@ -317,8 +317,11 @@ the goal, awareness is.
 
 Profiles move on demand. A pull is triggered when the user mouseovers or
 targets an opposite-faction player whose profile we do not hold fresh.
-Requests are **serial**: at most one subject is in flight, and each subject
-is tried against exactly one contact. Picks come from per-tier shuffled
+Pulls only run while the player is in character — requested while out of
+character, entries sit in the queue and drain on going IC, and the
+tooltip indicator explains the gate. Requests are **serial**: at most
+one subject is in flight, and each subject is tried against exactly one
+contact. Picks come from per-tier shuffled
 decks so every contact serves at most one request per cycle:
 
 1. confirmed BNet peers (subject-first when the subject themselves is a
@@ -610,6 +613,10 @@ a private side-channel. It is generation 6 onwards: older dialects have
 no About verbs, so `parseCtl` rejects them and the envelopes drop
 silently. This is the proof that the dialect transports arbitrary
 service traffic, not just profiles.
+
+Like profile pulls, an About request only starts while the player is in
+character — the button greys out and its tooltip explains the gate while
+out of character.
 
 ```
 requester                              holder

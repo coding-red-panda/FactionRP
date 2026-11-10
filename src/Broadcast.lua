@@ -613,7 +613,7 @@ function Broadcast:tick()
 			end
 		end
 	end
-	if pump and not restricted then
+	if (pump or next(self.reqQueued)) and not restricted then
 		self:pumpRequests()
 	end
 
@@ -730,11 +730,19 @@ function Broadcast:tick()
 
 end
 
+--- Whether pulls may run at all: the player must be IC. An absent
+--- adapter or an unreadable state blocks.
+local function playerIC()
+	local adapter = ns.getAdapter(C.SOURCE.TRP3)
+	return adapter and adapter:isPlayerIC() == true
+end
+
 --- Pull status for one subject, for the tooltip indicator: "asking" while
 --- queued or any pre-grant state is in flight, "receiving" plus chunk
 --- progress once a serve is granted, "miss" plus seconds until the subject
 --- may be requested again inside the cooldown window after a failed pull.
---- nil means nothing worth showing.
+--- "ooc" while the player is out of character; nil means nothing worth
+--- showing.
 function Broadcast:reqStatus(guid)
 	local req = self.requests[guid]
 	if req then
@@ -751,12 +759,15 @@ function Broadcast:reqStatus(guid)
 		return "asking"
 	end
 	if self.reqQueued[guid] then
-		return "asking"
+		return playerIC() and "asking" or "ooc"
 	end
 	local missedAt = self.reqMissed[guid]
 	if missedAt then
 		return "miss", math.max(0, math.ceil(
 			C.REQ_COOLDOWN - (GetTime() - missedAt)))
+	end
+	if not playerIC() and not self:profileFresh(guid) then
+		return "ooc"
 	end
 	return nil
 end
@@ -822,11 +833,11 @@ function Broadcast:fanoutsInFlight()
 	return w
 end
 
---- Issue the next queued subject when no request is in flight.
---- Entries are re-validated on release.
+--- Issue the next queued subject when no request is in flight and the
+--- player is IC. Entries are re-validated on release.
 function Broadcast:pumpRequests()
-	if Util.commsRestricted() or next(self.requests) then
-		return -- restricted, or serial: one request in flight
+	if Util.commsRestricted() or next(self.requests) or not playerIC() then
+		return -- restricted, serial, or player OOC
 	end
 	local o = self.reqQueueOrder
 	local now = GetTime()
@@ -2545,6 +2556,10 @@ function About:requestStatus(unitID, profileID)
 		return "busy"
 	end
 
+	if not playerIC() then
+		return "ooc"
+	end
+
 	return "idle"
 end
 
@@ -2694,9 +2709,9 @@ end
 
 function About:requestAbout(unitID, profileID)
 	local restricted = Util.commsRestricted()
-	if restricted or self.request or not field(unitID, 128) or not field(profileID, 96) then
+	if restricted or self.request or not playerIC() or not field(unitID, 128) or not field(profileID, 96) then
 		if ns.debugAbout then
-			ns.debugAbout("request blocked", nil, restricted and "paused" or (self.request and "busy" or "invalid profile"))
+			ns.debugAbout("request blocked", nil, restricted and "paused" or (self.request and "busy" or (not playerIC() and "ooc" or "invalid profile")))
 		end
 
 		return false
