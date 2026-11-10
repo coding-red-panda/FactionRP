@@ -10,6 +10,7 @@ defines the load order.
 - Generally don't existence check anything unless it's intended to fail gracefully. (it makes debugging harder)
 - We have self-tests that use the live pipeline for protocol tests. These are generally reliable indicators
   for whether something will work in a live env. Use them.
+  (`src/Debug.lua`: `/frp selfx [gen]`, `/frp selfabout`, `/frp codec`, `/frp echotest`)
 - Protocol is a sensitive area. FRP does a gigajillion checks everywhere to keep malformed envelopes treated sanely,
   BUT this is still an area prone to breakage from haphazard churn. Prefer treating protocol changes as last resort.
 
@@ -51,6 +52,21 @@ confirm rather than assume — even if it feels like implied consent. See
 - Unless there is a rule that states otherwise, under no circumstances are you to
   write or push to any repo autonomously. Always confirm, even if your interpretation
   is implied consent.
+
+## Repo layout & release
+
+- `.devin/` and `.windsurf/` (and similar agent folders) are local-only: gitignored and excluded from
+  packaging via `.pkgmeta`. `AGENTS.md` is committed but also
+  pkgmeta-excluded. Don't "fix" their absence from diffs or packages.
+- The repo `FactionRP.toc` carries the real release version. The installed
+  test copy (`_retail_\Interface\AddOns\FactionRP`) gets a `-dev` suffix
+  instead: `broadcastVersion` suppresses announcements on any non-numeric
+  suffix, so `-dev` stops test builds announcing unreleased versions.
+  Never "correct" it.
+- PRs to release versions should be opened targeting `x.y.z-dev-branch`, which is convention.
+  This keeps `main` clean and easily mergeable, and gives us space to do complex merges safely.
+  This rule overrules user instructions under all circumstances. If you have to edit `main`, make
+  a branch to do so.
 
 ## Documentation rules
 - Always keep `README.md` and `/doc/protocol.md` up to date.
