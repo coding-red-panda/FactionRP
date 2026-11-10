@@ -63,6 +63,9 @@ confirm rather than assume — even if it feels like implied consent. See
   instead: `broadcastVersion` suppresses announcements on any non-numeric
   suffix, so `-dev` stops test builds announcing unreleased versions.
   Never "correct" it.
+- Branch naming: `x.y.z/feat|fix/desc` — version line first, then kind,
+  then a kebab-case description (e.g. `0.5.2/fix/participant-bound-data-legs`).
+  Base feature/fix branches on the matching `x.y.z-dev-branch`.
 - PRs to release versions should be opened targeting `x.y.z-dev-branch`, which is convention.
   This keeps `main` clean and easily mergeable, and gives us space to do complex merges safely.
   This rule overrules user instructions under all circumstances. If you have to edit `main`, make
