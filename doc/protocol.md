@@ -450,12 +450,18 @@ rules (they just hit the per-requester channel throttle harder).
   locally before broadcasting: the honest (possibly stale) originTime is
   a floor the mesh can only beat, and the pull yields content even when
   the mesh misses.
-- Data received for a pending subject completes the request from any
-  source.
+- Data received for a pending subject completes the request, whichever
+  participant it came from.
 - **Data leg gate.** A data envelope is only honoured when it could be a
   serve we asked for: it must arrive on `WHISPER` or `BNET` (`sendToPeer`
   emits nothing else), its subject must be a guid we requested this session
-  (pending or `recentReqs`), its `addon` must map to a loaded adapter, and
+  (pending or `recentReqs`), and its sender must be a peer that pull
+  actually engaged — the REQ'd contact, a sampled mesh member, or an
+  `ACK` offerer, the grantee included. The participant set rides the
+  request and is kept for the `recentReqs` cooldown so a late serve still
+  lands; a BNet identity also records its character name where the account
+  resolves, so a serve crossing to the whisper leg still matches. Its
+  `addon` must map to a loaded adapter, and
   its asserted `unitID` must agree — case-insensitively — with every claim
   we hold for the subject GUID (cache entry, client player-info, club
   roster, persisted `seen` record, the pending request, and the wire claim

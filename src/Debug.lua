@@ -584,10 +584,12 @@ function ns.RunSelfx(gen, name)
 		return
 	end
 	-- Stage the receive: drop our cache copy so the store is NEW, mark the
-	-- subject as requested so the data leg is honoured, open the echo
-	-- window, and clear the per-sender REQ throttle repeat runs would hit.
+	-- subject as requested and ourselves as the only participant so the
+	-- data leg is honoured, open the echo window, and clear the
+	-- per-sender REQ throttle repeat runs would hit.
 	ns.cache.entries[guid] = nil
 	b.recentReqs[guid] = GetTime()
+	b.recentParticipants[guid] = { set = { [own] = true }, at = GetTime() }
 	b.reqSenderAt[own] = nil
 	-- A selfx REQ must never trigger a register pull: suppress refreshQuery
 	-- for the window so the compare has a still subject.
