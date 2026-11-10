@@ -3,6 +3,16 @@
 WoW retail RP addon. Lua 5.1 semantics (WoW's runtime). `FactionRP.toc`
 defines the load order.
 
+## Info for Agents
+- It is imperative that, if nothing else, you start with `README.md` and `/doc/protocol.md`
+  These inform context, design and decision-making for the project, as well as structure and mechanics.
+- Don't existence check Blizz API unless it is for feature discovery. Missing API should fail hard.
+- Generally don't existence check anything unless it's intended to fail gracefully. (it makes debugging harder)
+- We have self-tests that use the live pipeline for protocol tests. These are generally reliable indicators
+  for whether something will work in a live env. Use them.
+- Protocol is a sensitive area. FRP does a gigajillion checks everywhere to keep malformed envelopes treated sanely,
+  BUT this is still an area prone to breakage from haphazard churn. Prefer treating protocol changes as last resort.
+
 ## Your job
 - Be concise and informative when asked questions.
 - Even if you're in bypass mode, always ask before editing code (unless directly instructed).
