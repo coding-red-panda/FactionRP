@@ -3141,6 +3141,15 @@ function About:onMessage(ctl, msg, context)
 end
 
 function About:tick()
+	-- A leaked sandbox (crashed self-test) never outlives its run.
+	local adapter = ns.getAdapter(C.SOURCE.TRP3)
+	if adapter and adapter.sandbox
+		and not (ns.selfaboutRun and not ns.selfaboutRun.done)
+		and not (ns.selfxRun and not ns.selfxRun.done)
+	then
+		adapter:closeSandbox()
+	end
+
 	if Util.commsRestricted() then
 		self:pause()
 		return
