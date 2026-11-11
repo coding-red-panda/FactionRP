@@ -599,6 +599,7 @@ function ns.RunSelfx(gen, name)
 	-- per-sender REQ throttle repeat runs would hit.
 	ns.cache.entries[guid] = nil
 	local prevRecentReq = b.recentReqs[guid]
+	local prevParticipants = b.recentParticipants[guid]
 	b.recentReqs[guid] = GetTime()
 	b.recentParticipants[guid] = { set = { [own] = true }, at = GetTime() }
 	b.reqSenderAt[own] = nil
@@ -666,6 +667,7 @@ function ns.RunSelfx(gen, name)
 			adapter:closeSandbox()
 			b.selfxNoPull = nil
 			b.recentReqs[guid] = prevRecentReq
+			b.recentParticipants[guid] = prevParticipants
 			-- Snapshot match proves the codec byte-for-byte; a fresh
 			-- re-extract match tolerates register drift from refreshQuery
 			-- (v bumps, volatile fields) that the payload never carried.
@@ -698,6 +700,7 @@ function ns.RunSelfx(gen, name)
 			adapter:closeSandbox()
 			b.selfxNoPull = nil
 			b.recentReqs[guid] = prevRecentReq
+			b.recentParticipants[guid] = prevParticipants
 			run.done = true
 			run.same = false
 			ns.Print(("selfx: FAIL | ctl %d, data never landed")
