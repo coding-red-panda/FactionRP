@@ -7,6 +7,12 @@
   throttled sends no longer depend on another add-on shipping it. The raw
   `SendAddonMessage`/`SendGameData` fallbacks are gone with it.
 
+### Changed
+- You now have to be IC to pull profile data with FRP. You do not have to be IC to serve it.
+- Data legs are now participant-bound, so we no longer accept subject data from randos
+  who didn't engage with us. Previously, as long as subject envelope was sane,
+  we just ate the stranger candy.
+
 ### Removed
 - Protocol generation 5 support dropped. The LibSerialize dialect and the
   `frp5comms` legacy bridge are gone, and LibSerialize is no longer bundled.
@@ -23,7 +29,7 @@
   Added a button to the About tabs of x-fac profiles which you can click to request a person's About page.
   This is a very experimental feature, and it will not pull someone's profile if it's too large.
   If you pull someone's About page, it will be remembered for a while and you will not be able to
-  pull it again for a while.
+  pull it again until the cooldown has expired.
   There are a bazillion reasons why this would fail, **MOST OF THEM INTENDED,** so failure to pull
   is not necessarily a bug.
 

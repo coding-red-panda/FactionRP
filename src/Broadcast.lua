@@ -57,6 +57,8 @@ function Broadcast:init()
 	--   recentReqs[guid] = last request time (per-subject cooldown)
 	--   reqMissed[guid] = last failed-pull time (tooltip "no response")
 	--   reqQueued[guid] + reqQueueOrder: deduped FIFO of waiting subjects
+	--   recentParticipants[guid] = { set = <senderKey set>, at = <ts> }:
+	--     authorized data sources kept for the post-exchange cooldown
 	--   contactDecks: 3-tier draw/spent piles for unicast picks (BNet,
 	--     guild, community). Entries { medium, target, key }. Pops move a
 	--     served contact to spent and once every tier's draw is drained
@@ -77,6 +79,7 @@ function Broadcast:init()
 	--   chanReqSenderAt[senderName] = last inbound channel REQ time
 	self.requests = {}
 	self.recentReqs = {}
+	self.recentParticipants = {}
 	self.reqMissed = {}
 	self.pendingServes = {}
 	self.freshenPending = {}
@@ -517,6 +520,7 @@ local function dropReq(bcast, guid, req, now, why)
 	bcast.requests[guid] = nil
 	bcast.recentReqs[guid] = now
 	bcast.reqMissed[guid] = now
+	bcast.recentParticipants[guid] = { set = req.participants, at = now }
 	bcast:publishHeld(guid, req.unitID)
 	if ns.debugPeer then
 		ns.debugPeer("req " .. (req.unitID or Util.nameForGuid(guid))
@@ -720,6 +724,11 @@ function Broadcast:tick()
 	for guid, at in pairs(self.reqMissed) do
 		if (now - at) > C.REQ_COOLDOWN then
 			self.reqMissed[guid] = nil
+		end
+	end
+	for guid, rec in pairs(self.recentParticipants) do
+		if (now - rec.at) > C.REQ_COOLDOWN then
+			self.recentParticipants[guid] = nil
 		end
 	end
 	for guid, rec in pairs(self.fetchCache) do
@@ -981,6 +990,26 @@ function Broadcast:reqContact(guid, now, excluded)
 	return nil
 end
 
+--- Record `target` as an authorized data source in `set`: REQ'd contacts,
+--- ACK offerers, mesh-sample recipients, and grant winners all land here.
+--- BNet identities also record the character name where the account info
+--- resolves, so a serve crossing to the whisper leg still matches.
+local function noteParticipant(set, medium, target)
+	if not target then
+		return
+	end
+	set[ns.comms:senderKeyFor(medium, target)] = true
+	if medium == "BNET" then
+		local ok, info = pcall(C_BattleNet.GetGameAccountInfoByID, target)
+		local char = ok and Util.fieldsUsable(info, "characterName", "realmName")
+			and info.characterName
+		local realm = char and char ~= "" and info.realmName
+		if realm and realm ~= "" then
+			set[char .. "-" .. (realm:gsub("%s", ""))] = true
+		end
+	end
+end
+
 --- Issue one request as a unicast REQ to the next contact.
 function Broadcast:issueRequest(guid, unitID, now)
 	-- Stamp the cooldown up front so a failed send cannot retry-storm.
@@ -997,6 +1026,7 @@ function Broadcast:issueRequest(guid, unitID, now)
 		-- Nobody reachable: stranger subjects still get the channel leg.
 		local req = {
 			state = "chan-wait", at = now, waitAt = now, unitID = unitID,
+			participants = {},
 		}
 		self.requests[guid] = req
 		if not self:tryChannelFallback(guid, req, now) then
@@ -1011,9 +1041,11 @@ function Broadcast:issueRequest(guid, unitID, now)
 		state = "contact", at = now, unitID = unitID,
 		medium = contact.medium, target = contact.target,
 		sendDeadline = now + C.REQ_CONTACT_TIMEOUT + comms:queueDepth() / C.SEND_RATE,
+		participants = {},
 	}
 
 	self.requests[guid] = req
+	noteParticipant(req.participants, contact.medium, contact.target)
 -- //edit: queue time is not silence from the contact so start waiting after this request leaves our queue
 	for i = queueStart + 1, comms.queue.tail 
 	do
@@ -1025,7 +1057,9 @@ function Broadcast:issueRequest(guid, unitID, now)
 
 	if ns.debugEnabled("targets") then
 		for _, name in pairs(self.forcedTargets) do
-			comms:sendChunksAddon(chunks, "WHISPER", name)
+			if comms:sendChunksAddon(chunks, "WHISPER", name) then
+				noteParticipant(req.participants, "WHISPER", name)
+			end
 		end
 	end
 	if ns.statsLeg then
@@ -1150,6 +1184,7 @@ function Broadcast:sendSampledReq(guid, req)
 	for _, name in ipairs(targets) do
 		if comms:sendChunksAddon(chunks, "WHISPER", name) then
 			legs = legs + 1
+			noteParticipant(req.participants, "WHISPER", name)
 			self.fanoutInFlight[#self.fanoutInFlight + 1] = comms.queue.tail
 		end
 	end
@@ -1443,6 +1478,16 @@ function Broadcast:verifyDataLeg(msg, context)
 	local req = self.requests[guid]
 	if not req and not self.recentReqs[guid] then
 		return rejectDataLeg("unsolicited_data", guid)
+	end
+	-- Only peers this pull actually engaged may answer for it: the REQ'd
+	-- contact, sampled mesh members, ACK offerers, and the grant winner.
+	local parts = req and req.participants
+	if not parts then
+		local rec = self.recentParticipants[guid]
+		parts = rec and rec.set
+	end
+	if not (parts and context.senderKey and parts[context.senderKey]) then
+		return rejectDataLeg("nonparticipant_data", guid)
 	end
 	if not ns.getAdapter(msg.addon) then
 		return rejectDataLeg("unknown_addon", guid)
@@ -1948,6 +1993,10 @@ function Broadcast:onControl(ctl, msg, context)
 		-- directory last-seen stamp. A claim at or under our persisted
 		-- floor cannot carry anything newer — silence is rejection.
 		local req = self.requests[guid]
+		if req then
+			noteParticipant(req.participants, context.medium,
+				context.gameAccountID or context.senderName)
+		end
 		local offerAt = ctl.args.seenAt or 0
 		if req and (offerAt + C.FRESHNESS_SKEW)
 			< ns.cache:freshnessFloor(guid, req.unitID)
@@ -2173,6 +2222,8 @@ function Broadcast:onMessage(raw, context)
 	local req = self.requests[msg.subject]
 	if req then
 		local src = context.gameAccountID or context.senderName
+		self.recentParticipants[msg.subject] = { set = req.participants,
+			at = GetTime() }
 		self.requests[msg.subject] = nil
 		self.recentReqs[msg.subject] = GetTime()
 		self.reqMissed[msg.subject] = nil
