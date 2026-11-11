@@ -56,7 +56,7 @@ function TRP3Adapter:getUnitID(unit)
 end
 
 --- TRP3 keys the local player by its own globals.player_id; use it so the
--- self-extraction branch and update events line up exactly.
+--- self-extraction branch and update events line up exactly.
 function TRP3Adapter:getPlayerUnitID()
 	if self:isAvailable() and TRP3_API.globals then
 		return TRP3_API.globals.player_id
@@ -154,7 +154,7 @@ end
 
 
 
--- Gather the three sections for the LOCAL player via TRP3's exchange getters.
+--- Gather the three sections for the LOCAL player via TRP3's exchange getters.
 local function getLocalSections()
 	local reg = TRP3_API.register
 	return {
@@ -164,8 +164,8 @@ local function getLocalSections()
 	}
 end
 
--- Gather the three sections for a known unit plus the profile's mspver
--- table (nil for non-MSP profiles) for the content version.
+--- Gather the three sections for a known unit plus the profile's mspver
+--- table (nil for non-MSP profiles) for the content version.
 local function getRegisteredSections(unitID)
 	local profile = TRP3_API.register.getUnitIDProfile(unitID)
 	if not profile then
@@ -252,8 +252,8 @@ local function getClientInfo(unitID)
 end
 
 --- Extract a profile for `unitID` from TRP3's own data, deep-copying so we
--- never alias (and later serialize) TRP3's live tables.
--- @return table|nil A profile object, or nil if TRP3 has no data for the unit.
+--- never alias (and later serialize) TRP3's live tables.
+--- @return table|nil A profile object, or nil if TRP3 has no data for the unit.
 function TRP3Adapter:extract(unitID)
 	if ns.Util.isPaused() then
 		return nil
@@ -303,8 +303,336 @@ function TRP3Adapter:extract(unitID)
 	}
 end
 
+local function aboutValueIsSafe(value, depth, state)
+	if not ns.Util.canWeUse(value) then
+		return false, "invalid-about"
+	end
+
+	state.nodes = state.nodes + 1
+	if state.nodes > 2048 then
+		return false, "about-too-large"
+	end
+
+	local valueType = type(value)
+	if valueType == "string" then
+		state.bytes = state.bytes + #value
+		if state.bytes > C.ABOUT_MAX_RAW then
+			return false, "about-too-large"
+		end
+	elseif valueType == "number" then
+		if value ~= value or value == math.huge or value == -math.huge then
+			return false, "invalid-about"
+		end
+	elseif valueType == "table" then
+		if depth > 12 then
+			return false, "about-too-large"
+		end
+		if state.active[value] or getmetatable(value) ~= nil then
+			return false, "invalid-about"
+		end
+
+		state.active[value] = true
+		for key, item in pairs(value) do
+			if type(key) ~= "string" and type(key) ~= "number" then
+				return false, "invalid-about"
+			end
+
+			local ok, reason = aboutValueIsSafe(key, depth, state)
+			if not ok then
+				return false, reason
+			end
+			ok, reason = aboutValueIsSafe(item, depth + 1, state)
+			if not ok then
+				return false, reason
+			end
+		end
+		state.active[value] = nil
+	elseif valueType ~= "boolean" then
+		return false, "invalid-about"
+	end
+
+	return true
+end
+
+local function aboutMediaIsSafe(value)
+	return value == nil or type(value) == "string" or type(value) == "number"
+end
+
+local function aboutFrameIsSafe(frame)
+	return type(frame) == "table"
+		and (frame.TX == nil or type(frame.TX) == "string")
+		and aboutMediaIsSafe(frame.IC)
+		and aboutMediaIsSafe(frame.BK)
+end
+
+function TRP3Adapter:validateAbout(about)
+	if type(about) ~= "table" then
+		return false, "invalid-about"
+	end
+
+	local ok, reason = aboutValueIsSafe(about, 1, { nodes = 0, bytes = 0, active = {} })
+	if not ok then
+		return false, reason
+	end
+
+	local template = about.TE == nil and 1 or about.TE
+	if type(about.v) ~= "number" or about.v < 0 or about.v % 1 ~= 0
+		or (template ~= 1 and template ~= 2 and template ~= 3)
+		or about.read ~= nil
+		or not aboutMediaIsSafe(about.BK)
+		or not aboutMediaIsSafe(about.MU)
+	then
+		return false, "invalid-about"
+	end
+
+	for i = 1, 3 do
+		if i ~= template and about["T" .. i] ~= nil then
+			return false, "invalid-about"
+		end
+	end
+
+	local data = about["T" .. template]
+	if data == nil then
+		return true
+	end
+	if type(data) ~= "table" then
+		return false, "invalid-about"
+	end
+
+	if template == 1 then
+		if not aboutFrameIsSafe(data) then
+			return false, "invalid-about"
+		end
+	elseif template == 2 then
+		for key, frame in pairs(data) do
+			if type(key) ~= "number" or key < 1 or key % 1 ~= 0
+				or not aboutFrameIsSafe(frame)
+			then
+				return false, "invalid-about"
+			end
+		end
+	else
+		for _, key in ipairs({ "PH", "PS", "HI" }) do
+			if data[key] ~= nil and not aboutFrameIsSafe(data[key]) then
+				return false, "invalid-about"
+			end
+		end
+	end
+
+	return true
+end
+
+local function aboutProfileIsCurrent(unitID, profileID, allowPlayer)
+	if not ns.Util.canWeUse(unitID, profileID)
+		or type(unitID) ~= "string" or unitID == ""
+		or type(profileID) ~= "string" or profileID == ""
+	then
+		return false, "profile-changed"
+	end
+
+	local ok, current = pcall(function()
+		local reg = TRP3_API.register
+		if unitID == TRP3_API.globals.player_id then
+			return allowPlayer and TRP3_API.profile.getPlayerCurrentProfileID() == profileID
+		end
+
+		return reg.isUnitIDKnown(unitID) and reg.profileExists(unitID)
+			and reg.getUnitIDProfileID(unitID) == profileID
+	end)
+	if not ok then
+		return false, "unavailable"
+	end
+	if not current then
+		return false, "profile-changed"
+	end
+
+	return true
+end
+
+function TRP3Adapter:extractAbout(unitID, profileID)
+	if ns.Util.isPaused() then
+		return nil, "paused"
+	end
+	if not self:isAvailable() then
+		return nil, "unavailable"
+	end
+
+	local current, reason = aboutProfileIsCurrent(unitID, profileID, true)
+	if not current then
+		return nil, reason
+	end
+
+	local isPlayer = unitID == TRP3_API.globals.player_id
+	local ownSnapshot = false
+	local ok, about = pcall(function()
+		local reg = TRP3_API.register
+		if isPlayer then
+			if type(TRP3_API.profile.getData) == "function" then
+				return TRP3_API.profile.getData("player/about")
+			end
+			ownSnapshot = true
+			return reg.player.getAboutExchangeData()
+		end
+
+		local profile = reg.getUnitIDProfile(unitID)
+		return profile and profile.about
+	end)
+	if not ok then
+		return nil, "unavailable"
+	end
+	if not ns.Util.canWeUse(about) or type(about) ~= "table" then
+		return nil, "missing-about"
+	end
+	if getmetatable(about) ~= nil or not ns.Util.fieldsUsable(about, "TE") then
+		return nil, "invalid-about"
+	end
+
+	if not ownSnapshot then
+		local source = about
+		local nodes = 0
+		about = {}
+		for key, value in pairs(source) do
+			nodes = nodes + 1
+			if nodes > 2048 then
+				return nil, "about-too-large"
+			end
+			if not ns.Util.canWeUse(key, value) then
+				return nil, "invalid-about"
+			end
+			if key ~= "read" and key ~= "T1" and key ~= "T2" and key ~= "T3" then
+				about[key] = value
+			end
+		end
+		local template = source.TE == nil and 1 or source.TE
+		if template == 1 or template == 2 or template == 3 then
+			about["T" .. template] = source["T" .. template]
+		end
+	else
+		about.read = nil
+		for i = 1, 3 do
+			if i ~= (about.TE == nil and 1 or about.TE) then
+				about["T" .. i] = nil
+			end
+		end
+	end
+
+	ok, reason = self:validateAbout(about)
+	if not ok then
+		return nil, reason
+	end
+	current, reason = aboutProfileIsCurrent(unitID, profileID, true)
+	if not current then
+		return nil, reason
+	end
+	if ns.Util.isPaused() then
+		return nil, "paused"
+	end
+
+	return ownSnapshot and about or CopyTable(about)
+end
+
+function TRP3Adapter:captureAboutState(unitID, profileID)
+	if ns.Util.isPaused() then
+		return nil, "paused"
+	end
+	if not self:isAvailable() then
+		return nil, "unavailable"
+	end
+
+	local current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	if not current then
+		return nil, reason
+	end
+	local ok, state = pcall(function()
+		local profile = TRP3_API.register.getUnitIDProfile(unitID)
+		if not ns.Util.fieldsUsable(profile, "about") then
+			return nil
+		end
+		local about = profile.about
+		if about ~= nil and not ns.Util.fieldsUsable(about, "v") then
+			return nil
+		end
+
+		-- //edit: Keep only references and the version. Reading About must not copy a long biography.
+		return { profile = profile, about = about, version = about and about.v }
+	end)
+	if not ok or not state then
+		return nil, "unavailable"
+	end
+	current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	if not current then
+		return nil, reason
+	end
+	if ns.Util.isPaused() then
+		return nil, "paused"
+	end
+
+	return state
+end
+
+function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
+	if ns.Util.isPaused() then
+		return false, "paused"
+	end
+	if not self:isAvailable() then
+		return false, "unavailable"
+	end
+
+	local reg = TRP3_API.register
+	if type(reg.shouldUpdateInformation) ~= "function"
+		or type(reg.saveInformation) ~= "function"
+		or reg.registerInfoTypes.ABOUT ~= "about"
+	then
+		return false, "unavailable"
+	end
+
+	local current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	if not current then
+		return false, reason
+	end
+	local valid
+	valid, reason = self:validateAbout(about)
+	if not valid then
+		return false, reason
+	end
+
+	local ok, shouldUpdate = pcall(reg.shouldUpdateInformation, unitID, reg.registerInfoTypes.ABOUT, about.v)
+	if not ok or type(shouldUpdate) ~= "boolean" then
+		return false, "unavailable"
+	end
+	current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	if not current then
+		return false, reason
+	end
+	if ns.Util.isPaused() then
+		return false, "paused"
+	end
+	if expectedState then
+		local state
+		state, reason = self:captureAboutState(unitID, profileID)
+		if not state then
+			return false, reason
+		end
+		if state.profile ~= expectedState.profile or state.about ~= expectedState.about
+			or state.version ~= expectedState.version
+		then
+			return false, "profile-changed"
+		end
+	end
+	if not shouldUpdate then
+		return true
+	end
+
+	ok = pcall(reg.saveInformation, unitID, reg.registerInfoTypes.ABOUT, CopyTable(about))
+	if not ok then
+		return false, "unavailable"
+	end
+
+	return true
+end
+
 --- Cheap "could we serve this unit's profile" check: true when TRP3 holds
--- a profile for the unit (or it is us). Does not extract.
+--- a profile for the unit (or it is us). Does not extract.
 function TRP3Adapter:canServe(unitID)
 	if not unitID or not self:isAvailable() then
 		return false
@@ -319,8 +647,8 @@ function TRP3Adapter:canServe(unitID)
 end
 
 --- Freshness metadata for the register's current copy: profile.time, the
--- bound profileID, and the held sections' content version. Reads live tables.
--- @return table|nil { at, pid, cv }, or nil for self/unknown/profileless units.
+--- bound profileID, and the held sections' content version. Reads live tables.
+--- @return table|nil { at, pid, cv }, or nil for self/unknown/profileless units.
 function TRP3Adapter:profileMeta(unitID)
 	if not self:isAvailable() then
 		return nil
@@ -348,7 +676,7 @@ function TRP3Adapter:dataProfileID(data)
 end
 
 --- TRP3 marks auto-generated default profiles with a trailing "*" on the
--- profileID; isDefaultProfile wraps that marker.
+--- profileID; isDefaultProfile wraps that marker.
 local function isDefaultPid(pid)
 	return pid ~= nil and TRP3_API.profile.isDefaultProfile(pid)
 end
@@ -373,17 +701,17 @@ function TRP3Adapter:dataIsDefault(data)
 end
 
 --- Whether the subject's profile is pullable from its author. Matches
--- /trp3 open: sendQuery/sendMSPQuery are directed queries on a name-realm
--- string, TRP3 creates the register entry when the author responds, so
--- any resolved unitID is fair game. Only self is pointless.
+--- /trp3 open: sendQuery/sendMSPQuery are directed queries on a name-realm
+--- string, TRP3 creates the register entry when the author responds, so
+--- any resolved unitID is fair game. Only self is pointless.
 function TRP3Adapter:canPull(unitID)
 	return unitID ~= nil and self:isAvailable()
 		and unitID ~= TRP3_API.globals.player_id
 end
 
 --- Ask TRP3 to refresh our held copy via the same headless vernum and MSP
--- queries /trp3 open makes. Missing or failing API raises one error per
--- session and disables the feature; callers then serve without a refresh.
+--- queries /trp3 open makes. Missing or failing API raises one error per
+--- session and disables the feature; callers then serve without a refresh.
 function TRP3Adapter:refreshQuery(unitID)
 
 	if ns.Util.isPaused() then
@@ -438,8 +766,8 @@ function TRP3Adapter:refreshQuery(unitID)
 end
 
 --- Inject a received profile into TRP3's register so TRP3 renders it.
--- Mirrors the sequence TRP3 itself uses when receiving a profile.
--- @return boolean Whether anything was injected.
+--- Mirrors the sequence TRP3 itself uses when receiving a profile.
+--- @return boolean Whether anything was injected.
 function TRP3Adapter:inject(unitID, data, classID)
 	if ns.Util.isPaused() then
 		return false
@@ -566,8 +894,8 @@ function TRP3Adapter:inject(unitID, data, classID)
 end
 
 --- Hook TRP3's internal "register data updated" callback so the Scanner can
--- react when a same-faction profile arrives/changes asynchronously.
--- @param callback function Invoked as callback(unitID).
+--- react when a same-faction profile arrives/changes asynchronously.
+--- @param callback function Invoked as callback(unitID).
 function TRP3Adapter:registerUpdateListener(callback)
 	if not self:isAvailable() or not TRP3_Addon or not TRP3_API.RegisterCallback then
 		return
@@ -581,10 +909,10 @@ function TRP3Adapter:registerUpdateListener(callback)
 end
 
 --- Hook TRP3's profile-receipt signals so the Scanner can re-publish data
--- that arrived over TRP3's own channels. Sources: REGISTER_DATA_RECEIVED
--- (TRP3 exchange) and msp.callback.received (MSP merges). Neither fires for
--- FactionRP's own injections, so this is loop-safe.
--- @param callback function Invoked as callback(unitID).
+--- that arrived over TRP3's own channels. Sources: REGISTER_DATA_RECEIVED
+--- (TRP3 exchange) and msp.callback.received (MSP merges). Neither fires for
+--- FactionRP's own injections, so this is loop-safe.
+--- @param callback function Invoked as callback(unitID).
 function TRP3Adapter:registerReceivedListener(callback)
 	if not self:isAvailable() then
 		return

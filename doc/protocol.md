@@ -74,7 +74,7 @@ sender || subject || unitID || addon || originTime || contentVersion || protoMaj
 | `originTime`     | freshness claim: `time()` for self-serves; the holder's last-seen "as of" stamp otherwise |
 | `contentVersion` | opaque version string (`c#:k#:m#` section versions)              |
 | `protoMajor`     | the sender's wire-protocol generation (`C.PROTO_MAJOR`, now 6)    |
-| `data`           | payload; may itself contain `||` — it is always the last field   |
+| `data`           | payload; may itself contain `\|\|` — it is always the last field   |
 
 A message is malformed unless all seven separators are present and
 `originTime` parses as a number.
@@ -599,3 +599,79 @@ re-enter after a restart once a fresher copy has landed.
 Inbound data is cached and injected into the RP AddOn's register — never
 re-sent. Same-faction distribution remains the RP AddOn's own job; FactionRP
 only bridges faction boundaries.
+
+## The About exchange
+
+The About pull (a TRP3 profile's long-form biography section, fetched on
+demand from the About button) is a second service on the envelope
+pipeline: `subject` is the reserved token `_frpabout`, and `data` carries
+ordinary `FRP1 <VERB> <args>` control text governed by per-generation
+schemas in `Dialects.lua` — the same language as the pull exchange, not
+a private side-channel. It is generation 6 onwards: older dialects have
+no About verbs, so `parseCtl` rejects them and the envelopes drop
+silently. This is the proof that the dialect transports arbitrary
+service traffic, not just profiles.
+
+```
+requester                              holder
+    │  AQ <id> <unitID> <pid> ────────► (whisper/BNet contact)
+    │  ◄── AO <id> <pid> <size> ── encoded length advertised up front
+    │  ── AG <id> ──► grants the serve
+    │  ◄── AD <id> <encoded {profileID, about}> ── raw arg, chunked
+    │  ── AC <id> ──► cancel (also accepted mid-drain)
+    │  ◄── AN <id> <reason> ── explicit negative: too-large | missing | busy
+```
+
+`AR` is the discovery broadcast on `frpcomms` with the same argument
+shape as `AQ`: it asks the mesh who holds a given `unitID`/`pid`, and
+holders answer with a whispered `AO`. `AR` leg broadcasts get silence in
+reply — an `AN` per broadcast would amplify traffic by mesh size — while
+directed one-to-one exchanges (`AQ`, and the post-grant `AD` leg) use
+explicit `AN` negatives. `AN busy` is sent when the `AD` leg cannot fit
+the send queue: the leg drops whole per the queue-cap rule, but a
+1-chunk `AN` still fits in the congestion window that rejected the data,
+so the requester fails fast with a distinct reason instead of waiting
+out the timeout.
+
+`AD`'s payload arg uses the schema's `raw` field type: the terminal
+field captures the remainder verbatim, spaces and binary bytes
+included, which is what lets a dialect verb carry an encoded blob. That
+field type is the mechanism future consumer-API verbs will use for
+arbitrary data.
+
+Contact policy mirrors the pull exchange: a confirmed contact's answer —
+including silence — is genuine, so `AN`, timeouts, and load failures end
+the request. The `AR` mesh broadcast only fires when no confirmed
+contact ever engaged (no route found, or the route died before the
+query dispatched). `failedRoute`/`failedName` dedup keeps the failed
+contact from re-offering during discovery.
+
+Codec and bounds: the `{profileID, about}` payload encodes via
+`Dialect.encodeProfile(data, sendGen(peerGen))` and decodes via
+`Dialect.decodeProfile(encoded, msg.protoVer, C.ABOUT_MAX_RAW)` — the
+envelope stamp picks the dialect deterministically, no probing. The
+server bounds the payload before offering (`ABOUT_MAX_RAW` serialized,
+`ABOUT_MAX_ENCODED` on the wire); the `AO` advertisement lets the
+requester reject oversized Abouts before granting, and the same number
+drives the loading deadline (`queueDepth + expected chunks / SEND_RATE +
+ABOUT_STALL`). `ABOUT_TIMEOUT` bounds the whole exchange,
+`ABOUT_COOLDOWN` rate-limits button presses, and `ABOUT_SOURCE_*` tracks
+which peer served the profile so the About pull can prefer them.
+
+**Freshness cache.** A successful pull caches `(unitID, profileID)`
+metadata — it is a freshness gate, not a payload store. Repeat requests
+inside the TTL report `cooldown`/`cached` with a countdown instead of
+re-pulling, the About-side equivalent of the profile cache's TTL gate.
+The TTL scales linearly with the advertised `encodedLen`: tiny Abouts get
+`ABOUT_CACHE_TTL_MIN` (120s) since their edits are visible and dramatic,
+max-size Abouts get `ABOUT_CACHE_TTL_MAX` (900s) since they cost the most
+shared-queue bandwidth and change slowly. Entries cap at
+`ABOUT_CACHE_CAP` with oldest-first eviction and are session-only.
+
+**Compatibility note.** The exchange never shipped, so there is no
+released fleet to interoperate with; proto-5 About builds on dev
+branches simply cannot parse these verbs and drop the envelopes.
+Cross-version proto-6 builds degrade the same way: an old build without
+the About service ignores `_frpabout` subjects entirely, and a new build
+receiving retired `A2|` text fails `parseCtl` on the unknown proto tag.
+Both directions end in timeout, never error.

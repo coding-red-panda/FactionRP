@@ -30,6 +30,9 @@ function Comms:init()
 	-- The queue holds pooled descriptor records, not closures, so a send at
 	-- steady state allocates nothing.
 	self.queue = { head = 1, tail = 0 }
+	-- Slot for About data chunks.
+	-- Only consumed while queue is empty.
+	self.aboutSend = nil
 	self.sendCredit = 0 -- token bucket: chunks release at C.SEND_RATE/sec
 	self.descAcquire, self.descRelease = ns.Util.newPool(C.POOL_SEND_DESC)
 	self.messageHandler = nil -- set by Broadcast: fn(rawMessage, context)
@@ -68,7 +71,7 @@ end
 -- Lifecycle -----------------------------------------------------------------
 
 --- Begin transport: register prefix, hook receive events, join the channel,
--- and start the paced sender. Safe to call once.
+--- and start the paced sender. Safe to call once.
 function Comms:start()
 	if self.started then
 		return
@@ -191,6 +194,9 @@ function Comms:pauseForLoading()
 end
 
 function Comms:clearTransfers()
+	if ns.about then
+		ns.about:pause()
+	end
 -- //edit: Old transfered data should not start sending after we finish the teleport
 	local q = self.queue
 	for i = q.head, q.tail do
@@ -359,7 +365,7 @@ function Comms:onWhisperError(message)
 end
 
 --- Set the callback that receives fully-reassembled messages.
--- @param fn function Invoked as fn(rawMessage, context).
+--- @param fn function Invoked as fn(rawMessage, context).
 function Comms:setMessageHandler(fn)
 	self.messageHandler = fn
 end
@@ -367,8 +373,8 @@ end
 -- Channel -------------------------------------------------------------------
 
 --- Leave any FactionRP channel outside our join set. Channel membership
--- survives /reload, so stale-generation channels would otherwise keep
--- streaming their traffic for the session.
+--- survives /reload, so stale-generation channels would otherwise keep
+--- streaming their traffic for the session.
 function Comms:leaveForeignChannels()
 	local keep = { [C.COMM_CHANNEL:lower()] = true }
 	for _, name in pairs(C.LEGACY_CHANNELS) do
@@ -395,8 +401,8 @@ function Comms:leaveForeignChannels()
 end
 
 --- Join the hidden same-faction channels: the unified channel plus every
--- supported legacy channel. Joining fires CHANNEL_UI_UPDATE churn in the
--- client even when already joined, so skip the ones we are in.
+--- supported legacy channel. Joining fires CHANNEL_UI_UPDATE churn in the
+--- client even when already joined, so skip the ones we are in.
 function Comms:joinChannel()
 	if ns.Util.isPaused() then
 		return
@@ -428,7 +434,7 @@ function Comms:channelIndex()
 end
 
 --- Live member count of the comms channel: 0 while not joined, and until
--- the first CHANNEL_COUNT_UPDATE arrives after a join.
+--- the first CHANNEL_COUNT_UPDATE arrives after a join.
 function Comms:meshCount()
 	if not self:channelIndex() then
 		return 0
@@ -437,7 +443,7 @@ function Comms:meshCount()
 end
 
 --- Member names of the comms channel for REQ sampling, or nil while not
--- joined. May be partial while the roster streams.
+--- joined. May be partial while the roster streams.
 function Comms:meshRoster()
 	if ns.Util.isPaused() then
 		return nil -- member names are unreliable mid-transition
@@ -490,9 +496,15 @@ function Comms:enqueue(desc)
 end
 
 --- Dispatch a queued descriptor through Chomp (or the raw fallback),
--- recording stats hooks. The descriptor is released after dispatch.
+--- recording stats hooks. The descriptor is released after dispatch.
 function Comms:sendDescriptor(desc)
-	if ns.Util.isPaused() then
+	if not desc or ns.Util.isPaused() then
+		return
+	end
+	if desc.aboutOwner and (desc.aboutOwner.cancelled or GetTime() > desc.aboutOwner.deadline
+		or (desc.aboutId and desc.aboutOwner.id ~= desc.aboutId)
+		or not ns.about or not ns.about:routeLive(desc.aboutRoute))
+	then
 		return
 	end
 
@@ -556,30 +568,41 @@ function Comms:sendDescriptor(desc)
 	end
 
 	local chomp = AddOn_Chomp
+	local prefix = desc.prefix or self.prefix
+	if desc.aboutFrame then
+		desc.aboutFrame.sentAt = GetTime()
+		if ns.debugAbout and desc.aboutVerb then
+			ns.debugAbout("handoff " .. desc.aboutVerb, desc.aboutId,
+				desc.kind .. " " .. tostring(desc.target))
+		end
+	end
 	if desc.mode == "bnet" then
 		-- BNet sends share ChatThrottleLib's queue via Chomp when present.
 		if chomp and chomp.BNSendGameData then
-			chomp.BNSendGameData(desc.target, self.prefix, text, "LOW")
+			chomp.BNSendGameData(desc.target, prefix, text, "LOW")
 			return
 		end
-		C_BattleNet.SendGameData(desc.target, self.prefix, text)
+		C_BattleNet.SendGameData(desc.target, prefix, text)
 		return
 	end
 	-- Chomp coalesces our sends into ChatThrottleLib's global queues. Raw
 	-- SendAddonMessage bursts can stall other addons' CHANNEL sends
 	-- (TRP3's unthrottled C_SCAN map-scan requests, notably).
 	if chomp and chomp.SendAddonMessage then
-		chomp.SendAddonMessage(self.prefix, text, desc.kind, desc.target, "LOW")
+		chomp.SendAddonMessage(prefix, text, desc.kind, desc.target, "LOW")
 		return
 	end
-	C_ChatInfo.SendAddonMessage(self.prefix, text, desc.kind, desc.target)
+	C_ChatInfo.SendAddonMessage(prefix, text, desc.kind, desc.target)
 end
 
 --- Release queued sends at C.SEND_RATE chunks/second via a fractional
--- token bucket. Credit caps at one send's worth so an idle queue cannot
--- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
+--- token bucket. Credit caps at one send's worth so an idle queue cannot
+--- bank an unbounded burst; the 1e-6 tolerance absorbs float accrual.
 function Comms:flushQueue()
 	self:updateActivityState()
+	if ns.about then
+		ns.about:tick()
+	end
 	-- Hold all sends while restricted; the queue drains after. On entry,
 	-- drop partial inbound buffers: their missing chunks can never arrive.
 	if ns.Util.commsRestricted() then
@@ -599,11 +622,28 @@ function Comms:flushQueue()
 	local head = q.head
 	self.sendCredit = math.min(self.sendCredit + C.SEND_RATE * C.SEND_INTERVAL, math.max(C.SEND_RATE, 1))
 	local sent = 0
-	while (self.sendCredit - sent) >= (1 - 1e-6) and head <= q.tail do
-		local desc = q[head]
-		q[head] = nil
-		head = head + 1
-		self:sendDescriptor(desc)
+	while (self.sendCredit - sent) >= (1 - 1e-6) do
+		local desc
+		if head <= q.tail then
+			desc = q[head]
+			q[head] = nil
+			head = head + 1
+		else
+			-- "about" may use idle slots, so normal profiles always go first.
+			desc = self.aboutSend
+			self.aboutSend = nil
+		end
+		if not desc then
+			break
+		end
+		-- Dispatch must never throw past this point: with the slot already
+		-- popped, an uncaught error leaves head pointing at a hole and the
+		-- queue spins nil descriptors on every later tick. Report through
+		-- the normal error channel, then keep draining.
+		local ok, err = pcall(self.sendDescriptor, self, desc)
+		if not ok then
+			geterrorhandler()(err)
+		end
 		self.descRelease(desc)
 		sent = sent + 1
 	end
@@ -618,39 +658,46 @@ end
 -- Send primitives (all paced via the queue) ---------------------------------
 
 --- Send one raw chunk over an in-game addon channel.
--- @param text   string The chunk.
--- @param kind   string "CHANNEL" | "PARTY" | "RAID" | "INSTANCE_CHAT" | "WHISPER".
--- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
--- @return table The queued descriptor (callers may stamp leg-completion fields).
-function Comms:sendAddon(text, kind, target)
+--- @param text   string The chunk.
+--- @param kind   string "CHANNEL" | "PARTY" | "RAID" | "INSTANCE_CHAT" | "WHISPER".
+--- @param target any    Channel index (for CHANNEL) or player name (for WHISPER).
+--- @param meta   table? About leg bookkeeping { owner, route, frame, verb, id }.
+--- @return table The queued descriptor (callers may stamp leg-completion fields).
+--- Build a pooled send descriptor without queueing it.
+function Comms:makeDesc(text, mode, kind, target, meta)
+	local desc = self.descAcquire()
+	desc.mode = mode
+	desc.text = text
+	desc.kind = kind
+	desc.target = target
+	desc.enqueuedAt = GetTime()
+	if meta then
+		desc.aboutOwner, desc.aboutRoute, desc.aboutFrame =
+			meta.owner, meta.route, meta.frame
+		desc.aboutVerb, desc.aboutId = meta.verb, meta.id
+	end
+	return desc
+end
+
+function Comms:sendAddon(text, kind, target, meta)
 
 	if ns.Util.isPaused() then
 		return
 	end
 
-	local desc = self.descAcquire()
-	desc.mode = "addon"
-	desc.text = text
-	desc.kind = kind
-	desc.target = target
+	local desc = self:makeDesc(text, "addon", kind, target, meta)
 	desc.channelName = nil
-	desc.enqueuedAt = GetTime()
 	self:enqueue(desc)
 	return desc
 end
 
 --- Send one raw chunk to a Battle.net game account.
-function Comms:sendBNet(text, gameAccountID)
+function Comms:sendBNet(text, gameAccountID, meta)
 	if ns.Util.isPaused() then
 		return
 
 	end
-	local desc = self.descAcquire()
-	desc.mode = "bnet"
-	desc.text = text
-	desc.kind = "BNET"
-	desc.target = gameAccountID
-	desc.enqueuedAt = GetTime()
+	local desc = self:makeDesc(text, "bnet", "BNET", gameAccountID, meta)
 	self:enqueue(desc)
 	return desc
 end
@@ -659,14 +706,14 @@ end
 -- The final chunk's descriptor carries leg-completion fields for stats.
 
 --- Whether a leg of `n` chunks fits the queue bound. Legs drop whole: a
--- partial send is an incomplete at the far end plus wasted siblings.
+--- partial send is an incomplete at the far end plus wasted siblings.
 local function legFits(comms, n)
 	return comms:queueDepth() + n <= C.SEND_QUEUE_CAP
 end
 
--- @return number|false Chunk count queued, or false when the whole leg was
---   dropped for capacity. Callers must not mark work as sent on false.
-function Comms:sendChunksAddon(chunks, kind, target)
+--- @return number|false Chunk count queued, or false when the whole leg was
+---   dropped for capacity. Callers must not mark work as sent on false.
+function Comms:sendChunksAddon(chunks, kind, target, meta)
 	if ns.Util.isPaused() or (kind == "WHISPER" and not self:canWhisper(target)) then
 		return false
 	end
@@ -683,7 +730,7 @@ function Comms:sendChunksAddon(chunks, kind, target)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendAddon(chunks[i], kind, target)
+		local desc = self:sendAddon(chunks[i], kind, target, meta)
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes
@@ -694,8 +741,8 @@ function Comms:sendChunksAddon(chunks, kind, target)
 end
 
 --- Send a chunk list over a named custom channel (e.g. a previous-generation
--- channel for the version announcement). Resolves to an index at dispatch.
-function Comms:sendChunksChannel(chunks, channelName)
+--- channel for the version announcement). Resolves to an index at dispatch.
+function Comms:sendChunksChannel(chunks, channelName, meta)
 	if ns.Util.isPaused() then
 		return false
 	end
@@ -712,7 +759,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendAddon(chunks[i], "CHANNEL", nil)
+		local desc = self:sendAddon(chunks[i], "CHANNEL", nil, meta)
 		desc.channelName = channelName
 		if i == n then
 			desc.legStartedAt = startedAt
@@ -723,7 +770,7 @@ function Comms:sendChunksChannel(chunks, channelName)
 	return n
 end
 
-function Comms:sendChunksBNet(chunks, gameAccountID)
+function Comms:sendChunksBNet(chunks, gameAccountID, meta)
 	if ns.Util.isPaused() then
 		return false
 
@@ -740,7 +787,7 @@ function Comms:sendChunksBNet(chunks, gameAccountID)
 		bytes = bytes + #chunks[i]
 	end
 	for i = 1, n do
-		local desc = self:sendBNet(chunks[i], gameAccountID)
+		local desc = self:sendBNet(chunks[i], gameAccountID, meta)
 		if i == n then
 			desc.legStartedAt = startedAt
 			desc.legBytes = bytes
@@ -753,9 +800,9 @@ end
 -- Peer enumeration ----------------------------------------------------------
 
 --- Whether a BNet game account's character is our own faction. A
--- same-faction friend is reachable on the comm channel already — the BNet
--- leg exists to bridge factions, so they are not a valid relay. Unknown
--- or unreadable factions stay candidates.
+--- same-faction friend is reachable on the comm channel already — the BNet
+--- leg exists to bridge factions, so they are not a valid relay. Unknown
+--- or unreadable factions stay candidates.
 local function sameFactionAccount(acct)
 	local fname = acct.factionName
 	if not ns.Util.canWeUse(fname) or not fname then
@@ -769,8 +816,8 @@ local function sameFactionAccount(acct)
 end
 
 --- Invoke callback(gameAccountID) for every online WoW Battle.net friend in
--- the current region whose character is opposite-faction. These are our
--- cross-faction relays.
+--- the current region whose character is opposite-faction. These are our
+--- cross-faction relays.
 function Comms:eachBNetGameAccount(callback)
 	if ns.Util.isPaused() then
 		return
@@ -804,8 +851,8 @@ function Comms:eachBNetGameAccount(callback)
 end
 
 --- Online WoW Battle.net game account ids, memoized for C.BNET_MEMO
--- seconds; enumeration allocates client tables per account.
--- @return table List of gameAccountIDs (do not mutate, shared reference).
+--- seconds; enumeration allocates client tables per account.
+--- @return table List of gameAccountIDs (do not mutate, shared reference).
 function Comms:bnetAccounts()
 	local memo = self.bnetAcctMemo
 	if ns.Util.isPaused() then
@@ -841,7 +888,7 @@ local function peerEntry(peers, id)
 end
 
 --- Stamp `id` as confirmed: it sent us a parseable FRP message. Records
--- the remote addon version and protocol generation when they are carried.
+--- the remote addon version and protocol generation when they are carried.
 function Comms:bnetPeerSeen(id, version, proto)
 	if not id then
 		return
@@ -871,8 +918,8 @@ function Comms:isBNetConfirmed(id, now)
 end
 
 --- Pick the next online account due for a HELLO probe, round-robin over the
--- memoized list. Does not stamp; the caller marks the probe if it queued.
--- @return number|nil gameAccountID
+--- memoized list. Does not stamp; the caller marks the probe if it queued.
+--- @return number|nil gameAccountID
 function Comms:probeTarget(now)
 	local ids = self:bnetAccounts()
 	local n = #ids
@@ -917,7 +964,7 @@ function Comms:probeTarget(now)
 end
 
 --- Record that a HELLO probe was queued to `id`; the account is awaiting
--- an answer until BNET_PROBE_DEADLINE benches it.
+--- an answer until BNET_PROBE_DEADLINE benches it.
 function Comms:markAwaiting(id, now)
 	peerEntry(self.bnetPeers, id).probeSentAt = now
 end
@@ -965,6 +1012,13 @@ function Comms:onChatMsgAddon(prefix, text, channel, sender)
 		return
 	end
 
+	if not self.ownName then
+		local ownName = ns.Util.getUnitID("player")
+		if ns.Util.canWeUse(ownName) then
+			self.ownName = ns.Util.normalizeUnitName(ownName)
+		end
+	end
+
 	-- Our own channel/group echo does not need to be read. selfEchoUntil is
 	-- the /frp selfx loopback window: only whispers to self pass through.
 	if self.ownName and ns.Util.normalizeUnitName(sender) == self.ownName
@@ -1008,8 +1062,8 @@ function Comms:onBNChatMsgAddon(prefix, text, bnetIDGameAccount)
 end
 
 --- Drop `senderKey`'s chunks before reassembly for REJECTED_SENDER_TTL.
--- The protocol version lives inside the envelope, so version-rejected
--- senders need this marker to stop their chunk stream early.
+--- The protocol version lives inside the envelope, so version-rejected
+--- senders need this marker to stop their chunk stream early.
 function Comms:blockSender(senderKey)
 	if self.rejectedSenders[senderKey] then
 		return
@@ -1021,9 +1075,9 @@ function Comms:blockSender(senderKey)
 end
 
 --- Reassemble a chunk; hand full messages to the message handler with
--- `context` (a shared scratch table, valid only for this call chain).
+--- `context` (a shared scratch table, valid only for this call chain).
 --- The reassembly senderKey for a (medium, target) pair: BNet accounts
--- key as "bn:<id>", chat media key by raw sender name.
+--- key as "bn:<id>", chat media key by raw sender name.
 function Comms:senderKeyFor(medium, target)
 	if medium == "BNET" then
 		return "bn:" .. tostring(target)

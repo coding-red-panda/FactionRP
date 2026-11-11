@@ -11,9 +11,9 @@ local _, ns = ...
 local C = ns.Const
 
 --- Whether a debug category is enabled (directly or via `all`). The flag
--- query for non-hook call sites (Broadcast's `targets` gate, Stats).
--- @param category string One of Const.DEBUG_CATEGORIES keys.
--- @return boolean
+--- query for non-hook call sites (Broadcast's `targets` gate, Stats).
+--- @param category string One of Const.DEBUG_CATEGORIES keys.
+--- @return boolean
 function ns.debugEnabled(category)
 	local d = ns.db and ns.db.debug
 	return d ~= nil and (d.all or d[category]) == true
@@ -61,6 +61,13 @@ local function logPeer(text)
 	ns.Print("|cff66ccff[peers]|r " .. text)
 end
 
+local function logAbout(event, requestID, detail)
+--  tracing the "about" exchange
+	ns.Print("|cff66ccff[about]|r " .. tostring(event)
+		.. (requestID and (" [" .. tostring(requestID) .. "]") or "")
+		.. (detail and (" | " .. tostring(detail)) or ""))
+end
+
 -- [ns.* hook name] = { category, implementation }
 local HOOKS = {
 	debugReceive   = { "receive",   logReceive },
@@ -70,10 +77,11 @@ local HOOKS = {
 	debugFanout    = { "fanout",    logFanout },
 	debugChunk     = { "chunks",    logChunk },
 	debugPeer      = { "peers",     logPeer },
+	debugAbout     = { "peers",     logAbout },
 }
 
 --- Install enabled log hooks onto ns, remove disabled ones, and refresh
--- the stats collector. Safe before saved variables load.
+--- the stats collector. Safe before saved variables load.
 function ns.refreshDebugHooks()
 	for name, hook in pairs(HOOKS) do
 		ns[name] = ns.debugEnabled(hook[1]) and hook[2] or nil
@@ -384,6 +392,46 @@ ns.RegisterCommand("codec", function()
 	check("encode/decode round-trip (dialect 6)",
 		rt6 ~= nil and deepEqual(dial.decodeProfile(rt6, 6), CODEC_PROFILE))
 
+	-- The About payload shape: { profileID, about } with TRP3's numeric-keyed
+	-- template frames, through the stamped dialect path.
+	local aboutPayload = { profileID = "selftest",
+		about = { v = 1, TE = 2,
+			T2 = { [1] = { TX = "first" }, [2] = { TX = "second", IC = 134414 } } } }
+	local ab6 = dial.encodeProfile(aboutPayload, 6)
+	check("about payload round-trip (dialect 6)",
+		ab6 ~= nil and deepEqual(dial.decodeProfile(ab6, 6), aboutPayload))
+	check("about payload honors maxBytes",
+		dial.decodeProfile(ab6, 6, 1) == nil)
+
+	-- About verbs ride the same ctl codec. The AD raw field must carry
+	-- binary payloads (spaces, pipes, escapes, newlines) byte-for-byte.
+	local function ctlArgs(verb, fields, gen)
+		gen = gen or 6
+		local data = dial.buildCtlData(verb, fields, gen)
+		if not data then
+			return nil
+		end
+		local ctl = dial.parseCtl({ data = data, protoVer = gen })
+		return ctl and ctl.args
+	end
+	check("about wire format",
+		dial.buildCtlData("AQ", { id = "a-1", unitID = "U-R", pid = "p1" }, 6)
+			== "FRP1 AQ a-1 U-R p1")
+	check("about AQ round-trip",
+		deepEqual(ctlArgs("AQ", { id = "a-1", unitID = "U-R", pid = "p1" }),
+			{ id = "a-1", unitID = "U-R", pid = "p1" }))
+	local aoArgs = ctlArgs("AO", { id = "o-1", pid = "p", size = 32768 })
+	check("about AO size is numeric",
+		aoArgs ~= nil and aoArgs.size == 32768)
+	local blob = "frp\001\002payload | with spaces\nand\t tabs"
+	local adArgs = ctlArgs("AD", { id = "d-9", data = blob })
+	check("about AD raw payload round-trip",
+		adArgs ~= nil and adArgs.data == blob)
+	check("about AD requires data",
+		ctlArgs("AD", { id = "d-9" }) == nil)
+	check("about verbs absent from dialect 5",
+		dial.buildCtlData("AQ", { id = "a", unitID = "u", pid = "p" }, 5) == nil)
+
 	ns.Print(all and "codec selftest: all checks passed"
 		or "|cffff5555codec selftest: FAILURES - do not ship|r")
 end, "Verify the wire codec against LibDeflate known-answer vectors")
@@ -427,7 +475,7 @@ end, "Show version, cache size, pending sends, adapter and debug state")
 -- proves the CBOR path.
 
 --- Render a profile data table as flat "path = value" lines for display.
--- Sections get bracket headers; nested tables flatten with dotted paths.
+--- Sections get bracket headers; nested tables flatten with dotted paths.
 function ns.FormatProfileData(data)
 	if type(data) ~= "table" then
 		return tostring(data)
@@ -476,9 +524,9 @@ function ns.FormatProfileData(data)
 end
 
 --- Run a live loopback serve of a real register profile to ourselves over a
--- whisper leg at generation `gen`. Exercises the whole pipeline minus peer
--- discovery. Progress lands on ns.selfxRun for the debug UI.
--- @return table|nil The run state, or nil with a printed reason.
+--- whisper leg at generation `gen`. Exercises the whole pipeline minus peer
+--- discovery. Progress lands on ns.selfxRun for the debug UI.
+--- @return table|nil The run state, or nil with a printed reason.
 function ns.RunSelfx(gen, name)
 	local comms, b, dial = ns.comms, ns.broadcast, ns.Dialect
 	if not (comms and b and dial) then
@@ -651,3 +699,472 @@ function ns.RunSelfx(gen, name)
 	return run
 end
 
+-- /factionrp selfabout ---------------------------------------------------------
+--
+-- Live loopback for the About exchange against a directory profile: the pull
+-- is whispered to ourselves inside the selfEcho window. Covers the whole
+-- directed path (request -> AQ -> AO -> AG -> AD -> inject -> cache) minus
+-- channel discovery and BNet, which cannot echo to self. No tooltip needed.
+
+--- Drop remembered sources that point back at ourselves; a stale self
+--- source would route real pulls to a peer that never answers.
+local function selfaboutClearSources(about, ownKey)
+	for id, record in pairs(about.sources) do
+		if record.route and record.route.medium == "WHISPER"
+			and ns.Util.normalizeUnitName(record.route.target) == ownKey
+		then
+			about.sources[id] = nil
+		end
+	end
+end
+
+--- True when the register holds a servable About section for the unit.
+local function selfaboutHasAbout(unitID)
+	local reg = TRP3_API and TRP3_API.register
+	if not reg then
+		return false
+	end
+	local profile = reg.getUnitIDProfile(unitID)
+	local about = profile and profile.about
+	-- A numeric v and a 1-3 template mirror what extractAbout/validateAbout
+	-- demand on the wire; MSP profiles carry about = {} (data lives in
+	-- mspver fields).
+	local template = type(about) == "table"
+		and (about.TE == nil and 1 or about.TE) or nil
+	return type(about) == "table" and type(about.v) == "number"
+		and (template == 1 or template == 2 or template == 3)
+		and ns.Util.fieldsUsable(about, "TE")
+end
+
+--- Compact state dump for a failed run: whether the holder's AD leg ever
+--- queued, the last inbound chunk age under our sender key (a stale stamp
+--- means the echo never came back), rejectedSenders and stale reassembly
+--- buffers — the three "invisible drop" states — plus queue and serve.
+local function selfaboutDiag(about, comms, run, own)
+	local key = comms:senderKeyFor("WHISPER", own)
+	local last = comms.lastChunkFrom[key]
+	local blocked = comms.rejectedSenders[key]
+	local partials = 0
+	for _ in pairs(comms.assembler.buffers[key] or {}) do
+		partials = partials + 1
+	end
+	return (" | %s, %s, %s, %d partials, queue %d, serve %s"):format(
+		run.encoded and "data leg queued" or "no data leg",
+		last and ("lastchunk " .. math.floor(GetTime() - last) .. "s ago")
+			or "no inbound chunks",
+		blocked and ("blocked " .. math.ceil(blocked - GetTime()) .. "s left")
+			or "not blocked",
+		partials, comms:queueDepth(), tostring(about.serve ~= nil))
+end
+
+--- Post-run verification: decode the wire payload the holder actually sent
+--- (captured at the serve grant) and compare it against what the holder read
+--- before the pull and what the register holds after. A PASS means the About
+--- page crossed the wire byte-exact, not just that finish() reported cached.
+local function selfaboutVerify(adapter, run, unitID, profileID)
+	if type(run.encoded) ~= "string" then
+		return " | WARN no wire payload captured"
+	end
+	local ok, data = pcall(ns.Dialect.decodeProfile, run.encoded,
+		C.PROTO_MAJOR, C.ABOUT_MAX_RAW)
+	if not (ok and type(data) == "table") then
+		return " | WARN served payload failed to decode"
+	end
+	if data.profileID ~= profileID then
+		return " | WARN payload profileID mismatch"
+	end
+	if not deepEqual(data.about, run.preAbout) then
+		return " | WARN decoded About differs from served About"
+	end
+	if not deepEqual(data.about, adapter:extractAbout(unitID, profileID)) then
+		return " | WARN register About differs from wire"
+	end
+	return (" | verified %d bytes end-to-end"):format(#run.encoded)
+end
+
+--- Run a live loopback About pull against a directory profile. Progress
+--- lands on ns.selfaboutRun; the verdict is requestStatus's terminal reason.
+--- @param arg string? "Name-Realm", plus keywords "fixture" (inject a test
+---   About first), "reset" (clear cooldown/cache/self-sources) and "big"
+---   (lift the size bounds for the run).
+--- @return table|nil The run state, or nil with a printed reason.
+function ns.RunSelfabout(arg)
+	local comms, about = ns.comms, ns.about
+	if not (comms and about) then
+		return
+	end
+	if ns.selfaboutRun and not ns.selfaboutRun.done then
+		ns.Print("selfabout: a run is already in progress")
+		return
+	end
+	if ns.Util.isPaused() or ns.Util.commsRestricted() then
+		ns.Print("selfabout: comms paused right now, try again")
+		return
+	end
+	local adapter = ns.getAdapter(C.SOURCE.TRP3)
+	if not adapter or not ns.trp3About or not TRP3_API then
+		ns.Print("selfabout: no TRP3 adapter")
+		return
+	end
+	local own = ns.Util.getUnitID("player")
+	local ownKey = own and ns.Util.normalizeUnitName(own)
+	if not ownKey then
+		ns.Print("selfabout: own unitID unavailable")
+		return
+	end
+
+	-- Args: [Name-Realm] [fixture] [reset] [big] in any order. 'big' lifts the
+	-- protocol size bounds for the run; a real peer still enforces them.
+	local name, fixture, reset, big
+	for token in tostring(arg or ""):gmatch("%S+") do
+		local lower = token:lower()
+		if lower == "fixture" then
+			fixture = true
+		elseif lower == "reset" then
+			reset = true
+		elseif lower == "big" then
+			big = true
+		else
+			name = token
+		end
+	end
+	if reset then
+		about.cooldowns, about.cache = {}, {}
+		selfaboutClearSources(about, ownKey)
+	end
+
+	-- Target: the named unit, else a reservoir pick among directory records
+	-- whose register profile still carries an About (selfx's pattern).
+	local unitID
+	if name then
+		unitID = ns.Util.fullUnitName(name)
+	else
+		local n = 0
+		for g, rec in pairs(ns.db and ns.db.seen or {}) do
+			if g ~= UnitGUID("player") and rec.unitID
+				and adapter:canServe(rec.unitID)
+				and selfaboutHasAbout(rec.unitID)
+			then
+				n = n + 1
+				if math.random(n) == 1 then
+					unitID = rec.unitID
+				end
+			end
+		end
+	end
+	if unitID and ns.Util.normalizeUnitName(unitID) == ownKey then
+		ns.Print("selfabout: cannot pull our own About (the adapter rejects self)")
+		return
+	end
+	if not (unitID and adapter:canServe(unitID)) then
+		ns.Print("selfabout: no profile with an About (pass Name-Realm)")
+		return
+	end
+	local profileID = TRP3_API.register.getUnitIDProfileID(unitID)
+	if type(profileID) ~= "string" or profileID == "" then
+		ns.Print("selfabout: no profileID for " .. unitID)
+		return
+	end
+	if not selfaboutHasAbout(unitID) then
+		if not (fixture and name) then
+			ns.Print("selfabout: " .. unitID
+				.. " has no About section (pass 'fixture' to inject a test one)")
+			return
+		end
+		-- Opt-in fixture: minimal T2 template, versioned high so it wins
+		-- the register's freshness check. It stays in the register.
+		local ok, reason = adapter:injectAbout(unitID, profileID, {
+			v = 900001, TE = 2,
+			T2 = { [1] = { TX = "selfabout fixture biography" } },
+		}, adapter:captureAboutState(unitID, profileID))
+		if not ok then
+			ns.Print("selfabout: fixture inject failed ("
+				.. tostring(reason) .. ")")
+			return
+		end
+	end
+	local status = about:requestStatus(unitID, profileID)
+	if status ~= "idle" then
+		ns.Print("selfabout: not idle (" .. tostring(status) .. ")")
+		return
+	end
+	-- Seed the source map the way a real prior serve leaves it, then open
+	-- the whisper self-echo window for the exchange.
+	about:rememberSource(unitID, profileID,
+		{ medium = "WHISPER", senderName = own })
+	-- Invisible-drop states persist between runs: a malformed self-echo
+	-- blocks our sender key for REJECTED_SENDER_TTL and a stale partial
+	-- stream holds a reassembly slot. Clear both for a deterministic run.
+	local ownSenderKey = comms:senderKeyFor("WHISPER", own)
+	comms.rejectedSenders[ownSenderKey] = nil
+	comms.assembler:drop(ownSenderKey)
+	-- What the holder will serve, captured before the pull so the decoded
+	-- wire payload can be compared against it afterwards.
+	local run = { unitID = unitID, profileID = profileID, phase = "starting",
+		preAbout = adapter:extractAbout(unitID, profileID) }
+	local savedLimits
+	if big then
+		savedLimits = { raw = C.ABOUT_MAX_RAW, encoded = C.ABOUT_MAX_ENCODED,
+			timeout = C.ABOUT_TIMEOUT, chunks = C.REASSEMBLY_MAX_CHUNKS,
+			reasm = C.REASSEMBLY_TIMEOUT, queue = C.SEND_QUEUE_CAP }
+		C.ABOUT_MAX_RAW = 1048576
+		C.ABOUT_MAX_ENCODED = 524288
+		C.ABOUT_TIMEOUT = 1800
+		C.REASSEMBLY_MAX_CHUNKS = 8192
+		C.REASSEMBLY_TIMEOUT = 3600
+		C.SEND_QUEUE_CAP = 8192
+	end
+	local prevEcho, prevNoPull = comms.selfEchoUntil, ns.broadcast.selfxNoPull
+	local prevDebugAbout = ns.debugAbout
+	-- The window must outlive the worst-case drain: at SEND_RATE chunks per
+	-- second a full AD leg takes longer than a couple of minutes.
+	comms.selfEchoUntil = GetTime() + C.ABOUT_TIMEOUT
+	ns.broadcast.selfxNoPull = true
+	-- Narrate the exchange hops for the run so a failure names the dead leg.
+	ns.debugAbout = logAbout
+	-- Capture the wire bytes at the serve grant; a drain shorter than the
+	-- ticker interval would otherwise slip past unseen.
+	local prevSendData = about.sendData
+	about.sendData = function(self, serve)
+		run.encoded = serve and serve.encoded
+		return prevSendData(self, serve)
+	end
+	ns.selfaboutRun = run
+	local function cleanup()
+		selfaboutClearSources(about, ownKey)
+		comms.selfEchoUntil, ns.broadcast.selfxNoPull = prevEcho, prevNoPull
+		ns.debugAbout = prevDebugAbout
+		-- About:sendData is class-defined; nil drops the instance field so
+		-- the real method resolves again, even after a leaked run.
+		about.sendData = nil
+		if savedLimits then
+			C.ABOUT_MAX_RAW = savedLimits.raw
+			C.ABOUT_MAX_ENCODED = savedLimits.encoded
+			C.ABOUT_TIMEOUT = savedLimits.timeout
+			C.REASSEMBLY_MAX_CHUNKS = savedLimits.chunks
+			C.REASSEMBLY_TIMEOUT = savedLimits.reasm
+			C.SEND_QUEUE_CAP = savedLimits.queue
+		end
+	end
+	-- requestAbout re-validates the live tooltip context; patch it for the
+	-- synchronous call only so later UI updates see the real (empty) one.
+	-- pcall + nil-restore: an error inside requestAbout must not leak the
+	-- patch, and nil removes the instance field outright so the class
+	-- method resolves again even if a previous run left one behind.
+	ns.trp3About.getContext = function()
+		return { profileID = profileID, unitID = unitID }, nil, unitID, false, false
+	end
+	local ok, started = pcall(about.requestAbout, about, unitID, profileID)
+	ns.trp3About.getContext = nil
+	if not (ok and started) then
+		cleanup()
+		ns.selfaboutRun = nil
+		ns.Print("selfabout: requestAbout refused"
+			.. (ok and " (see /frp debug about)" or (" | " .. tostring(started))))
+		return
+	end
+	ns.Print(("selfabout: pulling %s about %s via self-whisper")
+		:format(unitID, tostring(profileID)))
+	local tries = 0
+	-- The exchange bounds itself (loadUntil ~= expectedChunks/SEND_RATE +
+	-- stall); the cap only covers the case where even that bookkeeping dies.
+	local maxTries = math.ceil(C.ABOUT_TIMEOUT) + 60
+	local ticker
+	ticker = C_Timer.NewTicker(1, function()
+		tries = tries + 1
+		local req = about.request
+		if req and req.key then
+			run.phase = req.phase
+		end
+		-- Discovery means the self route was not live; channel AR cannot
+		-- echo, so fail fast instead of waiting out the timeout.
+		if run.phase == "waiting" or run.phase == "discovering"
+			or run.phase == "discovery-wait"
+		then
+			ticker:Cancel()
+			about:finish("paused")
+			run.done = true
+			ns.Print("selfabout: FAIL | fell back to discovery "
+				.. "(self route not live)" .. selfaboutDiag(about, comms, run, own))
+			cleanup()
+			return
+		end
+		local st, _, reason = about:requestStatus(unitID, profileID)
+		if st == "cooldown" then
+			ticker:Cancel()
+			run.done = true
+			local pass = reason == "cached"
+			local detail = pass
+				and selfaboutVerify(adapter, run, unitID, profileID)
+				or selfaboutDiag(about, comms, run, own)
+			ns.Print(("selfabout: %s | phase %s, reason %s%s")
+				:format(pass and "PASS" or "FAIL",
+					tostring(run.phase), tostring(reason or "ok"), detail))
+			cleanup()
+			return
+		end
+		if st == "idle" and not req then
+			ticker:Cancel()
+			run.done = true
+			ns.Print("selfabout: FAIL | request vanished without a verdict"
+				.. selfaboutDiag(about, comms, run, own))
+			cleanup()
+			return
+		end
+		if tries > maxTries then
+			ticker:Cancel()
+			about:finish("paused")
+			run.done = true
+			ns.Print("selfabout: FAIL | timed out in phase "
+				.. tostring(run.phase) .. selfaboutDiag(about, comms, run, own))
+			cleanup()
+		end
+	end)
+	return run
+end
+
+ns.RegisterCommand("selfabout", function(arg)
+	ns.RunSelfabout(arg)
+end, "Loopback-test the About pull over a self whisper ([Name-Realm] [fixture] [reset] [big])")
+
+-- /frp echotest -----------------------------------------------------------
+--
+-- Delivery probe for the self-whisper path. Sends AD-shaped variants over
+-- the identical envelope/chunk/WHISPER route and reports which echo back as
+-- chunks vs which reach the About layer. Exists to answer "does the wire
+-- text itself kill delivery" after a handoff AD + timeout run: 'raw-chunk'
+-- is an envelope-invalid bare chunk (delivery control), 'ascii' a pure-text
+-- ctl payload, 'encoded' a real encodeProfile output, 'sweep' every byte
+-- value channel-escaped.
+ns.RegisterCommand("echotest", function()
+	local comms, about = ns.comms, ns.about
+	if not (comms and about and ns.broadcast) then
+		ns.Print("echotest: comms not ready")
+		return
+	end
+	if ns.echotestRun and not ns.echotestRun.done then
+		ns.Print("echotest: a run is already in progress")
+		return
+	end
+	local own = ns.Util.getUnitID("player")
+	local guid = ns.broadcast:senderGUID()
+	if not (own and guid) then
+		ns.Print("echotest: own identity unavailable")
+		return
+	end
+	local run = { done = false }
+	ns.echotestRun = run
+
+	local realEnc = ns.Dialect.encodeProfile({
+		profileID = "probe",
+		about = { v = 1, TE = 2, T2 = { [1] = { TX = "echotest" } } },
+	}, C.PROTO_MAJOR)
+	local bytes = {}
+	for b = 0, 255 do
+		bytes[#bytes + 1] = string.char(b)
+	end
+	local sweep = ns.Serializer.channelEncode(table.concat(bytes))
+	local variants = {
+		-- A parseable envelope under an unrecognized subject: exercises the
+		-- same binary chunk delivery, then drops at verifyDataLeg without
+		-- tripping blockSender (a malformed envelope would mute our own
+		-- sender key for REJECTED_SENDER_TTL and poison the run).
+		{ id = "et-raw", name = "raw-subj", subject = "_frptest",
+			payload = sweep },
+		{ id = "et-ascii", name = "ascii", payload = ("a"):rep(46) },
+		{ id = "et-bin", name = "encoded", payload = realEnc },
+		{ id = "et-sweep", name = "sweep", payload = sweep },
+		-- Sent via AddOn_Chomp directly with a dispatch callback: separates
+		-- "queued but never handed to the wire" (CTL backlog) from "sent
+		-- but no echo".
+		{ id = "et-ctl", name = "ctl-direct", payload = ("b"):rep(46),
+			direct = true },
+	}
+
+	-- Arrival is counted twice: the raw chunk string (delivery) and the
+	-- About dispatch (valid ctl). A variant that echoes but never reaches
+	-- About was corrupted or parse-dropped, not undelivered.
+	local chunkHits, hits = {}, {}
+	local prevHandle, prevOnMessage = comms.handleIncoming, about.onMessage
+	comms.handleIncoming = function(self, chunkString, context)
+		for _, v in ipairs(variants) do
+			if not chunkHits[v.id] and chunkString:find(v.id, 1, true) then
+				chunkHits[v.id] = true
+			end
+		end
+		return prevHandle(self, chunkString, context)
+	end
+	about.onMessage = function(self, ctl, msg, context)
+		if ctl and ctl.args and ctl.args.id then
+			hits[ctl.args.id] = true
+		end
+		return prevOnMessage(self, ctl, msg, context)
+	end
+
+	local prevEcho, prevNoPull = comms.selfEchoUntil, ns.broadcast.selfxNoPull
+	comms.selfEchoUntil = GetTime() + 60
+	ns.broadcast.selfxNoPull = true
+	local function cleanup()
+		comms.selfEchoUntil, ns.broadcast.selfxNoPull = prevEcho, prevNoPull
+		-- Both are class methods; nil drops the instance field so the real
+		-- one resolves again, even after a leaked run.
+		comms.handleIncoming = nil
+		about.onMessage = nil
+		run.done = true
+	end
+
+	local i = 0
+	local ticker
+	ticker = C_Timer.NewTicker(2, function()
+		i = i + 1
+		if i <= #variants then
+			local v = variants[i]
+			local text = ns.Dialect.buildCtlData("AD",
+				{ id = v.id, data = v.payload }, C.PROTO_MAJOR)
+			local message = ns.Serializer.buildMessage({
+				sender = guid, subject = v.subject or C.ABOUT_SUBJECT,
+				unitID = own, addon = "FRP",
+				originTime = time(), contentVersion = "0",
+				data = text })
+			local sent
+			if v.direct and AddOn_Chomp and AddOn_Chomp.SendAddonMessage then
+				-- The callback fires when CTL actually hands the message
+				-- to the wire, not when we queue it.
+				local t0 = GetTime()
+				AddOn_Chomp.SendAddonMessage(comms.prefix,
+					ns.Serializer.chunk(message)[1], "WHISPER", own,
+					"LOW", nil, function()
+						ns.Print(("echotest: ctl-direct on the wire +%.1fs")
+							:format(GetTime() - t0))
+					end)
+				sent = true
+			else
+				sent = comms:sendChunksAddon(ns.Serializer.chunk(message),
+					"WHISPER", own)
+			end
+			ns.Print(("echotest: sent %-9s | %s"):format(v.name,
+				sent and "queued" or "QUEUE FAILED"))
+		elseif i > #variants + 3 then
+			ticker:Cancel()
+			for _, v in ipairs(variants) do
+				ns.Print(("echotest: %-9s | chunk %s | about %s"):format(
+					v.name,
+					chunkHits[v.id] and "echoed" or "MISSING",
+					v.subject and "n/a (other subject)"
+						or (hits[v.id] and "reached" or "dropped")))
+			end
+			cleanup()
+		end
+	end)
+	return run
+end, "Probe which AD-leg variants echo over a self whisper")
+
+
+ns.RegisterCommand("aboutbtn", function()
+	ns.debugAboutBtn = not ns.debugAboutBtn
+	ns.Print("aboutbtn: same-faction gate "
+		.. (ns.debugAboutBtn and "bypassed (button can show)" or "restored"))
+	if ns.trp3About then
+		ns.trp3About:update()
+	end
+end, "Toggle the About pull button on same-faction profiles for UI testing")

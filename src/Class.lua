@@ -22,9 +22,9 @@
 local _, ns = ...
 
 --- Create a new class (prototype).
--- @param name  string  Human-readable class name, used for debugging.
--- @param base  table?  Optional parent class to inherit from.
--- @return table The new class. Call `Class:new(...)` to instantiate it.
+--- @param name  string  Human-readable class name, used for debugging.
+--- @param base  table?  Optional parent class to inherit from.
+--- @return table The new class. Call `Class:new(...)` to instantiate it.
 function ns.Class(name, base)
 	-- The class table doubles as the metatable for its instances. Instances
 	-- resolve missing keys through `__index = class`, and the class itself

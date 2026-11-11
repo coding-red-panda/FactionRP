@@ -37,7 +37,7 @@ local function packWire(serialized)
 	if not compressed then
 		return nil
 	end
-	return Serializer.channelEncode(compressed)
+	return Serializer.channelEncode(compressed), #serialized
 end
 
 local function unpackWire(encoded)
@@ -63,9 +63,9 @@ local function encodeProfile5(data)
 	return packWire(serialized)
 end
 
-local function decodeProfile5(encoded)
+local function decodeProfile5(encoded, maxBytes)
 	local serialized = unpackWire(encoded)
-	if not serialized then
+	if not serialized or (maxBytes and #serialized > maxBytes) then
 		return nil
 	end
 	local ok, value = LibSerialize:Deserialize(serialized)
@@ -85,9 +85,9 @@ local function encodeProfile6(data)
 	return packWire(serialized)
 end
 
-local function decodeProfile6(encoded)
+local function decodeProfile6(encoded, maxBytes)
 	local serialized = unpackWire(encoded)
-	if not serialized then
+	if not serialized or (maxBytes and #serialized > maxBytes) then
 		return nil
 	end
 	local ok, value = pcall(C_EncodingUtil.DeserializeCBOR, serialized)
@@ -104,6 +104,9 @@ end
 --   num       tonumber'd on parse; non-numeric tokens become nil
 --   gatesTail when empty at encode, this field and everything after it is
 --             omitted (REQ: unitID absent means guid travels alone)
+--   raw       terminal field only: captures the remainder verbatim, spaces
+--             and all, for payload-carrying verbs (About data legs, future
+--             consumer API). Never optional, never followed by other fields.
 -- Trailing args beyond the schema are ignored on parse, the append-only
 -- compatibility trick older readers rely on.
 
@@ -122,6 +125,31 @@ local ACK_SCHEMA = {
 }
 local GUID_SCHEMA = {
 	{ name = "guid" },
+}
+
+-- About exchange verbs (subject "_frpabout"). Generation 6 onwards only:
+-- the feature never shipped on earlier dialects, so older peers simply
+-- fail parseCtl on these verbs and drop the envelopes.
+local ABOUT_QUERY_SCHEMA = {
+	{ name = "id" },
+	{ name = "unitID" },
+	{ name = "pid" },
+}
+local ABOUT_OFFER_SCHEMA = {
+	{ name = "id" },
+	{ name = "pid" },
+	{ name = "size", num = true },
+}
+local ABOUT_ID_SCHEMA = {
+	{ name = "id" },
+}
+local ABOUT_DATA_SCHEMA = {
+	{ name = "id" },
+	{ name = "data", raw = true },
+}
+local ABOUT_NEG_SCHEMA = {
+	{ name = "id" },
+	{ name = "reason" },
 }
 
 Dialect.DIALECTS = {
@@ -143,6 +171,14 @@ Dialect.DIALECTS = {
 			ACK = ACK_SCHEMA,
 			OK = GUID_SCHEMA,
 			NOK = GUID_SCHEMA,
+			-- About service verbs on the "_frpabout" subject.
+			AQ = ABOUT_QUERY_SCHEMA,
+			AR = ABOUT_QUERY_SCHEMA,
+			AO = ABOUT_OFFER_SCHEMA,
+			AG = ABOUT_ID_SCHEMA,
+			AD = ABOUT_DATA_SCHEMA,
+			AN = ABOUT_NEG_SCHEMA,
+			AC = ABOUT_ID_SCHEMA,
 		},
 		encodeProfile = encodeProfile6,
 		decodeProfile = decodeProfile6,
@@ -172,9 +208,9 @@ function Dialect.floor()
 end
 
 --- Generation a `stamp`-stamped payload decodes in: min(stamp, own), when a
--- dialect exists for it. Senders encode min(their gen, ours) and stamp their
--- true gen, so the clamp recovers exactly what they wrote.
--- @return number|nil
+--- dialect exists for it. Senders encode min(their gen, ours) and stamp their
+--- true gen, so the clamp recovers exactly what they wrote.
+--- @return number|nil
 function Dialect.decodeGen(stamp)
 	local gen = math.min(stamp or 0, C.PROTO_MAJOR)
 	if Dialect.DIALECTS[gen] then
@@ -183,9 +219,9 @@ function Dialect.decodeGen(stamp)
 end
 
 --- Generation to encode a leg for a peer of known generation: min(own,
--- peerGen). nil peerGen means no information (channel send, unrecorded
--- peer): own gen. Returns nil when no dialect can carry the leg.
--- @return number|nil
+--- peerGen). nil peerGen means no information (channel send, unrecorded
+--- peer): own gen. Returns nil when no dialect can carry the leg.
+--- @return number|nil
 function Dialect.sendGen(peerGen)
 	local gen = math.min(C.PROTO_MAJOR, peerGen or C.PROTO_MAJOR)
 	if Dialect.DIALECTS[gen] then
@@ -196,9 +232,9 @@ end
 -- Control codec -----------------------------------------------------------------
 
 --- Serialize a control verb + named fields into the wire `data` string for
--- generation `gen`. Handshake verbs always emit the frozen FRP1 form.
--- @return string|nil nil when the dialect or verb is unknown, or a required
---   field is absent.
+--- generation `gen`. Handshake verbs always emit the frozen FRP1 form.
+--- @return string|nil nil when the dialect or verb is unknown, or a required
+---   field is absent.
 function Dialect.buildCtlData(verb, fields, gen)
 	if HANDSHAKE_VERBS[verb] then
 		if fields.version and fields.version ~= "" then
@@ -236,10 +272,10 @@ function Dialect.buildCtlData(verb, fields, gen)
 end
 
 --- Parse a control envelope's data field into a canonical record.
--- Handshake verbs parse under the frozen FRP1 rule; negotiated verbs parse
--- via the dialect selected by min(msg.protoVer, own).
--- @return table|nil { proto, verb, args = { <named fields> }, gen, handshake }
---   gen is the inbound decode generation: the dialect for replying.
+--- Handshake verbs parse under the frozen FRP1 rule; negotiated verbs parse
+--- via the dialect selected by min(msg.protoVer, own).
+--- @return table|nil { proto, verb, args = { <named fields> }, gen, handshake }
+---   gen is the inbound decode generation: the dialect for replying.
 function Dialect.parseCtl(msg)
 	local proto, verb, rest = msg.data:match("^(%S+)%s+(%S+)%s*(.*)$")
 	if not verb then
@@ -264,13 +300,26 @@ function Dialect.parseCtl(msg)
 		return nil
 	end
 	local args, n = {}, 0
-	for token in rest:gmatch("%S+") do
-		n = n + 1
-		local field = schema[n]
-		if not field then
+	local pos, lastEnd = 1, 0
+	for i, field in ipairs(schema) do
+		if field.raw then
+			-- Terminal field: the remainder after the previous token's
+			-- single-space separator, verbatim. Taking exactly one
+			-- separator char keeps leading whitespace inside the payload.
+			local data = rest:sub(lastEnd > 0 and lastEnd + 2 or 1)
+			if data ~= "" then
+				args[field.name] = data
+				n = i
+			end
 			break
 		end
+		local s, e = rest:find("%S+", pos)
+		if not s then
+			break
+		end
+		local token = rest:sub(s, e)
 		args[field.name] = field.num and tonumber(token) or token
+		n, pos, lastEnd = i, e + 1, e
 	end
 	for i, field in ipairs(schema) do
 		if not field.optional and i > n then
@@ -283,7 +332,8 @@ end
 -- Profile codec -----------------------------------------------------------------
 
 --- Encode a profile table into a wire-safe string for generation `gen`.
--- @return string|nil
+--- @return string|nil
+--- @return number|nil Serialized byte count for size checks
 function Dialect.encodeProfile(data, gen)
 	local dialect = Dialect.DIALECTS[gen]
 	if dialect then
@@ -292,11 +342,12 @@ function Dialect.encodeProfile(data, gen)
 end
 
 --- Decode a wire payload stamped `stamp`: clamps to min(stamp, own) and
--- dispatches to that dialect's codec.
--- @return table|nil
-function Dialect.decodeProfile(encoded, stamp)
+--- dispatches to that dialect's codec.
+--- @param maxBytes number? Maximum serialized size before deserialization
+--- @return table|nil
+function Dialect.decodeProfile(encoded, stamp, maxBytes)
 	local gen = Dialect.decodeGen(stamp)
 	if gen then
-		return Dialect.DIALECTS[gen].decodeProfile(encoded)
+		return Dialect.DIALECTS[gen].decodeProfile(encoded, maxBytes)
 	end
 end

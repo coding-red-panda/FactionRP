@@ -15,7 +15,7 @@ ns.name = addonName
 local PRINT_PREFIX = "|cff33ff99" .. C.ADDON_NAME .. "|r: "
 
 --- Print a chat message prefixed and coloured with the AddOn name.
--- Accepts any number of values, joined with spaces.
+--- Accepts any number of values, joined with spaces.
 function ns.Print(...)
 	local msg = strjoin(" ", tostringall(...))
 	local ui = ns.debugUI
@@ -47,8 +47,8 @@ frame:SetScript("OnEvent", function(_, event, ...)
 end)
 
 --- Register a handler for a game event.
--- @param event   string   The event name (e.g. "PLAYER_TARGET_CHANGED").
--- @param handler function The callback, invoked as handler(event, ...).
+--- @param event   string   The event name (e.g. "PLAYER_TARGET_CHANGED").
+--- @param handler function The callback, invoked as handler(event, ...).
 function ns.RegisterEvent(event, handler)
 	local handlers = eventHandlers[event]
 	if not handlers then
@@ -60,8 +60,8 @@ function ns.RegisterEvent(event, handler)
 end
 
 --- Convenience: run `fn` once the player has fully logged in (UI and saved
--- variables are ready). If login already happened, runs on the next frame.
--- @param fn function Callback invoked as fn().
+--- variables are ready). If login already happened, runs on the next frame.
+--- @param fn function Callback invoked as fn().
 function ns.OnLogin(fn)
 	if ns._loggedIn then
 		C_Timer.After(0, fn)
@@ -78,9 +78,9 @@ end
 ns.commands = {} -- [subcommand] = { handler = fn, help = string }
 
 --- Register a slash sub-command.
--- @param sub     string   The sub-command keyword (case-insensitive).
--- @param handler function Invoked as handler(argString).
--- @param help    string?  One-line description shown in the usage listing.
+--- @param sub     string   The sub-command keyword (case-insensitive).
+--- @param handler function Invoked as handler(argString).
+--- @param help    string?  One-line description shown in the usage listing.
 function ns.RegisterCommand(sub, handler, help)
 	ns.commands[sub:lower()] = { handler = handler, help = help }
 end

@@ -10,7 +10,7 @@ ns.Const = C
 -- Identity -----------------------------------------------------------------
 
 C.ADDON_NAME = "FactionRP"
-C.VERSION = "0.5.0"
+C.VERSION = "0.5.1"
 
 -- Wire-protocol generation, stamped into every envelope. Peers below the
 -- supported dialect floor are rejected; bump on breaking changes.
@@ -20,6 +20,30 @@ C.PROTO_MAJOR = 6
 
 -- Addon-message prefix registered with the client; max 16 characters.
 C.MSG_PREFIX = "FactionRP"
+
+-- "about" rides ordinary envelopes on the ABOUT_SUBJECT endpoint and speaks
+-- the FRP1 dialect verb schemas like every other service (see Dialects.lua).
+C.ABOUT_MAX_RAW = 131072
+C.ABOUT_MAX_ENCODED = 32768
+C.ABOUT_TIMEOUT = 600
+C.ABOUT_STALL = 30
+C.ABOUT_COOLDOWN = 60
+C.ABOUT_SOURCE_TTL = 600
+C.ABOUT_SOURCE_CAP = 64
+
+-- Estimated envelope + chunk header bytes around the ctl data field. Only
+-- feeds the requester-side drain estimate for the loading deadline.
+C.ABOUT_ENVELOPE_OVERHEAD = 160
+-- Covers "FRP1 " + verb + spaces + id (<=32).
+C.ABOUT_FRAME_OVERHEAD = 48
+-- Min gap between offer replies to discovery broadcasts.
+C.ABOUT_QUERY_INTERVAL = 2
+
+-- Freshness gate for pulled Abouts. TTL scales linearly with the
+-- advertised encoded size between these bounds.
+C.ABOUT_CACHE_TTL_MIN = 120
+C.ABOUT_CACHE_TTL_MAX = 900
+C.ABOUT_CACHE_CAP = 64
 
 -- Hidden channel for same-faction traffic, fixed since generation 6. The
 -- generation travels in the envelope, so all future generations share it.
@@ -41,7 +65,7 @@ C.CHUNK_SIZE = 220
 -- Outbound pacing: SEND_RATE chunks per second released on a SEND_INTERVAL
 -- tick via a fractional token bucket (credit capped at SEND_RATE).
 C.SEND_INTERVAL = 0.2
-C.SEND_RATE = 1
+C.SEND_RATE = 2
 
 -- Cap on the reusable send-descriptor pool; sends beyond it just allocate.
 C.POOL_SEND_DESC = 256
@@ -73,9 +97,13 @@ C.REFRESH_QUERY_INTERVAL = 10
 C.CTL_SUBJECT = "_frp"
 C.CTL_PROTO = "FRP1"
 
--- Seconds a partial multi-chunk message is kept before discard. Must exceed
--- the sender's worst-case drain at SEND_RATE.
-C.REASSEMBLY_TIMEOUT = 120
+-- Reserved envelope subject for the About exchange; never a GUID.
+C.ABOUT_SUBJECT = "_frpabout"
+
+-- Seconds a partial multi-chunk message is kept before discard, measured
+-- from its first chunk. Must exceed the sender's worst-case drain at
+-- SEND_RATE: the largest legit leg is the About data payload, ~150 chunks.
+C.REASSEMBLY_TIMEOUT = 180
 
 -- Bounds on inbound chunk streams. No legit send should
 -- come even close to these.
