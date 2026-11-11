@@ -2596,6 +2596,7 @@ function About:pickContact(request)
 	-- Sample the deck until an untried contact comes up. A re-yielded key
 	-- means the draw pile emptied, so every live contact was already asked.
 	local excluded = request.failedRoute
+	local skipped = {}
 	for _ = 1, 24 do
 		if not route then
 			route = ns.broadcast:reqContact(request.guid, now, excluded)
@@ -2604,10 +2605,14 @@ function About:pickContact(request)
 			break
 		end
 		local k = contactKey(route)
-		-- Dead or About-incapable draws stay spent, so sampling continues.
+		-- Dead or About-incapable draws stay spent; a repeat means wrap.
+		if skipped[k] then
+			break
+		end
 		if not (tried and tried[k]) and self:routeLive(route) then
 			break
 		end
+		skipped[k] = true
 		excluded, route = route, nil
 		if k:sub(1, 3) == "bn:" then
 			break
