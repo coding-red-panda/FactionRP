@@ -312,13 +312,13 @@ function Tooltip:updateAboutIndicator()
 		local context = about:getContext()
 		local guid = context and type(context.unitID) == "string"
 			and ns.Util.resolveGUID(context.unitID) or nil
-		if guid then
-			local aboutStatus, agot, atotal = ns.about and ns.about:reqStatus(guid)
+		if context then
+			local aboutStatus, agot, atotal = ns.about and ns.about:reqStatus(guid, context.unitID)
 			if aboutStatus == "receiving" then
 				status, got, total = "about", agot, atotal
 			elseif aboutStatus then
 				status = "about-wait"
-			else
+			elseif guid then
 				status, got, total = ns.broadcast:reqStatus(guid)
 			end
 		end
@@ -346,7 +346,7 @@ function Tooltip:updateAboutIndicator()
 	end
 	ind.status, ind.pct, ind.retry, ind.anchor = status, pct, retry, button
 	ind:ClearAllPoints()
-	ind:SetPoint("TOPRIGHT", button, "BOTTOMRIGHT", 0, -4)
+	ind:SetPoint("BOTTOMRIGHT", button, "TOPRIGHT", 0, 4)
 	paintPlate(ind, IND_MIN_WIDTH, status, pct, retry)
 end
 

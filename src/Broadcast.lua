@@ -2625,9 +2625,15 @@ end
 --- Tooltip-plate status for the subject's in-flight About pull, mirroring
 --- Broadcast:reqStatus: "receiving" plus chunk progress while AD legs land,
 --- "searching" in every pre-data phase; nil when the subject has no pull.
-function About:reqStatus(guid)
+function About:reqStatus(guid, unitID)
 	local request = self.request
-	if not request or request.guid ~= guid then
+	-- Match on guid or on the request's target unitID: profile pages resolve
+	-- a unitID without needing the subject observable (directory-browsed
+	-- subjects may have no resolvable guid at all).
+	if not request or (request.guid ~= guid
+		and Util.normalizeUnitName(request.unitID)
+			~= Util.normalizeUnitName(unitID))
+	then
 		return
 	end
 
