@@ -566,9 +566,17 @@ function ns.RunSelfx(gen, name)
 		ns.Print("selfx: no servable profile (pass a Name-Realm)")
 		return
 	end
+	-- Run inside the adapter's register sandbox so reads and injects hit
+	-- copies, not TRP3's live tables.
+	local sandboxed, sbReason = adapter:openSandbox(unitID)
+	if not sandboxed then
+		ns.Print("selfx: sandbox failed (" .. tostring(sbReason) .. ")")
+		return
+	end
 	local profile = adapter:extract(unitID)
 	if not profile then
 		ns.Print("selfx: extract failed for " .. unitID)
+		adapter:closeSandbox()
 		return
 	end
 	local snapshot = CopyTable(profile.data)
@@ -576,17 +584,20 @@ function ns.RunSelfx(gen, name)
 	local encoded = dial.encodeProfile(profile.data, gen)
 	if not encoded then
 		ns.Print("selfx: encode failed at gen " .. gen)
+		adapter:closeSandbox()
 		return
 	end
 	local own = ns.Util.getUnitID("player")
 	if not own then
 		ns.Print("selfx: own unitID unavailable")
+		adapter:closeSandbox()
 		return
 	end
 	-- Stage the receive: drop our cache copy so the store is NEW, mark the
 	-- subject as requested so the data leg is honoured, open the echo
 	-- window, and clear the per-sender REQ throttle repeat runs would hit.
 	ns.cache.entries[guid] = nil
+	local prevRecentReq = b.recentReqs[guid]
 	b.recentReqs[guid] = GetTime()
 	b.reqSenderAt[own] = nil
 	-- A selfx REQ must never trigger a register pull: suppress refreshQuery
@@ -650,7 +661,9 @@ function ns.RunSelfx(gen, name)
 		local entry = ns.cache:get(guid)
 		if entry then
 			ticker:Cancel()
+			adapter:closeSandbox()
 			b.selfxNoPull = nil
+			b.recentReqs[guid] = prevRecentReq
 			-- Snapshot match proves the codec byte-for-byte; a fresh
 			-- re-extract match tolerates register drift from refreshQuery
 			-- (v bumps, volatile fields) that the payload never carried.
@@ -680,7 +693,9 @@ function ns.RunSelfx(gen, name)
 		end
 		if tries > 120 then
 			ticker:Cancel()
+			adapter:closeSandbox()
 			b.selfxNoPull = nil
+			b.recentReqs[guid] = prevRecentReq
 			run.done = true
 			run.same = false
 			ns.Print(("selfx: FAIL | ctl %d, data never landed")
@@ -710,12 +725,8 @@ local function selfaboutClearSources(about, ownKey)
 end
 
 --- True when the register holds a servable About section for the unit.
-local function selfaboutHasAbout(unitID)
-	local reg = TRP3_API and TRP3_API.register
-	if not reg then
-		return false
-	end
-	local profile = reg.getUnitIDProfile(unitID)
+local function selfaboutHasAbout(adapter, unitID)
+	local profile = adapter:profileFor(unitID)
 	local about = profile and profile.about
 	-- A numeric v and a 1-3 template mirror what extractAbout/validateAbout
 	-- demand on the wire; MSP profiles carry about = {} (data lives in
@@ -838,7 +849,7 @@ function ns.RunSelfabout(arg)
 		for g, rec in pairs(ns.db and ns.db.seen or {}) do
 			if g ~= UnitGUID("player") and rec.unitID
 				and adapter:canServe(rec.unitID)
-				and selfaboutHasAbout(rec.unitID)
+				and selfaboutHasAbout(adapter, rec.unitID)
 			then
 				n = n + 1
 				if math.random(n) == 1 then
@@ -860,14 +871,22 @@ function ns.RunSelfabout(arg)
 		ns.Print("selfabout: no profileID for " .. unitID)
 		return
 	end
-	if not selfaboutHasAbout(unitID) then
+	-- Run inside the adapter's register sandbox so reads and injects hit
+	-- copies, not TRP3's live tables.
+	local sandboxed, sbReason = adapter:openSandbox(unitID)
+	if not sandboxed then
+		ns.Print("selfabout: sandbox failed (" .. tostring(sbReason) .. ")")
+		return
+	end
+	if not selfaboutHasAbout(adapter, unitID) then
 		if not (fixture and name) then
 			ns.Print("selfabout: " .. unitID
 				.. " has no About section (pass 'fixture' to inject a test one)")
+			adapter:closeSandbox()
 			return
 		end
 		-- Opt-in fixture: minimal T2 template, versioned high so it wins
-		-- the register's freshness check. It stays in the register.
+		-- the version check. Lands in the sandbox only.
 		local ok, reason = adapter:injectAbout(unitID, profileID, {
 			v = 900001, TE = 2,
 			T2 = { [1] = { TX = "selfabout fixture biography" } },
@@ -875,12 +894,14 @@ function ns.RunSelfabout(arg)
 		if not ok then
 			ns.Print("selfabout: fixture inject failed ("
 				.. tostring(reason) .. ")")
+			adapter:closeSandbox()
 			return
 		end
 	end
 	local status = about:requestStatus(unitID, profileID)
 	if status ~= "idle" then
 		ns.Print("selfabout: not idle (" .. tostring(status) .. ")")
+		adapter:closeSandbox()
 		return
 	end
 	-- Seed the source map the way a real prior serve leaves it, then open
@@ -926,6 +947,11 @@ function ns.RunSelfabout(arg)
 	end
 	ns.selfaboutRun = run
 	local function cleanup()
+		adapter:closeSandbox()
+		if run.reqKey then
+			about.cooldowns[run.reqKey] = run.prevCooldown
+			about.cache[run.reqKey] = run.prevCache
+		end
 		selfaboutClearSources(about, ownKey)
 		comms.selfEchoUntil, ns.broadcast.selfxNoPull = prevEcho, prevNoPull
 		ns.debugAbout = prevDebugAbout
@@ -958,6 +984,12 @@ function ns.RunSelfabout(arg)
 			.. (ok and " (see /frp debug about)" or (" | " .. tostring(started))))
 		return
 	end
+	-- Snapshot the request's cooldown/cache records so cleanup can undo
+	-- them.
+	local reqKey = about.request and about.request.key
+	run.reqKey = reqKey
+	run.prevCooldown = reqKey and about.cooldowns[reqKey]
+	run.prevCache = reqKey and about.cache[reqKey]
 	ns.Print(("selfabout: pulling %s about %s via self-whisper")
 		:format(unitID, tostring(profileID)))
 	local tries = 0
