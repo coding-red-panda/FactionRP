@@ -606,6 +606,7 @@ function ns.RunSelfx(gen, name)
 	-- subject as requested so the data leg is honoured, open the echo
 	-- window, and clear the per-sender REQ throttle repeat runs would hit.
 	ns.cache.entries[guid] = nil
+	local prevRecentReq = b.recentReqs[guid]
 	b.recentReqs[guid] = GetTime()
 	b.reqSenderAt[own] = nil
 	-- A selfx REQ must never trigger a register pull: suppress refreshQuery
@@ -671,6 +672,7 @@ function ns.RunSelfx(gen, name)
 			ticker:Cancel()
 			adapter:closeSandbox()
 			b.selfxNoPull = nil
+			b.recentReqs[guid] = prevRecentReq
 			-- Snapshot match proves the codec byte-for-byte; a fresh
 			-- re-extract match tolerates register drift from refreshQuery
 			-- (v bumps, volatile fields) that the payload never carried.
@@ -702,6 +704,7 @@ function ns.RunSelfx(gen, name)
 			ticker:Cancel()
 			adapter:closeSandbox()
 			b.selfxNoPull = nil
+			b.recentReqs[guid] = prevRecentReq
 			run.done = true
 			run.same = false
 			ns.Print(("selfx: FAIL | ctl %d, data never landed")
@@ -950,6 +953,10 @@ function ns.RunSelfabout(arg)
 	ns.selfaboutRun = run
 	local function cleanup()
 		adapter:closeSandbox()
+		if run.reqKey then
+			about.cooldowns[run.reqKey] = run.prevCooldown
+			about.cache[run.reqKey] = run.prevCache
+		end
 		selfaboutClearSources(about, ownKey)
 		comms.selfEchoUntil, ns.broadcast.selfxNoPull = prevEcho, prevNoPull
 		ns.debugAbout = prevDebugAbout
@@ -982,6 +989,12 @@ function ns.RunSelfabout(arg)
 			.. (ok and " (see /frp debug about)" or (" | " .. tostring(started))))
 		return
 	end
+	-- Snapshot the request's cooldown/cache records so cleanup can undo
+	-- them.
+	local reqKey = about.request and about.request.key
+	run.reqKey = reqKey
+	run.prevCooldown = reqKey and about.cooldowns[reqKey]
+	run.prevCache = reqKey and about.cache[reqKey]
 	ns.Print(("selfabout: pulling %s about %s via self-whisper")
 		:format(unitID, tostring(profileID)))
 	local tries = 0
