@@ -2366,7 +2366,7 @@ end
 function About:init()
 	self.sources, self.cooldowns, self.cache = {}, {}, {}
 	self.counter = 0
-	self.lastQueryAt = -math.huge
+	self.lastDenyAt = -math.huge
 end
 
 function About:routeLive(route)
@@ -2374,6 +2374,14 @@ function About:routeLive(route)
 		return false
 	end
 
+	-- About verbs need the current dialect. Older-gen peers can't serve.
+	if route.medium ~= "CHANNEL" then
+		local gen = ns.broadcast:sendGenForPeer(route.medium, route.target)
+		local dialect = gen and ns.Dialect.DIALECTS[gen]
+		if not (dialect and dialect.verbs.AQ) then
+			return false
+		end
+	end
 
 	if route.medium == "WHISPER" then
 		return field(route.target, 128) and ns.comms:canWhisper(route.target)
@@ -2596,7 +2604,8 @@ function About:pickContact(request)
 			break
 		end
 		local k = contactKey(route)
-		if not (tried and tried[k]) then
+		-- Dead or About-incapable draws stay spent, so sampling continues.
+		if not (tried and tried[k]) and self:routeLive(route) then
 			break
 		end
 		excluded, route = route, nil
@@ -2877,13 +2886,17 @@ function About:offer(id, unitID, profileID, route, discovery)
 		return
 	end
 
-	if GetTime() - self.lastQueryAt < C.ABOUT_QUERY_INTERVAL then
-		return
+	local owner = { deadline = GetTime() + C.ABOUT_STALL, id = id }
+
+	-- Denials are throttled. A servable offer is always answered.
+	local function deny(fields)
+		if GetTime() - self.lastDenyAt < C.ABOUT_QUERY_INTERVAL then
+			return
+		end
+		self.lastDenyAt = GetTime()
+		self:queue("AN", fields, route, owner)
 	end
 
-	self.lastQueryAt = GetTime()
-
-	local owner = { deadline = GetTime() + C.ABOUT_STALL, id = id }
 	if self.serve then
 		if discovery then
 			return
@@ -2892,7 +2905,7 @@ function About:offer(id, unitID, profileID, route, discovery)
 		if ns.debugAbout then
 			ns.debugAbout("offer rejected", id, "busy")
 		end
-		self:queue("AN", { id = id, reason = "busy" }, route, owner)
+		deny({ id = id, reason = "busy" })
 		return
 	end
 
@@ -2923,8 +2936,7 @@ function About:offer(id, unitID, profileID, route, discovery)
 			ns.debugAbout("offer rejected", id, tooLarge and "too-large" or "missing")
 		end
 
-		self:queue("AN", { id = id, reason = tooLarge and "too-large" or "missing" },
-			route, owner)
+		deny({ id = id, reason = tooLarge and "too-large" or "missing" })
 		return
 	end
 
@@ -2955,6 +2967,19 @@ function About:onMessage(ctl, msg, context)
 	local verb, args = ctl.verb, ctl.args
 	local id = args.id
 	if type(id) ~= "string" or #id > 32 then
+		return
+	end
+
+	-- Sandboxed (self-test): only our own echo may drive the exchange.
+	local adapter = ns.getAdapter(C.SOURCE.TRP3)
+	if adapter and adapter.sandbox
+		and (context.medium ~= "WHISPER"
+			or Util.normalizeUnitName(context.senderName)
+				~= Util.normalizeUnitName(ownUnitID()))
+	then
+		if ns.debugAbout then
+			ns.debugAbout("in " .. verb .. " dropped", id, "sandboxed")
+		end
 		return
 	end
 
@@ -3098,7 +3123,6 @@ function About:onMessage(ctl, msg, context)
 		end
 
 		local data = ns.Dialect.decodeProfile(encoded, msg.protoVer, C.ABOUT_MAX_RAW)
-		local adapter = ns.getAdapter(C.SOURCE.TRP3)
 		if type(data) ~= "table" or data.profileID ~= request.profileID
 			or type(data.about) ~= "table"
 			or not adapter or not adapter:injectAbout(request.unitID, request.profileID, data.about, request.aboutState)
