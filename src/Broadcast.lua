@@ -2607,6 +2607,7 @@ function About:pickContact(request)
 		local k = contactKey(route)
 		-- Dead or About-incapable draws stay spent; a repeat means wrap.
 		if skipped[k] then
+			route = nil
 			break
 		end
 		if not (tried and tried[k]) and self:routeLive(route) then
