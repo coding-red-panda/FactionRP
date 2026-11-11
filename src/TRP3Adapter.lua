@@ -18,6 +18,7 @@ local TRP3Adapter = ns.Class("TRP3Adapter", ns.ProfileAdapter)
 function TRP3Adapter:init()
 	ns.ProfileAdapter.init(self, C.SOURCE.TRP3)
 	self.refreshQueries = {}
+	self.sandbox = nil
 end
 
 --- True only when TRP3 is loaded and every API we depend on is present.
@@ -164,10 +165,158 @@ local function getLocalSections()
 	}
 end
 
+-- Register sandbox ------------------------------------------------------------
+--
+-- Self-tests open a sandbox on the target unit (openSandbox): the adapter
+-- deep-copies the character entry and bound profile, and these shims read
+-- and write the copies so the real pipeline runs with no TRP3 writes. Any
+-- other unit falls through to the live register.
+
+local function sandboxFor(self, unitID)
+	local sb = self.sandbox
+	return sb and sb.unitID == unitID and sb or nil
+end
+
+local function charKnown(self, unitID)
+	if sandboxFor(self, unitID) then
+		return true
+	end
+	return TRP3_API.register.isUnitIDKnown(unitID)
+end
+
+local function charAdd(self, unitID)
+	if sandboxFor(self, unitID) then
+		return
+	end
+	return TRP3_API.register.addCharacter(unitID)
+end
+
+local function charOf(self, unitID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		return sb.character
+	end
+	return TRP3_API.register.getUnitIDCharacter(unitID)
+end
+
+local function profileIDOf(self, unitID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		return sb.character.profileID
+	end
+	return TRP3_API.register.getUnitIDProfileID(unitID)
+end
+
+local function hasProfileFor(self, unitID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		return sb.character.profileID
+	end
+	return TRP3_API.register.hasProfile(unitID)
+end
+
+local function profileExistsFor(self, unitID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		return sb.character.profileID ~= nil and sb.profile ~= nil
+	end
+	return TRP3_API.register.profileExists(unitID)
+end
+
+local function profileOf(self, unitID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		return sb.profile, sb.character.profileID
+	end
+	return TRP3_API.register.getUnitIDProfile(unitID)
+end
+
+local function saveProfileIDFor(self, unitID, profileID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		if sb.character.profileID ~= profileID then
+			-- Rebinding a different profile starts it empty.
+			sb.character.profileID, sb.profile = profileID, {}
+		end
+		return
+	end
+	return TRP3_API.register.saveCurrentProfileID(unitID, profileID)
+end
+
+local function saveClientFor(self, unitID, client, clientVersion, msp,
+	extended, isTrial, extendedVersion, rpExperience, classID)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		local c = sb.character
+		c.client, c.clientVersion, c.msp = client, clientVersion, msp
+		c.extended, c.isTrial = extended, isTrial
+		c.extendedVersion, c.roleplayExperience = extendedVersion, rpExperience
+		c.classID = classID
+		return
+	end
+	return TRP3_API.register.saveClientInformation(unitID, client,
+		clientVersion, msp, extended, isTrial, extendedVersion,
+		rpExperience, classID)
+end
+
+local function shouldUpdateInfo(self, unitID, infoType, version)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		local section = sb.profile[infoType]
+		return not section or not section.v or section.v ~= version
+	end
+	return TRP3_API.register.shouldUpdateInformation(unitID, infoType, version)
+end
+
+local function saveInfoFor(self, unitID, infoType, data)
+	local sb = sandboxFor(self, unitID)
+	if sb then
+		sb.profile[infoType] = CopyTable(data)
+		return
+	end
+	return TRP3_API.register.saveInformation(unitID, infoType, data)
+end
+
+--- Deep-copy the unit's character entry and bound profile so a self-test
+--- runs the real read/write pipeline with zero TRP3 writes.
+function TRP3Adapter:openSandbox(unitID)
+	if not self:isAvailable() then
+		return false, "unavailable"
+	end
+	if self.sandbox then
+		return false, "busy"
+	end
+	local reg = TRP3_API.register
+	local ok, character, profile = pcall(function()
+		return reg.getUnitIDCharacter(unitID), reg.getUnitIDProfile(unitID)
+	end)
+	if not (ok and type(character) == "table" and type(profile) == "table") then
+		return false, "unavailable"
+	end
+	self.sandbox = { unitID = unitID,
+		character = CopyTable(character), profile = CopyTable(profile) }
+	return true
+end
+
+--- Drop the sandboxed copies; reads and writes hit the live register again.
+function TRP3Adapter:closeSandbox()
+	self.sandbox = nil
+end
+
+--- The unit's profile table: the sandboxed copy during a self-test, else
+--- the register's live table. For Debug's pre-flight checks.
+function TRP3Adapter:profileFor(unitID)
+	if not self:isAvailable() then
+		return nil
+	end
+	local ok, profile = pcall(profileOf, self, unitID)
+	return ok and profile or nil
+end
+
 --- Gather the three sections for a known unit plus the profile's mspver
 --- table (nil for non-MSP profiles) for the content version.
-local function getRegisteredSections(unitID)
-	local profile = TRP3_API.register.getUnitIDProfile(unitID)
+local function getRegisteredSections(self, unitID)
+	local profile = profileOf(self, unitID)
 	if not profile then
 		return nil
 	end
@@ -200,7 +349,7 @@ local function validateTRPVersion(value)
     return version
 end
 
-local function getClientInfo(unitID)
+local function getClientInfo(self, unitID)
 
 	local reg = TRP3_API.register
 	local g = TRP3_API.globals
@@ -222,9 +371,9 @@ local function getClientInfo(unitID)
 			classID = g.player_class_index,
 		}
 
-	elseif reg.getUnitIDCharacter and reg.isUnitIDKnown(unitID) then
+	elseif reg.getUnitIDCharacter and charKnown(self, unitID) then
 
-		local c = reg.getUnitIDCharacter(unitID)
+		local c = charOf(self, unitID)
 		info = {
 			client = c.client,
 			clientVersion = validateTRPVersion(c.clientVersion),
@@ -271,11 +420,11 @@ function TRP3Adapter:extract(unitID)
 		rawSections = getLocalSections()
 	else
 		-- Someone else: only possible if TRP3 already exchanged with them.
-		if not reg.isUnitIDKnown(unitID) or not reg.hasProfile(unitID) then
+		if not charKnown(self, unitID) or not hasProfileFor(self, unitID) then
 			return nil
 		end
-		profileID = reg.getUnitIDProfileID(unitID)
-		rawSections, mspver = getRegisteredSections(unitID)
+		profileID = profileIDOf(self, unitID)
+		rawSections, mspver = getRegisteredSections(self, unitID)
 	end
 
 	-- No profile id means the receiver cannot inject it; not shareable.
@@ -289,7 +438,7 @@ function TRP3Adapter:extract(unitID)
 		sections[key] = CopyTable(section)
 	end
 
-	local clientInfo = getClientInfo(unitID)
+	local clientInfo = getClientInfo(self, unitID)
 
 	return {
 		addon = self.name,
@@ -422,7 +571,7 @@ function TRP3Adapter:validateAbout(about)
 	return true
 end
 
-local function aboutProfileIsCurrent(unitID, profileID, allowPlayer)
+local function aboutProfileIsCurrent(self, unitID, profileID, allowPlayer)
 	if not ns.Util.canWeUse(unitID, profileID)
 		or type(unitID) ~= "string" or unitID == ""
 		or type(profileID) ~= "string" or profileID == ""
@@ -431,13 +580,12 @@ local function aboutProfileIsCurrent(unitID, profileID, allowPlayer)
 	end
 
 	local ok, current = pcall(function()
-		local reg = TRP3_API.register
 		if unitID == TRP3_API.globals.player_id then
 			return allowPlayer and TRP3_API.profile.getPlayerCurrentProfileID() == profileID
 		end
 
-		return reg.isUnitIDKnown(unitID) and reg.profileExists(unitID)
-			and reg.getUnitIDProfileID(unitID) == profileID
+		return charKnown(self, unitID) and profileExistsFor(self, unitID)
+			and profileIDOf(self, unitID) == profileID
 	end)
 	if not ok then
 		return false, "unavailable"
@@ -457,7 +605,7 @@ function TRP3Adapter:extractAbout(unitID, profileID)
 		return nil, "unavailable"
 	end
 
-	local current, reason = aboutProfileIsCurrent(unitID, profileID, true)
+	local current, reason = aboutProfileIsCurrent(self, unitID, profileID, true)
 	if not current then
 		return nil, reason
 	end
@@ -465,8 +613,8 @@ function TRP3Adapter:extractAbout(unitID, profileID)
 	local isPlayer = unitID == TRP3_API.globals.player_id
 	local ownSnapshot = false
 	local ok, about = pcall(function()
-		local reg = TRP3_API.register
 		if isPlayer then
+			local reg = TRP3_API.register
 			if type(TRP3_API.profile.getData) == "function" then
 				return TRP3_API.profile.getData("player/about")
 			end
@@ -474,7 +622,7 @@ function TRP3Adapter:extractAbout(unitID, profileID)
 			return reg.player.getAboutExchangeData()
 		end
 
-		local profile = reg.getUnitIDProfile(unitID)
+		local profile = profileOf(self, unitID)
 		return profile and profile.about
 	end)
 	if not ok then
@@ -520,7 +668,7 @@ function TRP3Adapter:extractAbout(unitID, profileID)
 	if not ok then
 		return nil, reason
 	end
-	current, reason = aboutProfileIsCurrent(unitID, profileID, true)
+	current, reason = aboutProfileIsCurrent(self, unitID, profileID, true)
 	if not current then
 		return nil, reason
 	end
@@ -539,12 +687,12 @@ function TRP3Adapter:captureAboutState(unitID, profileID)
 		return nil, "unavailable"
 	end
 
-	local current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	local current, reason = aboutProfileIsCurrent(self, unitID, profileID, false)
 	if not current then
 		return nil, reason
 	end
 	local ok, state = pcall(function()
-		local profile = TRP3_API.register.getUnitIDProfile(unitID)
+		local profile = profileOf(self, unitID)
 		if not ns.Util.fieldsUsable(profile, "about") then
 			return nil
 		end
@@ -559,7 +707,7 @@ function TRP3Adapter:captureAboutState(unitID, profileID)
 	if not ok or not state then
 		return nil, "unavailable"
 	end
-	current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	current, reason = aboutProfileIsCurrent(self, unitID, profileID, false)
 	if not current then
 		return nil, reason
 	end
@@ -586,7 +734,7 @@ function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
 		return false, "unavailable"
 	end
 
-	local current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	local current, reason = aboutProfileIsCurrent(self, unitID, profileID, false)
 	if not current then
 		return false, reason
 	end
@@ -596,11 +744,11 @@ function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
 		return false, reason
 	end
 
-	local ok, shouldUpdate = pcall(reg.shouldUpdateInformation, unitID, reg.registerInfoTypes.ABOUT, about.v)
+	local ok, shouldUpdate = pcall(shouldUpdateInfo, self, unitID, reg.registerInfoTypes.ABOUT, about.v)
 	if not ok or type(shouldUpdate) ~= "boolean" then
 		return false, "unavailable"
 	end
-	current, reason = aboutProfileIsCurrent(unitID, profileID, false)
+	current, reason = aboutProfileIsCurrent(self, unitID, profileID, false)
 	if not current then
 		return false, reason
 	end
@@ -623,7 +771,7 @@ function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
 		return true
 	end
 
-	ok = pcall(reg.saveInformation, unitID, reg.registerInfoTypes.ABOUT, CopyTable(about))
+	ok = pcall(saveInfoFor, self, unitID, reg.registerInfoTypes.ABOUT, CopyTable(about))
 	if not ok then
 		return false, "unavailable"
 	end
@@ -640,10 +788,9 @@ function TRP3Adapter:canServe(unitID)
 	if unitID == TRP3_API.globals.player_id then
 		return TRP3_API.profile.getPlayerCurrentProfileID() ~= nil
 	end
-	local reg = TRP3_API.register
-	return reg.isUnitIDKnown(unitID)
-		and reg.hasProfile(unitID)
-		and reg.getUnitIDProfileID(unitID) ~= nil
+	return charKnown(self, unitID)
+		and hasProfileFor(self, unitID)
+		and profileIDOf(self, unitID) ~= nil
 end
 
 --- Freshness metadata for the register's current copy: profile.time, the
@@ -653,21 +800,20 @@ function TRP3Adapter:profileMeta(unitID)
 	if not self:isAvailable() then
 		return nil
 	end
-	local reg = TRP3_API.register
 	if not unitID
 		or (TRP3_API.globals and unitID == TRP3_API.globals.player_id)
-		or not reg.isUnitIDKnown(unitID)
-		or not reg.profileExists(unitID)
+		or not charKnown(self, unitID)
+		or not profileExistsFor(self, unitID)
 	then
 		return nil
 	end
-	local profile = reg.getUnitIDProfile(unitID)
+	local profile = profileOf(self, unitID)
 	local cv = buildContentVersion({
 		characteristics = profile.characteristics,
 		character = profile.character,
 		misc = profile.misc,
-	}, profile.mspver, getClientInfo(unitID))
-	return { at = profile.time, pid = reg.getUnitIDProfileID(unitID), cv = cv }
+	}, profile.mspver, getClientInfo(self, unitID))
+	return { at = profile.time, pid = profileIDOf(self, unitID), cv = cv }
 end
 
 --- The profileID inside a TRP3 `data` payload.
@@ -689,8 +835,8 @@ function TRP3Adapter:isDefaultUnit(unitID)
 	local pid
 	if TRP3_API.globals and unitID == TRP3_API.globals.player_id then
 		pid = TRP3_API.profile.getPlayerCurrentProfileID()
-	elseif TRP3_API.register.isUnitIDKnown(unitID) then
-		pid = TRP3_API.register.getUnitIDProfileID(unitID)
+	elseif charKnown(self, unitID) then
+		pid = profileIDOf(self, unitID)
 	end
 	return isDefaultPid(pid)
 end
@@ -784,8 +930,8 @@ function TRP3Adapter:inject(unitID, data, classID)
 	local types = reg.registerInfoTypes
 
 	-- Ensure the character exists, mark them a TRP3 user, and bind the profile.
-	if not reg.isUnitIDKnown(unitID) then
-		reg.addCharacter(unitID)
+	if not charKnown(self, unitID) then
+		charAdd(self, unitID)
 	end
 	-- Minimal client info: enough for TRP3 to treat them as a TRP3 user.
 	-- (client, clientVersion, msp, extended, isTrial, extendedVersion, rpExperience, classID)
@@ -793,7 +939,7 @@ function TRP3Adapter:inject(unitID, data, classID)
 	-- //edit: preserving the real client informationen and the trp3 extended. Only overwrite if values/data changed
 	local info = data.clientInfo
 	local clientVersion = type(info) == "table" and validateTRPVersion(info.clientVersion)
-	local character = reg.getUnitIDCharacter(unitID)
+	local character = charOf(self, unitID)
 	local metadataChanged = false
 
 	if clientVersion and type(info.client) == "string" and info.client ~= "" then
@@ -823,8 +969,8 @@ function TRP3Adapter:inject(unitID, data, classID)
 			or character.classID ~= classToSave
 
 		if metadataChanged then
-			reg.saveClientInformation(
-				unitID, info.client, clientVersion, mspEnabled,
+			saveClientFor(
+				self, unitID, info.client, clientVersion, mspEnabled,
 				extended, info.isTrial, extendedVersion,
 				experience, classToSave
 			)
@@ -836,8 +982,8 @@ function TRP3Adapter:inject(unitID, data, classID)
 	if character
 		and (character.client == "Total RP 3" or character.client == "TRP3: Extended") and not validateTRPVersion(character.clientVersion)
 	then
-		reg.saveClientInformation(
-			unitID,
+		saveClientFor(
+			self, unitID,
 			nil,
 			nil,
 			character.msp,
@@ -853,38 +999,40 @@ function TRP3Adapter:inject(unitID, data, classID)
 
 	end
 
-	local oldProfileID = reg.getUnitIDProfileID(unitID)
+	local oldProfileID = profileIDOf(self, unitID)
 	local profileChanged = oldProfileID ~= data.profileID
 
-	if profileChanged or not reg.profileExists(unitID) then
-		reg.saveCurrentProfileID(unitID, data.profileID)
+	if profileChanged or not profileExistsFor(self, unitID) then
+		saveProfileIDFor(self, unitID, data.profileID)
 	end
 
 	--//edit: Skipping unnecessary updating and writing
 	local injected = false
 	local section = data.sections.characteristics
 
-	if section and reg.shouldUpdateInformation(unitID, types.CHARACTERISTICS, section.v) then
-		reg.saveInformation(unitID, types.CHARACTERISTICS, section)
+	if section and shouldUpdateInfo(self, unitID, types.CHARACTERISTICS, section.v) then
+		saveInfoFor(self, unitID, types.CHARACTERISTICS, section)
 		injected = true
 	end
 
 	section = data.sections.character
 
-	if section and reg.shouldUpdateInformation(unitID, types.CHARACTER, section.v) then
-		reg.saveInformation(unitID, types.CHARACTER, section)
+	if section and shouldUpdateInfo(self, unitID, types.CHARACTER, section.v) then
+		saveInfoFor(self, unitID, types.CHARACTER, section)
 		injected = true
 	end
 
 	section = data.sections.misc
 
-	if section and reg.shouldUpdateInformation(unitID, types.MISC, section.v) then
-		reg.saveInformation(unitID, types.MISC, section)
+	if section and shouldUpdateInfo(self, unitID, types.MISC, section.v) then
+		saveInfoFor(self, unitID, types.MISC, section)
 		injected = true
 
 	end
 
-	if metadataChanged and not injected and oldProfileID == data.profileID and TRP3_Addon and TRP3_Addon.Events	and TRP3_Addon.Events.REGISTER_DATA_UPDATED then
+	if metadataChanged and not injected and oldProfileID == data.profileID
+		and not sandboxFor(self, unitID)
+		and TRP3_Addon and TRP3_Addon.Events	and TRP3_Addon.Events.REGISTER_DATA_UPDATED then
 
 		TRP3_Addon:TriggerEvent(TRP3_Addon.Events.REGISTER_DATA_UPDATED,unitID, data.profileID, "unitID")
 	end
