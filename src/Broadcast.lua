@@ -2622,6 +2622,33 @@ function About:requestStatus(unitID, profileID)
 	return "idle"
 end
 
+--- Tooltip-plate status for the subject's in-flight About pull, mirroring
+--- Broadcast:reqStatus: "receiving" plus chunk progress while AD legs land,
+--- "searching" in every pre-data phase; nil when the subject has no pull.
+function About:reqStatus(guid, unitID)
+	local request = self.request
+	-- Match on guid or on the request's target unitID: profile pages resolve
+	-- a unitID without needing the subject observable (directory-browsed
+	-- subjects may have no resolvable guid at all).
+	if not request or (request.guid ~= guid
+		and Util.normalizeUnitName(request.unitID)
+			~= Util.normalizeUnitName(unitID))
+	then
+		return
+	end
+
+	if request.phase == "loading" then
+		local route = request.route
+		local got, total
+		if route and route.medium and route.target then
+			got, total = ns.comms.assembler:progress(
+				ns.comms:senderKeyFor(route.medium, route.target))
+		end
+		return "receiving", got, total
+	end
+	return "searching"
+end
+
 local function contactKey(route)
 	return route.medium == "BNET" and "bn:" .. route.target
 		or Util.normalizeUnitName(route.target)
