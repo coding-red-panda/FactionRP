@@ -217,6 +217,8 @@ function Tooltip:updateIndicator()
 		end
 		if not guid
 			and TRP3_CharacterTooltip and TRP3_CharacterTooltip:IsShown()
+			and type(TRP3_CharacterTooltip.targetType) == "string"
+			and ns.Util.isOppositeFaction(TRP3_CharacterTooltip.targetType)
 		then
 			local unitID = TRP3_CharacterTooltip.target
 			guid = type(unitID) == "string"
