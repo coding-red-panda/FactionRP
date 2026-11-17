@@ -443,7 +443,7 @@ ns.RegisterCommand("status", function()
 			end
 		end
 	end
-	ns.Print(("version %s | cache: %d | pending: %d | send queue: %d | relays: %d | contacts: %d | RP adapter: %s | debug: %s | latest announced peer version: %s"):format(
+	ns.Print(("version %s | cache: %d | pending: %d | send queue: %d | relays: %d | contacts: %d | RP adapter: %s | iccheck: %s | debug: %s | latest announced peer version: %s"):format(
 		C.VERSION,
 		ns.cache and ns.cache:count() or 0,
 		ns.scanner and #ns.scanner.receivedQueue or 0,
@@ -451,10 +451,31 @@ ns.RegisterCommand("status", function()
 		relays,
 		contacts,
 		adapter and adapter.name or "|cffff5555none|r",
+		ns.db and ns.db.icCheck ~= false and "on" or "off",
 		#enabledCats > 0 and table.concat(enabledCats, ",") or "off",
 		ns.broadcast and ns.broadcast.topPeerVersion or "none"
 	))
 end, "Show version, cache size, pending sends, adapter and debug state")
+
+-- /factionrp iccheck [on|off] ------------------------------------------------
+--
+-- The user-facing gate for profile and About pulls. On by default: pulls
+-- only run while the player is in character. Off lets them run while OOC.
+
+ns.RegisterCommand("iccheck", function(arg)
+	if not ns.db then
+		return
+	end
+	local sub = ns.Util.trim(arg or ""):lower()
+	if sub == "on" or sub == "off" then
+		ns.db.icCheck = (sub == "on")
+	else
+		ns.db.icCheck = ns.db.icCheck == false
+	end
+	ns.Print(("IC check %s: pulls %s while out of character"):format(
+		flagText(ns.db.icCheck ~= false),
+		ns.db.icCheck ~= false and "queue" or "run"))
+end, "Toggle requiring IC for profile pulls (on by default)")
 
 -- /factionrp selfx -----------------------------------------------------------
 --
@@ -764,6 +785,20 @@ local function selfaboutDiag(about, comms, run, own)
 		partials, comms:queueDepth(), tostring(about.serve ~= nil))
 end
 
+--- Progress-plate report for the run: what About:reqStatus reported to the
+--- button's bar while the AD leg drained. Samples taken by the run ticker.
+local function selfaboutBarReport(run)
+	if run.lastTotal then
+		return (" | bar %d samples %d/%d -> %d/%d")
+			:format(run.samples or 0, run.firstGot or 0, run.lastTotal,
+				run.lastGot, run.lastTotal)
+	end
+	if run.sawLoading then
+		return " | bar never reported during drain"
+	end
+	return " | bar untested (no drain)"
+end
+
 --- Post-run verification: decode the wire payload the holder actually sent
 --- (captured at the serve grant) and compare it against what the holder read
 --- before the pull and what the register holds after. A PASS means the About
@@ -792,8 +827,10 @@ end
 --- Run a live loopback About pull against a directory profile. Progress
 --- lands on ns.selfaboutRun; the verdict is requestStatus's terminal reason.
 --- @param arg string? "Name-Realm", plus keywords "fixture" (inject a test
----   About first), "reset" (clear cooldown/cache/self-sources) and "big"
----   (lift the size bounds for the run).
+---   About first), "pad" (like fixture but padded for a multi-chunk,
+---   multi-second drain so the bar's progress path is exercised), "reset"
+---   (clear cooldown/cache/self-sources) and "big" (lift the size bounds
+---   for the run).
 --- @return table|nil The run state, or nil with a printed reason.
 function ns.RunSelfabout(arg)
 	local comms, about = ns.comms, ns.about
@@ -813,7 +850,9 @@ function ns.RunSelfabout(arg)
 		ns.Print("selfabout: no TRP3 adapter")
 		return
 	end
-	if adapter:isPlayerIC() ~= true then
+	if adapter:isPlayerIC() ~= true
+		and (not ns.db or ns.db.icCheck ~= false)
+	then
 		ns.Print("selfabout: go IC first; pulls are gated on IC")
 		return
 	end
@@ -826,11 +865,13 @@ function ns.RunSelfabout(arg)
 
 	-- Args: [Name-Realm] [fixture] [reset] [big] in any order. 'big' lifts the
 	-- protocol size bounds for the run; a real peer still enforces them.
-	local name, fixture, reset, big
+	local name, fixture, reset, big, pad
 	for token in tostring(arg or ""):gmatch("%S+") do
 		local lower = token:lower()
 		if lower == "fixture" then
 			fixture = true
+		elseif lower == "pad" then
+			fixture, pad = true, true
 		elseif lower == "reset" then
 			reset = true
 		elseif lower == "big" then
@@ -891,10 +932,16 @@ function ns.RunSelfabout(arg)
 			return
 		end
 		-- Opt-in fixture: minimal T2 template, versioned high so it wins
-		-- the version check. Lands in the sandbox only.
+		-- the version check. Lands in the sandbox only. 'pad' stretches the
+		-- payload to ~3.5KB so the AD leg drains over several seconds —
+		-- long enough for progress samples.
+		local tx = "selfabout fixture biography"
+		if pad then
+			tx = tx .. string.rep(" - padded to stretch the drain", 120)
+		end
 		local ok, reason = adapter:injectAbout(unitID, profileID, {
 			v = 900001, TE = 2,
-			T2 = { [1] = { TX = "selfabout fixture biography" } },
+			T2 = { [1] = { TX = tx } },
 		}, adapter:captureAboutState(unitID, profileID))
 		if not ok then
 			ns.Print("selfabout: fixture inject failed ("
@@ -1008,6 +1055,19 @@ function ns.RunSelfabout(arg)
 		if req and req.key then
 			run.phase = req.phase
 		end
+		-- Sample the plate's own read path during the drain: the same
+		-- reqStatus(guid, unitID) -> assembler:progress call the About
+		-- button's bar makes each paint tick.
+		if req and req.phase == "loading" then
+			run.sawLoading = true
+			local _, got, total = about:reqStatus(
+				ns.Util.resolveGUID(unitID), unitID)
+			if got and total then
+				run.samples = (run.samples or 0) + 1
+				run.firstGot = run.firstGot or got
+				run.lastGot, run.lastTotal = got, total
+			end
+		end
 		-- Discovery means the self route was not live; channel AR cannot
 		-- echo, so fail fast instead of waiting out the timeout.
 		if run.phase == "waiting" or run.phase == "discovering"
@@ -1029,9 +1089,10 @@ function ns.RunSelfabout(arg)
 			local detail = pass
 				and selfaboutVerify(adapter, run, unitID, profileID)
 				or selfaboutDiag(about, comms, run, own)
-			ns.Print(("selfabout: %s | phase %s, reason %s%s")
+			ns.Print(("selfabout: %s | phase %s, reason %s%s%s")
 				:format(pass and "PASS" or "FAIL",
-					tostring(run.phase), tostring(reason or "ok"), detail))
+					tostring(run.phase), tostring(reason or "ok"), detail,
+					selfaboutBarReport(run)))
 			cleanup()
 			return
 		end
@@ -1057,7 +1118,7 @@ end
 
 ns.RegisterCommand("selfabout", function(arg)
 	ns.RunSelfabout(arg)
-end, "Loopback-test the About pull over a self whisper ([Name-Realm] [fixture] [reset] [big])")
+end, "Loopback-test the About pull over a self whisper ([Name-Realm] [fixture|pad] [reset] [big])")
 
 -- /frp echotest -----------------------------------------------------------
 --
@@ -1200,3 +1261,10 @@ ns.RegisterCommand("aboutbtn", function()
 		ns.trp3About:update()
 	end
 end, "Toggle the About pull button on same-faction profiles for UI testing")
+
+ns.RegisterCommand("aboutmesh", function()
+	ns.debugSameFactionMesh = not ns.debugSameFactionMesh
+	ns.Print("aboutmesh: About pull contacts "
+		.. (ns.debugSameFactionMesh and "same-faction club relays only"
+			or "any live route"))
+end, "Restrict About pull contact selection to same-faction club relays")
