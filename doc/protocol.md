@@ -319,7 +319,9 @@ Profiles move on demand. A pull is triggered when the user mouseovers or
 targets an opposite-faction player whose profile we do not hold fresh.
 Pulls only run while the player is in character — requested while out of
 character, entries sit in the queue and drain on going IC, and the
-tooltip indicator explains the gate. Requests are **serial**: at most
+tooltip indicator explains the gate. The gate is user-toggleable:
+`/frp iccheck off` (persisted in `FactionRPDB.icCheck`) lets pulls run
+while OOC. Requests are **serial**: at most
 one subject is in flight, and each subject is tried against exactly one
 contact. Picks come from per-tier shuffled
 decks so every contact serves at most one request per cycle:
@@ -425,11 +427,16 @@ rules (they just hit the per-requester channel throttle harder).
   interruption credit). The tooltip indicator reports request state:
   "Requesting profile in Ns" while the countdown runs, "Please wait... N%"
   while a serve is in flight, "No response. Try again in Ns" after a
-  contact-silent failure inside `REQ_COOLDOWN`.
-- Skip if the subject shares a club with us (community or guild): the RP
-  AddOn's own cross-faction whisper query already pulls that profile on
-  mouseover/target — a `REQ` would duplicate the native pull, whose landing
-  fills our cache via the received listener anyway.
+  contact-silent failure inside `REQ_COOLDOWN`, and "Go IC to request the
+  profile." while the player is OOC.
+- Subjects with a native pull path — shared club, BNet friend, or group
+  member — are filtered at selection, before the countdown arms or any
+  REQ schedules. The RP AddOn's own query on the same mouseover/target
+  already pulls them (TRP3's vernum exchange, deliverable over the shared
+  club's cross-faction whisper route or Chomp's automatic BNet reroute
+  for friends) — a `REQ` would duplicate the native pull, whose landing
+  fills our cache via the received listener anyway. The indicator stays
+  silent for them too: no countdown, no Go-IC hint.
 - Pending subjects queue dedup'd (`REQ_BACKLOG_CAP`=8, oldest dropped on
   overflow) and are re-validated on release — a subject cached or served
   while waiting never sends.
@@ -622,7 +629,7 @@ service traffic, not just profiles.
 
 Like profile pulls, an About request only starts while the player is in
 character — the button greys out and its tooltip explains the gate while
-out of character.
+out of character. The same `/frp iccheck` toggle lifts it.
 
 ```
 requester                              holder
@@ -669,6 +676,19 @@ drives the loading deadline (`queueDepth + expected chunks / SEND_RATE +
 ABOUT_STALL`). `ABOUT_TIMEOUT` bounds the whole exchange,
 `ABOUT_COOLDOWN` rate-limits button presses, and `ABOUT_SOURCE_*` tracks
 which peer served the profile so the About pull can prefer them.
+
+Injection guards: the served `about` must validate structurally, the
+register's state must not have changed since the request opened
+(`expectedState` — a mid-pull native fill rejects the serve outright),
+and a serve whose `about.v` is both lower than the held version and
+content-free is refused as stale — the only provably-stale shape, since
+a reset profile's version can legitimately restart below our cached one
+and we keep no wall-clock records to disambiguate. TRP3's
+`shouldUpdateInformation` updates on any version *difference* — correct
+for its first-party exchange where the subject's version is
+authoritative either direction, wrong for third-party serves whose copy
+can lag. A refused serve closes quietly as `cached`: the held data is
+already the wanted end-state.
 
 **Freshness cache.** A successful pull caches `(unitID, profileID)`
 metadata — it is a freshness gate, not a payload store. Repeat requests

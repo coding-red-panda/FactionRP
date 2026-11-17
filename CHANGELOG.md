@@ -8,10 +8,25 @@
   `SendAddonMessage`/`SendGameData` fallbacks are gone with it.
 
 ### Changed
-- You now have to be IC to pull profile data with FRP. You do not have to be IC to serve it.
+- You now have to be IC to pull profile data with FRP. You do not have to
+  be IC to serve it. `/frp iccheck` toggles the check (on by default) if
+  you'd rather pull while OOC.
 - Data legs are now participant-bound, so we no longer accept subject data from randos
   who didn't engage with us. Previously, as long as subject envelope was sane,
   we just ate the stranger candy.
+- No longer shows the "Go IC" tooltip hint for subjects TRP3 pulls
+  natively (club mates, BNet friends, groupmates); TRP3 does that
+  already.
+- Common contacts are now skipped at pick time too, not just at request
+  time, so the "Requesting profile in Ns" countdown no longer arms (or
+  sits dead) for subjects we were never going to pull.
+- A stale relay serve can no longer wipe your held About: serves are now
+  refused when they're both older than what we hold AND carry no
+  content. A lower version alone doesn't prove stale, since a reset
+  profile legitimately restarts low.
+
+### Bug Fixes
+- Fixed issue where progress bar didn't progress on about button.
 
 ### Removed
 - Protocol generation 5 support dropped. The LibSerialize dialect and the

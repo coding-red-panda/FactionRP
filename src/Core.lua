@@ -119,6 +119,9 @@ ns.RegisterEvent("ADDON_LOADED", function(_, loaded)
 	if type(FactionRPDB.seen) ~= "table" then
 		FactionRPDB.seen = {}
 	end
+	if FactionRPDB.icCheck == nil then
+		FactionRPDB.icCheck = true
+	end
 	ns.db = FactionRPDB
 end)
 

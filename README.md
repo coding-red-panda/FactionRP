@@ -51,10 +51,14 @@ When a player is "selected" (mouseover or target), two things can happen:
   only arms after `MOUSEOVER_REQ_DELAY` of sustained hover, and cancels
   mid-hover if the profile lands through another exchange. Pulls only run
   while the player is in character: requested while out of character,
-  entries queue and drain on going IC. The tooltip shows the request
+  entries queue and drain on going IC (`/frp iccheck` disables the gate).
+  The tooltip shows the request
   state: "Requesting profile in Ns", "Please wait... N%" while a serve is
   in flight, "No response. Try again in Ns" after a failed pull, or "Go
-  IC to request the profile." while out of character.
+  IC to request the profile." while out of character. Subjects with a
+  native pull path — shared-club members, BNet friends, groupmates — are
+  filtered at selection instead: no countdown arms, no REQ fires, and the
+  Go-IC hint stays silent, since the RP AddOn pulls them itself.
 
 A player is also "selected" indirectly: whenever the RP AddOn itself receives
 profile data over its own comm channels — like TRP3's exchange protocol, or MSP
@@ -112,11 +116,14 @@ so the same members do not absorb everyone's first requests.
    whispered `ACK` offers for `REQ_CHANNEL_WINDOW`, then `OK`s the
    best freshness claim; every other offer just expires.
 
-A pull is also skipped entirely for subjects sharing one of our clubs
-(community or guild): TRP3 already sends its own vernum query on
-mouseover/target, and the shared membership is exactly what makes that
-cross-faction whisper deliverable — a `REQ` would just duplicate the native
-pull (which fills our cache anyway once it lands, via the received listener).
+Common contacts are filtered out at selection, before the hover countdown
+or any REQ: shared-club members, BNet friends, and groupmates all have a
+pull path outside FRP — TRP3 sends its own vernum query on the same
+mouseover/target, deliverable over the shared-club whisper route or an
+automatic BNet reroute for friends (Chomp resolves a friend's game account
+and sends game data instead of a whisper). A `REQ` would just duplicate
+the native pull, which fills our cache anyway once it lands via the
+received listener.
 
 Requests deduplicate per subject (active + queued + a `REQ_COOLDOWN` cooldown) and
 wait in a small bounded FIFO. On the serving side, unicast REQs are
@@ -385,6 +392,9 @@ Running the base command with no (or an unrecognised) sub-command prints the usa
   and counter refresh. `churn [n]` samples the allocation rate over n seconds
   (default 10); `census` counts the suspect internal tables (queues, cache,
   reassembly buffers, roster maps, memos).
+* `/factionrp iccheck [on|off]` — Toggle the in-character requirement for
+  profile and About pulls. On by default: while out of character requests
+  queue and drain on going IC. Off lets them run regardless. Persisted.
 
 ### Debug Mode
 
