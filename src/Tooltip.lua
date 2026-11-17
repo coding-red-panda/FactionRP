@@ -188,8 +188,14 @@ function Tooltip:startIndicator()
 		TRP3_CharacterTooltip:HookScript("OnHide", anchorHidden)
 	end
 	C_Timer.NewTicker(0.25, function()
-		self:updateIndicator()
-		self:updateAboutIndicator()
+		-- Each plate updates independently: a fault in one must not starve
+		-- the other. pcall also surfaces the fault to the about debug log.
+		for _, fn in ipairs({ self.updateIndicator, self.updateAboutIndicator }) do
+			local ok, err = pcall(fn, self)
+			if not ok and ns.debugAbout then
+				ns.debugAbout("tick error", nil, tostring(err))
+			end
+		end
 	end)
 end
 
@@ -199,7 +205,7 @@ function Tooltip:updateIndicator()
 	-- the stock tooltip, TRP3's own frame when it has replaced it (TRP3 hides
 	-- GameTooltip while its character tooltip renders, so GameTooltip alone
 	-- would see nothing).
-	local anchor, guid
+	local anchor, guid, unitID
 	if not ns.Util.commsRestricted() then
 		if GameTooltip:IsShown() then
 			local unit = select(2, GameTooltip:GetUnit())
@@ -211,6 +217,7 @@ function Tooltip:updateIndicator()
 					local g = UnitGUID(unit)
 					if ns.Util.canWeUse(g) and g then
 						anchor, guid = GameTooltip, g
+						unitID = ns.Util.getUnitID(unit)
 					end
 				end
 			end
@@ -220,11 +227,12 @@ function Tooltip:updateIndicator()
 			and type(TRP3_CharacterTooltip.targetType) == "string"
 			and ns.Util.isOppositeFaction(TRP3_CharacterTooltip.targetType)
 		then
-			local unitID = TRP3_CharacterTooltip.target
-			guid = type(unitID) == "string"
-				and ns.Util.resolveGUID(unitID) or nil
+			local id = TRP3_CharacterTooltip.target
+			guid = type(id) == "string"
+				and ns.Util.resolveGUID(id) or nil
 			if guid then
 				anchor = TRP3_CharacterTooltip
+				unitID = id
 			end
 		end
 	end
@@ -233,13 +241,18 @@ function Tooltip:updateIndicator()
 	if guid then
 		-- An About pull outranks a profile pull on the same subject: it is
 		-- user-initiated, and the two pipelines can be in flight at once.
-		local aboutStatus, agot, atotal = ns.about and ns.about:reqStatus(guid)
+		local aboutStatus, agot, atotal
+		if ns.about then
+			-- ns.about and ns.about:reqStatus(...) would truncate to one
+			-- return inside the `and` expression; keep the call bare.
+			aboutStatus, agot, atotal = ns.about:reqStatus(guid, unitID)
+		end
 		if aboutStatus == "receiving" then
 			status, got, total = "about", agot, atotal
 		elseif aboutStatus then
 			status = "about-wait"
 		else
-			status, got, total = ns.broadcast:reqStatus(guid)
+			status, got, total = ns.broadcast:reqStatus(guid, unitID)
 			if not status and ns.scanner then
 				local frac = ns.scanner:hoverProgress(guid)
 				if frac then
@@ -274,9 +287,11 @@ function Tooltip:updateIndicator()
 	elseif width > IND_MAX_WIDTH then
 		width = IND_MAX_WIDTH
 	end
-	-- Above the anchor only when there is no room below.
+	-- Above the anchor only when there is no room below. bottom can be a
+	-- secret value on restricted-context anchors; comparison throws on it.
 	local bottom = anchor:GetBottom()
-	local above = bottom ~= nil and bottom < IND_HEIGHT + 20
+	local above = bottom ~= nil and ns.Util.canWeUse(bottom)
+		and bottom < IND_HEIGHT + 20
 	-- Steady state allocates and touches nothing.
 	if ind:IsShown() and ind.status == status and ind.pct == pct
 		and ind.retry == retry and ind.above == above
@@ -307,21 +322,44 @@ function Tooltip:updateAboutIndicator()
 		return
 	end
 
-	local status, got, total
+	local status, got, total, anchor
 	local about = not ns.Util.commsRestricted() and ns.trp3About
 	local button = about and about.button
-	if button and button:IsShown() then
-		local context = about:getContext()
-		local guid = context and type(context.unitID) == "string"
-			and ns.Util.resolveGUID(context.unitID) or nil
-		if context then
-			local aboutStatus, agot, atotal = ns.about and ns.about:reqStatus(guid, context.unitID)
-			if aboutStatus == "receiving" then
-				status, got, total = "about", agot, atotal
-			elseif aboutStatus then
+	local ctx, btnShown = nil, button and button:IsShown() or false
+	local aStatus, aGot, aTotal
+	if btnShown then
+		ctx = about:getContext()
+		local guid = ctx and type(ctx.unitID) == "string"
+			and ns.Util.resolveGUID(ctx.unitID) or nil
+		if ctx then
+			if ns.about then
+				aStatus, aGot, aTotal = ns.about:reqStatus(guid, ctx.unitID)
+			end
+			if aStatus == "receiving" then
+				status, got, total = "about", aGot, aTotal
+			elseif aStatus then
 				status = "about-wait"
 			elseif guid then
-				status, got, total = ns.broadcast:reqStatus(guid)
+				status, got, total = ns.broadcast:reqStatus(guid, ctx.unitID)
+			end
+		end
+		anchor = button
+	end
+	-- No register page up but a request in flight: park the plate on the
+	-- debug panel when open, so synthetic pulls (selfabout) exercise the
+	-- real paint path and live pulls stay observable off-page.
+	if not status and ns.debugUI and ns.debugUI:IsOpen() then
+		local request = ns.about and ns.about.request
+		if request then
+			aStatus, aGot, aTotal = ns.about:reqStatus(
+				request.guid, request.unitID)
+			if aStatus == "receiving" then
+				status, got, total = "about", aGot, aTotal
+			elseif aStatus then
+				status = "about-wait"
+			end
+			if status then
+				anchor = ns.debugUI.frame
 			end
 		end
 	end
@@ -342,13 +380,13 @@ function Tooltip:updateAboutIndicator()
 		retry = got
 	end
 	if ind:IsShown() and ind.status == status and ind.pct == pct
-		and ind.retry == retry and ind.anchor == button
+		and ind.retry == retry and ind.anchor == anchor
 	then
 		return
 	end
-	ind.status, ind.pct, ind.retry, ind.anchor = status, pct, retry, button
+	ind.status, ind.pct, ind.retry, ind.anchor = status, pct, retry, anchor
 	ind:ClearAllPoints()
-	ind:SetPoint("BOTTOMRIGHT", button, "TOPRIGHT", 0, 4)
+	ind:SetPoint("BOTTOMRIGHT", anchor, "TOPRIGHT", 0, 4)
 	paintPlate(ind, IND_MIN_WIDTH, status, pct, retry)
 end
 

@@ -120,6 +120,18 @@ function Scanner:onSelect(unit)
 		if not ns.Util.canWeUse(unitID) then
 			return
 		end
+		-- Club mates, BNet friends, and groupmates get pulled by TRP3's
+		-- own vernum query on this same selection — skip ours, and never
+		-- arm the hover countdown for them.
+		if adapter and adapter.name == C.SOURCE.TRP3
+			and ns.broadcast:nativePullPath(guid, unitID)
+		then
+			if ns.debugPeer then
+				ns.debugPeer("req " .. (unitID or tostring(guid))
+					.. " skipped (native pull path)")
+			end
+			return
+		end
 		if unit == "mouseover" then
 			self:hoverRequest(guid, unitID)
 		else
@@ -140,27 +152,15 @@ function Scanner:onSelect(unit)
 	self:share(adapter, unitID, guid)
 end
 
---- Pull an xfac profile now. Shared-club subjects are whisper-reachable
---- and TRP3 already sends its own vernum query on selection, so we skip
---- our pull for them.
+--- Pull an xfac profile now. Common contacts are filtered out at
+--- selection time (see onSelect); this still re-checks freshness in
+--- case a native pull landed meanwhile.
 function Scanner:xfacRequest(guid, unitID)
 	if ns.Util.commsRestricted() then
 		return
 	end
 	if ns.broadcast:profileFresh(guid) then
 		return -- held copy went fresh since selection; nothing to pull
-	end
-
-	local adapter = ns.getAvailableAdapter()
-	if adapter and adapter.name == C.SOURCE.TRP3
-		and (ns.Util.isCommunityClubMember(unitID)
-			or ns.Util.isGuildClubMember(unitID))
-	then
-		if ns.debugPeer then
-			ns.debugPeer("req " .. (unitID or tostring(guid))
-				.. " skipped (shared club, native pull)")
-		end
-		return
 	end
 	ns.broadcast:requestProfile(guid, unitID)
 end

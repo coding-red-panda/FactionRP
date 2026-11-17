@@ -590,7 +590,12 @@ function Broadcast:tick()
 			local stalled = (now - activity) > C.REQ_DATA_STALL
 			-- Deadline comes from the serve's first-chunk total: drain
 			-- estimate + jitter + queue backlog + stall grace.
-			local _, streamTotal = srcKey and comms.assembler:progress(srcKey)
+			local _, streamTotal
+			if srcKey then
+				-- `srcKey and progress(srcKey)` would truncate multi-return
+				-- inside the `and` expression; keep the call bare.
+				_, streamTotal = comms.assembler:progress(srcKey)
+			end
 			local deadline = req.at + C.REQ_DATA_TIMEOUT
 			if streamTotal then
 				req.jitter = req.jitter or (1 + math.random() * C.REQ_DATA_JITTER_PCT)
@@ -739,9 +744,13 @@ function Broadcast:tick()
 
 end
 
---- Whether pulls may run at all: the player must be IC. An absent
---- adapter or an unreadable state blocks.
+--- Whether pulls may run at all: the player must be IC unless the gate is
+--- disabled (`/frp iccheck`). An absent adapter or an unreadable state
+--- blocks.
 local function playerIC()
+	if ns.db and ns.db.icCheck == false then
+		return true
+	end
 	local adapter = ns.getAdapter(C.SOURCE.TRP3)
 	return adapter and adapter:isPlayerIC() == true
 end
@@ -750,9 +759,10 @@ end
 --- queued or any pre-grant state is in flight, "receiving" plus chunk
 --- progress once a serve is granted, "miss" plus seconds until the subject
 --- may be requested again inside the cooldown window after a failed pull.
---- "ooc" while the player is out of character; nil means nothing worth
+--- "ooc" while the player is out of character and FRP would run the pull;
+--- subjects with a native pull path never nag. nil means nothing worth
 --- showing.
-function Broadcast:reqStatus(guid)
+function Broadcast:reqStatus(guid, unitID)
 	local req = self.requests[guid]
 	if req then
 		if req.state == "awaiting-data" then
@@ -768,14 +778,22 @@ function Broadcast:reqStatus(guid)
 		return "asking"
 	end
 	if self.reqQueued[guid] then
-		return playerIC() and "asking" or "ooc"
+		if playerIC() then
+			return "asking"
+		end
+		if not self:nativePullPath(guid, unitID) then
+			return "ooc"
+		end
+		return nil
 	end
 	local missedAt = self.reqMissed[guid]
 	if missedAt then
 		return "miss", math.max(0, math.ceil(
 			C.REQ_COOLDOWN - (GetTime() - missedAt)))
 	end
-	if not playerIC() and not self:profileFresh(guid) then
+	if not playerIC() and not self:profileFresh(guid)
+		and not self:nativePullPath(guid, unitID)
+	then
 		return "ooc"
 	end
 	return nil
@@ -897,9 +915,10 @@ end
 
 --- Whether a queued contact could still be served right now. Entries go
 --- stale as confirmations decay, members go offline, or rosters shift.
-function Broadcast:deckLive(entry, now)
+function Broadcast:deckLive(entry, now, sameFactionOnly)
 	if entry.medium == "BNET" then
-		return ns.comms:isBNetConfirmed(entry.target, now)
+		return not sameFactionOnly
+			and ns.comms:isBNetConfirmed(entry.target, now)
 	end
 	local p = self.relays[entry.key]
 	return p ~= nil and p.conf ~= 0 and ns.comms:canWhisper(entry.target)
@@ -907,6 +926,7 @@ function Broadcast:deckLive(entry, now)
 		and Util.isClubMemberOnline(p.name)
 		and (Util.isGuildClubMember(p.name)
 			or Util.isCommunityClubMember(p.name))
+		and (not sameFactionOnly or Util.isSameFactionClubMember(p.name))
 end
 
 --- Fold newly-eligible contacts into the tier decks: confirmed BNet peers
@@ -935,13 +955,13 @@ end
 --- Pop the next live contact across the tier decks into spent. Tier
 --- order is cycle ordering, not exhaustion: once every tier's draw pile
 --- is drained all spent piles reshuffle back for the next cycle.
-function Broadcast:contactNext(now, excludedKey)
+function Broadcast:contactNext(now, excludedKey, sameFactionOnly)
 	for _ = 1, 2 do
 		for tier = 1, 3 do
 			local deck = self.contactDecks[tier]
 			while #deck.draw > 0 do
 				local entry = table.remove(deck.draw, 1)
-				if self:deckLive(entry, now) then
+				if self:deckLive(entry, now, sameFactionOnly) then
 					deck.spent[#deck.spent + 1] = entry
 					if entry.key ~= excludedKey then
 						return entry
@@ -970,12 +990,12 @@ end
 --- Pick the contact for a unicast REQ. A BNet-reachable subject wins
 --- outright. Otherwise the tier decks hand out BNet peers, then guild
 --- relays, then community relays.
-function Broadcast:reqContact(guid, now, excluded)
+function Broadcast:reqContact(guid, now, excluded, sameFactionOnly)
 	local comms = ns.comms
 -- //edit: "about" fallback skip the contact we already tried including deck entry
 	local excludedKey = excluded and (excluded.medium == "BNET" and "bn:" .. excluded.target
 		or Util.normalizeUnitName(excluded.target))
-	if guid then
+	if guid and not sameFactionOnly then
 		local info = C_BattleNet.GetGameAccountInfoByGUID(guid)
 		local id = info and info.gameAccountID
 		if id and "bn:" .. id ~= excludedKey and comms:isBNetConfirmed(id, now) then
@@ -983,7 +1003,7 @@ function Broadcast:reqContact(guid, now, excluded)
 		end
 	end
 	self:deckRefresh(now)
-	local entry = self:contactNext(now, excludedKey)
+	local entry = self:contactNext(now, excludedKey, sameFactionOnly)
 	if entry then
 		return { medium = entry.medium, target = entry.target }
 	end
@@ -1074,25 +1094,33 @@ function Broadcast:issueRequest(guid, unitID, now)
 	end
 end
 
---- Whether `guid` may be asked over the same-faction channel. Stranger
---- subjects only: a shared club, group membership, or BNet friendship
---- already provides a direct or native pull path, so broadcasting would
---- duplicate work the rest of the system already does.
-function Broadcast:channelEligible(guid, unitID)
-	if not unitID then
-		return false -- cannot prove non-membership without a name
+--- Whether the subject already has a pull path outside FRP's request
+--- pipeline: a shared club, a BNet friendship, or group membership all
+--- carry the profile natively, so pulling (or nagging about it) is
+--- redundant.
+function Broadcast:nativePullPath(guid, unitID)
+	if unitID
+		and (Util.isGuildClubMember(unitID)
+			or Util.isCommunityClubMember(unitID))
+	then
+		return true
 	end
-	if Util.isGuildClubMember(unitID) or Util.isCommunityClubMember(unitID) then
+	if not guid then
 		return false
 	end
 	local info = C_BattleNet.GetGameAccountInfoByGUID(guid)
 	if info and info.gameAccountID then
-		return false -- BNet friend: the unicast leg covers them
+		return true -- BNet friend: the unicast leg covers them
 	end
-	if Util.isGroupGuid(guid) then
-		return false -- group members exchange natively
-	end
-	return true
+	return Util.isGroupGuid(guid)
+end
+
+--- Whether `guid` may be asked over the same-faction channel. Stranger
+--- subjects only: a native pull path already covers them, so broadcasting
+--- would duplicate work the rest of the system already does.
+function Broadcast:channelEligible(guid, unitID)
+	-- Cannot prove non-membership without a name.
+	return unitID ~= nil and not self:nativePullPath(guid, unitID)
 end
 
 --- Local request suppression while the register still holds a copy we
@@ -2657,33 +2685,39 @@ end
 function About:pickContact(request)
 	local now = GetTime()
 	local tried = request.tried
-	local source = self.sources[request.key]
-	if source and now - source.at < C.ABOUT_SOURCE_TTL and self:routeLive(source.route)
-		and not (tried and tried[contactKey(source.route)])
-	then
-		return source.route
-	end
-	local route = ns.broadcast:reqContact(request.guid, now, request.failedRoute)
-	if route and route.medium == "BNET" then
-		-- reqContact's BNet leg only ever returns the subject themselves.
-		if self:routeLive(route) and not (tried and tried[contactKey(route)]) then
-			return route
+	-- ns.debugSameFactionMesh limits the pull to same-faction club relays:
+	-- no remembered source, no subject-self BNet or owner routes.
+	local sameMesh = ns.debugSameFactionMesh == true
+	local route
+	if not sameMesh then
+		local source = self.sources[request.key]
+		if source and now - source.at < C.ABOUT_SOURCE_TTL and self:routeLive(source.route)
+			and not (tried and tried[contactKey(source.route)])
+		then
+			return source.route
 		end
-		route = nil
-	end
+		route = ns.broadcast:reqContact(request.guid, now, request.failedRoute)
+		if route and route.medium == "BNET" then
+			-- reqContact's BNet leg only ever returns the subject themselves.
+			if self:routeLive(route) and not (tried and tried[contactKey(route)]) then
+				return route
+			end
+			route = nil
+		end
 
-	-- Owner path: the subject may itself be a confirmed club relay. conf is
-	-- the live-FRP marker, proto gates peers whose dialect lacks the verbs.
-	local ownerKey = Util.normalizeUnitName(request.unitID)
-	local p = ownerKey and ns.broadcast.relays[ownerKey]
-	if p and p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
-		and (p.proto or 0) >= C.PROTO_MAJOR
-		and ns.comms:canWhisper(p.name)
-		and Util.isClubMemberOnline(p.name)
-		and (Util.isGuildClubMember(p.name) or Util.isCommunityClubMember(p.name))
-		and not (tried and tried[ownerKey])
-	then
-		return { medium = "WHISPER", target = p.name }
+		-- Owner path: the subject may itself be a confirmed club relay. conf is
+		-- the live-FRP marker, proto gates peers whose dialect lacks the verbs.
+		local ownerKey = Util.normalizeUnitName(request.unitID)
+		local p = ownerKey and ns.broadcast.relays[ownerKey]
+		if p and p.conf ~= 0 and (now - p.conf) < C.RELAY_CONFIRM_TTL
+			and (p.proto or 0) >= C.PROTO_MAJOR
+			and ns.comms:canWhisper(p.name)
+			and Util.isClubMemberOnline(p.name)
+			and (Util.isGuildClubMember(p.name) or Util.isCommunityClubMember(p.name))
+			and not (tried and tried[ownerKey])
+		then
+			return { medium = "WHISPER", target = p.name }
+		end
 	end
 
 	-- Sample the deck until an untried contact comes up. A re-yielded key
@@ -2692,7 +2726,7 @@ function About:pickContact(request)
 	local skipped = {}
 	for _ = 1, 24 do
 		if not route then
-			route = ns.broadcast:reqContact(request.guid, now, excluded)
+			route = ns.broadcast:reqContact(request.guid, now, excluded, sameMesh)
 		end
 		if not route then
 			break
@@ -3221,12 +3255,27 @@ function About:onMessage(ctl, msg, context)
 		end
 
 		local data = ns.Dialect.decodeProfile(encoded, msg.protoVer, C.ABOUT_MAX_RAW)
-		if type(data) ~= "table" or data.profileID ~= request.profileID
-			or type(data.about) ~= "table"
-			or not adapter or not adapter:injectAbout(request.unitID, request.profileID, data.about, request.aboutState)
+		local injected, reason
+		if type(data) == "table" and data.profileID == request.profileID
+			and type(data.about) == "table" and adapter
 		then
+			injected, reason = adapter:injectAbout(request.unitID,
+				request.profileID, data.about, request.aboutState)
+		else
+			reason = "decode failed"
+		end
+		if reason == "stale-serve" then
+			-- The relay's copy was older than ours: the wanted end-state
+			-- already holds, so close quietly instead of reporting invalid.
 			if ns.debugAbout then
-				ns.debugAbout("data rejected", id, "decode or inject failed")
+				ns.debugAbout("data skipped", id, "held copy is newer")
+			end
+			self:finish(nil)
+			return
+		end
+		if not injected then
+			if ns.debugAbout then
+				ns.debugAbout("data rejected", id, reason)
 			end
 			self:finish("invalid")
 			return

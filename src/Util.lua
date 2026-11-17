@@ -575,6 +575,13 @@ function Util.isXfacClubMember(unitID)
 	return rosterReady and faction ~= nil and faction ~= selfFaction()
 end
 
+--- Whether a "Name-Realm" is a same-faction member of our clubs.
+function Util.isSameFactionClubMember(unitID)
+	local key = normalizeUnitName(unitID)
+	local faction = key and clubRoster().factionByName[key]
+	return rosterReady and faction ~= nil and faction == selfFaction()
+end
+
 --- Online opposite-faction members of our own guild (cross-faction guilds).
 --- @return table List of "Name-Realm" strings, deduplicated by GUID.
 function Util.xfacGuildMembers()

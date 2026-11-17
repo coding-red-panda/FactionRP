@@ -718,6 +718,29 @@ function TRP3Adapter:captureAboutState(unitID, profileID)
 	return state
 end
 
+--- True when an about carries no content beyond its version fields:
+--- every leaf string is empty and no media/scalar payload survives.
+local function aboutIsEmpty(about)
+	local stack = { about }
+	while #stack > 0 do
+		local t = table.remove(stack)
+		for k, v in pairs(t) do
+			if k ~= "v" and k ~= "TE" then
+				if type(v) == "table" then
+					stack[#stack + 1] = v
+				elseif type(v) == "string" then
+					if v:find("%S") then
+						return false
+					end
+				else
+					return false
+				end
+			end
+		end
+	end
+	return true
+end
+
 function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
 	if ns.Util.isPaused() then
 		return false, "paused"
@@ -766,6 +789,13 @@ function TRP3Adapter:injectAbout(unitID, profileID, about, expectedState)
 		then
 			return false, "profile-changed"
 		end
+	end
+	-- shouldUpdateInformation updates on any v difference; a lower-v
+	-- empty serve is the one provably-stale shape — refuse only that.
+	local held = profileOf(self, unitID)
+	local heldV = held and type(held.about) == "table" and held.about.v
+	if type(heldV) == "number" and about.v < heldV and aboutIsEmpty(about) then
+		return false, "stale-serve"
 	end
 	if not shouldUpdate then
 		return true
